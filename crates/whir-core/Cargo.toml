@@ -1,0 +1,12 @@
+[package]
+name = "whir-core"
+description = "Shared contracts for whir: documents, textures, wakers, file access, theme."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui.workspace = true
+windows.workspace = true
