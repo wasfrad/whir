@@ -190,6 +190,12 @@ impl Harness {
     }
 }
 
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self._dir);
+    }
+}
+
 const DATA: &[u8] = b"name,city,n\r\nAnn,Oslo,1\r\nBob,Rome,2\r\nCy,Lima,3\r\n";
 const NONE: Modifiers = Modifiers::NONE;
 
@@ -795,4 +801,52 @@ fn a_reparse_drops_edits_with_a_message() {
     assert!(!h.l().edits.can_undo());
     let msg = h.l().status.as_ref().unwrap().0.clone();
     assert!(msg.contains("unsaved edits were dropped"), "{msg}");
+}
+
+#[test]
+fn undo_after_a_resort_keeps_rows_consistent() {
+    use crate::sort::Direction;
+    let mut h = Harness::open("ui-resort", DATA);
+    sort_by(&mut h, 0, Direction::Descending); // Cy, Bob, Ann
+    h.select(1, 0);
+    h.act(crate::grid::Action::InsertRows { above: true });
+    h.select(1, 0);
+    h.type_text("Dee");
+    h.key(Key::Enter, NONE);
+    assert_eq!(column(&mut h, 0), ["Cy", "Dee", "Bob", "Ann"]);
+    // Sort again (another generation), then undo the typing and the insert.
+    sort_by(&mut h, 0, Direction::Ascending);
+    assert_eq!(column(&mut h, 0), ["Ann", "Bob", "Cy", "Dee"]);
+    h.key(Key::Z, Modifiers::CTRL);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Ann", "Bob", "Cy"]);
+    assert!(!h.doc.is_dirty());
+    // Redo: the row comes back (at the end: its old position was in another sort).
+    h.key(Key::Y, Modifiers::CTRL);
+    h.key(Key::Y, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Ann", "Bob", "Cy", "Dee"]);
+    let rows = h.l().rows();
+    let order_len = h.l().order.as_ref().unwrap().len();
+    assert_eq!(rows, order_len);
+    assert_eq!(h.l().edits.logical_len(3), 4);
+}
+
+#[test]
+fn copy_reads_edits_and_round_trips_through_paste() {
+    let mut h = Harness::open("ui-copy", DATA);
+    h.select(0, 1);
+    h.type_text("a");
+    h.key(Key::Enter, Modifiers::ALT);
+    h.type_text("b\t\"c\"");
+    h.key(Key::Enter, NONE);
+    range(&mut h, 0, 0, 1, 1);
+    let (text, cells, truncated) = h.l().copy_text().unwrap();
+    assert_eq!(text, "Ann\t\"a\nb\t\"\"c\"\"\"\nBob\tRome\n");
+    assert_eq!((cells, truncated), (4, false));
+    // Pasting whir's own copy elsewhere gives the same cells back.
+    h.select(1, 0);
+    paste(&mut h, &text);
+    assert_eq!(h.cell(1, 0), "Ann");
+    assert_eq!(h.cell(1, 1), "a\nb\t\"c\"");
+    assert_eq!(h.cell(2, 1), "Rome");
 }
