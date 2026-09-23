@@ -1,16 +1,18 @@
-//! Background column sort: one pass extracts keys, then a stable sort builds a
-//! permutation of data rows (4 bytes per row).
+//! Background column sort: one pass over the logical rows extracts keys, then
+//! a stable sort produces the display order (a [`RowKey`] per row).
 
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::Sender;
 
 use whir_core::Waker;
 
-use crate::dialect::Dialect;
-use crate::parse::{FieldBuf, RowReader};
-use crate::source::ByteSource;
+use crate::dialect::Encoding;
+use crate::edit::{MAX_EDIT_ROWS, RowKey};
+use crate::order::Order;
+use crate::parse::encode_cp1252_lossy;
+use crate::stream::{self, Field, StreamInput};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -24,19 +26,8 @@ pub struct SortSpec {
     pub direction: Direction,
 }
 
-pub struct Sorted {
-    pub spec: SortSpec,
-    /// Display order → data row (0 = first row after the header).
-    pub perm: Vec<u32>,
-    /// Data row → display order.
-    pub inverse: Vec<u32>,
-    /// Compared as numbers (vs. natural text order).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub numeric: bool,
-}
-
 pub enum SortMsg {
-    Done(Result<Sorted, String>),
+    Done(Result<Order, String>),
 }
 
 /// Refuse to hold more than this much key text.
@@ -45,18 +36,17 @@ const MAX_KEY_BYTES: usize = 512 << 20;
 const MAX_KEY_LEN: usize = 256;
 
 pub fn spawn(
-    source: Arc<dyn ByteSource>,
-    dialect: Dialect,
-    first_row_offset: u64,
+    input: StreamInput,
+    encoding: Encoding,
     spec: SortSpec,
-    cancel: Arc<AtomicBool>,
+    cancel: std::sync::Arc<AtomicBool>,
     tx: Sender<SortMsg>,
     waker: Waker,
 ) {
     std::thread::Builder::new()
         .name("csv-sort".into())
         .spawn(move || {
-            let result = run(&*source, dialect, first_row_offset, spec, &cancel);
+            let result = run(&input, encoding, spec, &cancel);
             if !cancel.load(AtomicOrdering::Relaxed) {
                 let _ = tx.send(SortMsg::Done(result));
                 waker.wake();
@@ -66,34 +56,39 @@ pub fn spawn(
 }
 
 fn run(
-    src: &dyn ByteSource,
-    dialect: Dialect,
-    offset: u64,
+    input: &StreamInput,
+    encoding: Encoding,
     spec: SortSpec,
     cancel: &AtomicBool,
-) -> Result<Sorted, String> {
-    let mut reader = RowReader::new(src, dialect, offset);
-    let mut fields = FieldBuf::default();
-    // Skip the header.
-    reader.next_row(&mut fields).map_err(|e| e.to_string())?;
-
+) -> Result<Order, String> {
+    let mut rows: Vec<RowKey> = Vec::new();
     let mut numbers: Vec<f64> = Vec::new();
     let mut arena: Vec<u8> = Vec::new();
     let mut spans: Vec<(u64, u32)> = Vec::new();
     let (mut numeric, mut non_empty) = (0u64, 0u64);
-    let mut n: u64 = 0;
-    while reader
-        .next_row(&mut fields)
-        .map_err(|e| e.to_string())?
-        .is_some()
-    {
-        if n % 65536 == 0 && cancel.load(AtomicOrdering::Relaxed) {
-            return Err("cancelled".into());
+    let mut text = Vec::new();
+    let mut error = None;
+    let completed = stream::for_each(input, cancel, |row, _| {
+        if row.key.is_header() {
+            return ControlFlow::Continue(());
         }
-        if n >= u32::MAX as u64 {
-            return Err("Too many rows to sort.".into());
+        if rows.len() as u64 >= MAX_EDIT_ROWS {
+            error = Some("Too many rows to sort.");
+            return ControlFlow::Break(());
         }
-        let field = fields.get(spec.column).unwrap_or(b"");
+        let field: &[u8] = match row.field(spec.column) {
+            Field::File(b) => b,
+            // Edited text compares like the file's own bytes.
+            Field::Text(s) => {
+                text.clear();
+                if encoding == Encoding::Windows1252 {
+                    encode_cp1252_lossy(s, &mut text);
+                } else {
+                    text.extend_from_slice(s.as_bytes());
+                }
+                &text
+            }
+        };
         let trimmed = field.trim_ascii();
         let num = parse_number(trimmed);
         if !trimmed.is_empty() {
@@ -105,11 +100,21 @@ fn run(
         spans.push((arena.len() as u64, key.len() as u32));
         arena.extend(key.iter().map(u8::to_ascii_lowercase));
         if arena.len() > MAX_KEY_BYTES {
-            return Err("This column is too large to sort in memory.".into());
+            error = Some("This column is too large to sort in memory.");
+            return ControlFlow::Break(());
         }
-        n += 1;
+        rows.push(row.key);
+        ControlFlow::Continue(())
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(e) = error {
+        return Err(e.into());
+    }
+    if !completed {
+        return Err("cancelled".into());
     }
 
+    let n = rows.len();
     let numeric_sort = non_empty > 0 && numeric * 10 >= non_empty * 9;
     let mut perm: Vec<u32> = (0..n as u32).collect();
     let key = |i: u32| {
@@ -151,16 +156,9 @@ fn run(
     if cancel.load(AtomicOrdering::Relaxed) {
         return Err("cancelled".into());
     }
-    let mut inverse = vec![0u32; perm.len()];
-    for (display, &row) in perm.iter().enumerate() {
-        inverse[row as usize] = display as u32;
-    }
-    Ok(Sorted {
-        spec,
-        perm,
-        inverse,
-        numeric: numeric_sort,
-    })
+    drop((numbers, arena, spans));
+    let ordered: Vec<RowKey> = perm.into_iter().map(|i| rows[i as usize]).collect();
+    Ok(Order::from_keys(Some(spec), ordered, numeric_sort))
 }
 
 /// "1,234.5", "$12", "-3e4", "45%" → numbers. Anything else → None.
@@ -248,44 +246,112 @@ mod tests {
         );
     }
 
-    struct Mem(Vec<u8>);
-    impl ByteSource for Mem {
-        fn len(&self) -> u64 {
-            self.0.len() as u64
-        }
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-            let o = (offset as usize).min(self.0.len());
-            let n = buf.len().min(self.0.len() - o);
-            buf[..n].copy_from_slice(&self.0[o..o + n]);
-            Ok(n)
-        }
+    fn keys(o: &Order) -> Vec<u64> {
+        o.keys().iter().map(|k| k.as_orig().unwrap()).collect()
+    }
+
+    fn sort(data: &[u8], column: usize, direction: Direction) -> Order {
+        let input = crate::testutil::input_for(data, Default::default());
+        let spec = SortSpec { column, direction };
+        run(&input, Encoding::Utf8, spec, &AtomicBool::new(false)).unwrap()
     }
 
     #[test]
     fn sorts_numeric_and_text_columns() {
-        let data = b"name,qty\nb,10\na,9\nc,\nd,100\n".to_vec();
-        let src = Mem(data);
+        let data = b"name,qty
+b,10
+a,9
+c,
+d,100
+";
+        let s = sort(data, 1, Direction::Ascending);
+        assert!(s.numeric);
+        assert_eq!(keys(&s), [1, 0, 3, 2]); // 9, 10, 100, (empty)
+        let s = sort(data, 0, Direction::Descending);
+        assert!(!s.numeric);
+        assert_eq!(keys(&s), [3, 2, 0, 1]); // d c b a
+        assert_eq!(s.display_of(RowKey::orig(3)), Some(0));
+        // Descending numbers: the empty cell still sorts last.
+        let s = sort(data, 1, Direction::Descending);
+        assert_eq!(keys(&s), [3, 0, 1, 2]); // 100, 10, 9, (empty)
+    }
+
+    #[test]
+    fn sorts_edited_values_and_added_rows() {
+        use crate::edit::{ColKey, Edits};
+        let data = b"name,qty
+b,10
+a,9
+";
+        let mut e = Edits::default();
+        e.set_base_rows(2);
+        let mut tx = e.tx("edit");
+        let added = tx.insert_rows(2, 1, None);
+        tx.set_cells([
+            (added[0], ColKey::orig(1), Some("5".into())),
+            (RowKey::orig(0), ColKey::orig(1), Some("50".into())),
+        ]);
+        let _ = tx.commit(None, None);
+        let input = crate::testutil::input_for(data, e.snapshot());
         let spec = SortSpec {
             column: 1,
             direction: Direction::Ascending,
         };
-        let s = run(&src, Dialect::default(), 0, spec, &AtomicBool::new(false)).unwrap();
-        assert!(s.numeric);
-        assert_eq!(s.perm, [1, 0, 3, 2]); // 9, 10, 100, (empty)
-        let spec = SortSpec {
-            column: 0,
-            direction: Direction::Descending,
-        };
-        let s = run(&src, Dialect::default(), 0, spec, &AtomicBool::new(false)).unwrap();
-        assert!(!s.numeric);
-        assert_eq!(s.perm, [3, 2, 0, 1]); // d c b a
-        assert_eq!(s.inverse[3], 0);
-        // Descending numbers: the empty cell still sorts last.
+        let s = run(&input, Encoding::Utf8, spec, &AtomicBool::new(false)).unwrap();
+        assert_eq!(s.keys(), [added[0], RowKey::orig(1), RowKey::orig(0)]);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// `cargo test -p whir-csv --release bench_ -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_find_sort() {
+        let mut data = b"id,name,city,amount,note\n".to_vec();
+        for i in 0..1_500_000u64 {
+            data.extend(
+                format!(
+                    "{i},Name {},\"City, {}\",{}.{:02},\"some note text {i}\"\n",
+                    i * 7919 % 100_003,
+                    i % 977,
+                    i * 31 % 100_000,
+                    i % 100
+                )
+                .as_bytes(),
+            );
+        }
+        let input = crate::testutil::input_for(&data, Default::default());
+        let t = std::time::Instant::now();
         let spec = SortSpec {
             column: 1,
-            direction: Direction::Descending,
+            direction: Direction::Ascending,
         };
-        let s = run(&src, Dialect::default(), 0, spec, &AtomicBool::new(false)).unwrap();
-        assert_eq!(s.perm, [3, 0, 1, 2]); // 100, 10, 9, (empty)
+        let o = run(&input, Encoding::Utf8, spec, &AtomicBool::new(false)).unwrap();
+        println!("sort {} rows: {:?}", o.len(), t.elapsed());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::time::Instant::now();
+        crate::find::spawn(
+            input,
+            Encoding::Utf8,
+            "city, 5".into(),
+            Default::default(),
+            tx,
+            Waker::noop(),
+        );
+        let mut n = 0;
+        for m in rx {
+            match m {
+                crate::find::FindMsg::Matches(v) => n += v.len(),
+                crate::find::FindMsg::Done { .. } => break,
+            }
+        }
+        println!(
+            "find {n} matches: {:?} ({} MB)",
+            t.elapsed(),
+            data.len() >> 20
+        );
     }
 }

@@ -11,3 +11,6 @@ whir-core.workspace = true
 egui.workspace = true
 windows.workspace = true
 memchr.workspace = true
+
+[dev-dependencies]
+egui = { workspace = true, features = ["default_fonts"] }

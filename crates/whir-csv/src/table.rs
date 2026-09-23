@@ -18,6 +18,8 @@ pub struct Block {
     cells: Vec<(u32, u32)>,
     /// Per row: range into `cells`.
     rows: Vec<(u32, u32)>,
+    /// Indices into `cells` of values cut at [`MAX_CELL_BYTES`] (ascending, rare).
+    truncated: Vec<u32>,
 }
 
 impl Block {
@@ -29,6 +31,7 @@ impl Block {
         let &(start, end) = self.rows.get(i)?;
         Some(RowView {
             block: self,
+            first: start,
             cells: &self.cells[start as usize..end as usize],
         })
     }
@@ -37,6 +40,8 @@ impl Block {
 #[derive(Clone, Copy)]
 pub struct RowView<'a> {
     block: &'a Block,
+    /// Index of this row's first cell in `block.cells`.
+    first: u32,
     cells: &'a [(u32, u32)],
 }
 
@@ -50,6 +55,17 @@ impl<'a> RowView<'a> {
             Some(&(s, e)) => &self.block.text[s as usize..e as usize],
             None => "",
         }
+    }
+
+    /// Cell `i` is longer than what was kept for display.
+    pub fn is_truncated(&self, i: usize) -> bool {
+        !self.block.truncated.is_empty()
+            && i < self.cells.len()
+            && self
+                .block
+                .truncated
+                .binary_search(&(self.first + i as u32))
+                .is_ok()
     }
 }
 
@@ -85,6 +101,9 @@ impl Table {
         encoding: Encoding,
         index: SharedIndex,
     ) -> Self {
+        // An index that already has quoting off (a save of such a file) isn't
+        // a restart: only a change seen later is.
+        let quoting_disabled_seen = index.read().map(|s| s.quoting_disabled).unwrap_or(false);
         Self {
             source,
             dialect,
@@ -94,7 +113,7 @@ impl Table {
             lru: VecDeque::new(),
             capacity: 96,
             fields: FieldBuf::default(),
-            quoting_disabled_seen: false,
+            quoting_disabled_seen,
         }
     }
 
@@ -104,9 +123,12 @@ impl Table {
         self.evict();
     }
 
+    /// Cheap: reads the shared state without copying the checkpoints.
     pub fn progress(&self) -> Progress {
-        let s = self.index.read().map(|s| s.clone()).unwrap_or_default();
-        Self::progress_of(&s)
+        match self.index.read() {
+            Ok(s) => Self::progress_of(&s),
+            Err(_) => Progress::default(),
+        }
     }
 
     fn progress_of(s: &IndexState) -> Progress {
@@ -208,6 +230,7 @@ impl Table {
             text: String::new(),
             cells: Vec::new(),
             rows: Vec::with_capacity(rows),
+            truncated: Vec::new(),
         };
         for _ in 0..rows {
             if reader.next_row(&mut self.fields)?.is_none() {
@@ -216,6 +239,9 @@ impl Table {
             let start = block.cells.len() as u32;
             for field in self.fields.iter() {
                 let s = block.text.len();
+                if field.len() > MAX_CELL_BYTES {
+                    block.truncated.push(block.cells.len() as u32);
+                }
                 let field = &field[..field.len().min(MAX_CELL_BYTES)];
                 decode_into(field, self.encoding, &mut block.text);
                 block.cells.push((s as u32, block.text.len() as u32));
@@ -223,5 +249,74 @@ impl Table {
             block.rows.push((start, block.cells.len() as u32));
         }
         Ok(block)
+    }
+
+    /// Every cell of `file_row`, untruncated (editing a long cell).
+    pub fn read_full_row(&mut self, file_row: u64) -> Option<Vec<String>> {
+        let (offset, limit) = {
+            let s = self.index.read().ok()?;
+            let b = (file_row / BLOCK_ROWS) as usize;
+            let offset = *s.checkpoints.get(b)?;
+            let limit = s.checkpoints.get(b + 1).copied().unwrap_or(if s.done {
+                s.total
+            } else {
+                s.scanned
+            });
+            (offset, limit)
+        };
+        let mut reader =
+            RowReader::with_limit(&*self.source, self.effective_dialect(), offset, limit);
+        let skip = file_row % BLOCK_ROWS;
+        if reader.skip_rows(skip, &mut self.fields).ok()? != skip {
+            return None;
+        }
+        reader.next_row(&mut self.fields).ok()??;
+        Some(
+            self.fields
+                .iter()
+                .map(|f| {
+                    let mut s = String::new();
+                    decode_into(f, self.encoding, &mut s);
+                    s
+                })
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index;
+    use crate::source::MemSource;
+    use std::sync::RwLock;
+
+    fn table_of(data: &[u8]) -> Table {
+        let src = MemSource::new(data.to_vec());
+        let idx = index::build_sync(&src, 0, Dialect::default());
+        Table::new(
+            Arc::new(src),
+            Dialect::default(),
+            Encoding::Utf8,
+            Arc::new(RwLock::new(idx)),
+        )
+    }
+
+    #[test]
+    fn long_cells_are_truncated_and_read_in_full() {
+        let long = "x".repeat(MAX_CELL_BYTES + 10);
+        let data = format!("a,b\n1,{long}\n2,3\n");
+        let mut t = table_of(data.as_bytes());
+        let (b, i) = t.row(1).unwrap();
+        let row = b.row(i).unwrap();
+        assert!(!row.is_truncated(0));
+        assert!(row.is_truncated(1));
+        assert_eq!(row.cell(1).len(), MAX_CELL_BYTES);
+        let (b, i) = t.row(2).unwrap();
+        assert!(!b.row(i).unwrap().is_truncated(1));
+        let full = t.read_full_row(1).unwrap();
+        assert_eq!(full, ["1".to_owned(), long]);
+        assert_eq!(t.read_full_row(0).unwrap(), ["a", "b"]);
+        assert!(t.read_full_row(3).is_none());
     }
 }

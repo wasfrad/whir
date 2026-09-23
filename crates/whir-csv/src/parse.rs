@@ -11,15 +11,35 @@ use crate::source::ByteSource;
 pub struct FieldBuf {
     pub data: Vec<u8>,
     ends: Vec<usize>,
+    /// Fields that started with a quote (a save keeps the original quoting
+    /// style of fields it rewrites): bits for the first 64, then indices.
+    /// A bitmask keeps the parser's hot loop free of per-field pushes.
+    quoted_mask: u64,
+    quoted_more: Vec<u32>,
+    /// The row ended inside a quoted field (an unclosed quote at the end of the
+    /// file): its raw bytes can't be followed by more rows.
+    pub open_quote: bool,
 }
 
 impl FieldBuf {
     pub fn clear(&mut self) {
         self.data.clear();
         self.ends.clear();
+        self.quoted_mask = 0;
+        self.quoted_more.clear();
+        self.open_quote = false;
     }
 
-    fn end_field(&mut self) {
+    #[inline]
+    fn end_field(&mut self, quoted: bool) {
+        if quoted {
+            let i = self.ends.len();
+            if i < 64 {
+                self.quoted_mask |= 1 << i;
+            } else {
+                self.quoted_more.push(i as u32);
+            }
+        }
         self.ends.push(self.data.len());
     }
 
@@ -31,6 +51,15 @@ impl FieldBuf {
         let end = *self.ends.get(i)?;
         let start = if i == 0 { 0 } else { self.ends[i - 1] };
         Some(&self.data[start..end])
+    }
+
+    /// Field `i` was written in quotes.
+    pub fn quoted(&self, i: usize) -> bool {
+        if i < 64 {
+            self.quoted_mask >> i & 1 == 1
+        } else {
+            self.quoted_more.binary_search(&(i as u32)).is_ok()
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
@@ -49,7 +78,8 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
     let mut i = 0;
     loop {
         // Quoted section at field start.
-        if d.quoting && s.get(i) == Some(&b'"') {
+        let quoted = d.quoting && s.get(i) == Some(&b'"');
+        if quoted {
             i += 1;
             loop {
                 match memchr::memchr(b'"', &s[i..]) {
@@ -58,7 +88,8 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
                             return None;
                         }
                         out.data.extend_from_slice(&s[i..]);
-                        out.end_field();
+                        out.end_field(true);
+                        out.open_quote = true;
                         return Some(s.len());
                     }
                     Some(k) => {
@@ -77,25 +108,26 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
             }
         }
         // Unquoted part (or the remainder after a closing quote).
+        let unquoted_from = out.data.len();
         match memchr::memchr2(delim, term, &s[i..]) {
             None => {
                 if !eof {
                     return None;
                 }
                 out.data.extend_from_slice(&s[i..]);
-                strip_cr(out, term);
-                out.end_field();
+                strip_cr(out, term, unquoted_from);
+                out.end_field(quoted);
                 return Some(s.len());
             }
             Some(k) => {
                 out.data.extend_from_slice(&s[i..i + k]);
                 i += k;
                 if s[i] == delim {
-                    out.end_field();
+                    out.end_field(quoted);
                     i += 1;
                 } else {
-                    strip_cr(out, term);
-                    out.end_field();
+                    strip_cr(out, term, unquoted_from);
+                    out.end_field(quoted);
                     return Some(i + 1);
                 }
             }
@@ -103,13 +135,12 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
     }
 }
 
-/// CRLF files: the `\r` before `\n` belongs to the terminator, not the last field.
-fn strip_cr(out: &mut FieldBuf, term: u8) {
-    if term == b'\n' && out.data.last() == Some(&b'\r') {
-        let start = out.ends.last().copied().unwrap_or(0);
-        if out.data.len() > start {
-            out.data.pop();
-        }
+/// CRLF files: the `\r` before `\n` belongs to the terminator, not the last
+/// field — unless it was inside quotes (bytes before `from` came from a quoted
+/// section and are data).
+fn strip_cr(out: &mut FieldBuf, term: u8, from: usize) {
+    if term == b'\n' && out.data.len() > from && out.data.last() == Some(&b'\r') {
+        out.data.pop();
     }
 }
 
@@ -124,6 +155,9 @@ pub struct RowReader<'a> {
     end: usize,
     eof: bool,
     limit: u64,
+    /// `buf` range of the row returned last (always whole: a row only parses
+    /// once all of it is in the buffer).
+    last: (usize, usize),
 }
 
 const READ_CHUNK: usize = 256 << 10;
@@ -144,7 +178,14 @@ impl<'a> RowReader<'a> {
             end: 0,
             eof: false,
             limit: limit.min(src.len()),
+            last: (0, 0),
         }
+    }
+
+    /// The raw bytes of the row returned by the last `next_row`, terminator
+    /// included (none for a last row without one).
+    pub fn last_raw(&self) -> &[u8] {
+        &self.buf[self.last.0..self.last.1]
     }
 
     /// File offset of the next row.
@@ -181,6 +222,7 @@ impl<'a> RowReader<'a> {
 
     /// Read the next row into `fields`. Returns its file offset, or `None` at the end.
     pub fn next_row(&mut self, fields: &mut FieldBuf) -> io::Result<Option<u64>> {
+        self.last = (0, 0);
         loop {
             let s = &self.buf[self.start..self.end];
             if s.is_empty() && self.eof {
@@ -189,6 +231,7 @@ impl<'a> RowReader<'a> {
             }
             if let Some(n) = parse_row(s, &self.dialect, self.eof, fields) {
                 let offset = self.position();
+                self.last = (self.start, self.start + n);
                 self.start += n;
                 return Ok(Some(offset));
             }
@@ -198,6 +241,15 @@ impl<'a> RowReader<'a> {
             }
             self.fill()?;
         }
+    }
+
+    /// Skip `n` rows (fewer at the end of the data). Returns how many were skipped.
+    pub fn skip_rows(&mut self, n: u64, fields: &mut FieldBuf) -> io::Result<u64> {
+        let mut done = 0;
+        while done < n && self.next_row(fields)?.is_some() {
+            done += 1;
+        }
+        Ok(done)
     }
 }
 
@@ -213,15 +265,35 @@ pub fn decode_into(bytes: &[u8], encoding: Encoding, out: &mut String) {
     }
 }
 
+const CP1252_HIGH: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
 fn cp1252(b: u8) -> char {
-    const HIGH: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
-        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
-        'ž', 'Ÿ',
-    ];
     match b {
-        0x80..=0x9F => HIGH[(b - 0x80) as usize],
+        0x80..=0x9F => CP1252_HIGH[(b - 0x80) as usize],
         _ => b as char,
+    }
+}
+
+/// The Windows-1252 byte for `c`, if it has one.
+pub fn cp1252_byte(c: char) -> Option<u8> {
+    match c as u32 {
+        0..=0x7F | 0xA0..=0xFF => Some(c as u8),
+        _ => CP1252_HIGH
+            .iter()
+            .position(|&h| h == c)
+            .map(|i| 0x80 + i as u8),
+    }
+}
+
+/// Encode text as Windows-1252; characters it lacks become `?`.
+pub fn encode_cp1252_lossy(s: &str, out: &mut Vec<u8>) {
+    if s.is_ascii() {
+        out.extend_from_slice(s.as_bytes());
+    } else {
+        out.extend(s.chars().map(|c| cp1252_byte(c).unwrap_or(b'?')));
     }
 }
 
@@ -229,25 +301,11 @@ fn cp1252(b: u8) -> char {
 mod tests {
     use super::*;
     use crate::scan::RowScanner;
-
-    struct Mem(Vec<u8>);
-    impl ByteSource for Mem {
-        fn len(&self) -> u64 {
-            self.0.len() as u64
-        }
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-            let o = offset as usize;
-            if o >= self.0.len() {
-                return Ok(0);
-            }
-            let n = buf.len().min(self.0.len() - o).min(7); // tiny reads stress the refill path
-            buf[..n].copy_from_slice(&self.0[o..o + n]);
-            Ok(n)
-        }
-    }
+    use crate::source::MemSource;
 
     fn all_rows(data: &[u8]) -> Vec<(u64, Vec<String>)> {
-        let src = Mem(data.to_vec());
+        // Tiny reads stress the refill path.
+        let src = MemSource::with_max_read(data.to_vec(), 7);
         let mut r = RowReader::new(&src, Dialect::default(), 0);
         let mut f = FieldBuf::default();
         let mut out = vec![];
@@ -269,6 +327,11 @@ mod tests {
         assert_eq!(rows[0].1, ["a", "b", "c"]);
         assert_eq!(rows[1].1, ["1", "x,y", "he said \"hi\""]);
         assert_eq!(rows[2].1, ["2", "multi\nline", ""]);
+        // A \r inside quotes is data; only the terminator's \r goes.
+        let rows = all_rows(b"a,\"x\r\"\r\n\"y\r\"\nz\r");
+        assert_eq!(rows[0].1, ["a", "x\r"]);
+        assert_eq!(rows[1].1, ["y\r"]);
+        assert_eq!(rows[2].1, ["z"]);
     }
 
     #[test]
@@ -299,5 +362,68 @@ mod tests {
         let mut s = String::new();
         decode_into(b"caf\xE9 \x80", Encoding::Windows1252, &mut s);
         assert_eq!(s, "café €");
+        let mut b = Vec::new();
+        encode_cp1252_lossy("café € 😀", &mut b);
+        assert_eq!(b, b"caf\xE9 \x80 ?");
+        for byte in 0u8..=255 {
+            assert_eq!(cp1252_byte(cp1252(byte)), Some(byte));
+        }
+    }
+
+    #[test]
+    fn raw_rows_and_quoted_bits() {
+        let data = b"a,\"b\"\r\n\"x\ny\",5\"z\n\"\"\n\"open";
+        let src = MemSource::with_max_read(data.to_vec(), 3);
+        let mut r = RowReader::new(&src, Dialect::default(), 0);
+        let mut f = FieldBuf::default();
+        let mut raws = Vec::new();
+        let mut quoted = Vec::new();
+        while r.next_row(&mut f).unwrap().is_some() {
+            raws.push(r.last_raw().to_vec());
+            quoted.push((0..f.len()).map(|i| f.quoted(i)).collect::<Vec<_>>());
+            assert_eq!(f.open_quote, raws.len() == 4);
+        }
+        assert_eq!(
+            raws,
+            [
+                &b"a,\"b\"\r\n"[..],
+                b"\"x\ny\",5\"z\n",
+                b"\"\"\n",
+                b"\"open"
+            ]
+        );
+        assert_eq!(raws.concat(), data);
+        assert_eq!(
+            quoted,
+            [vec![false, true], vec![true, false], vec![true], vec![true]]
+        );
+    }
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_bits_past_64_fields() {
+        let mut line = String::new();
+        for i in 0..100 {
+            if i > 0 {
+                line.push(',');
+            }
+            if i % 3 == 0 {
+                line.push_str(&format!("\"{i}\""));
+            } else {
+                line.push_str(&i.to_string());
+            }
+        }
+        line.push('\n');
+        let mut f = FieldBuf::default();
+        parse_row(line.as_bytes(), &Dialect::default(), true, &mut f).unwrap();
+        assert_eq!(f.len(), 100);
+        for i in 0..100 {
+            assert_eq!(f.quoted(i), i % 3 == 0, "field {i}");
+        }
+        assert!(!f.quoted(100));
     }
 }
