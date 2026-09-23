@@ -169,9 +169,14 @@ impl Drawer {
             self.quiet_until = self.quiet_until.max(now + QUIET_AFTER_INPUT);
         }
         let c = i.content;
-        let in_band = i
-            .pointer
-            .is_some_and(|p| p.x >= c.right() - i.trigger && p.y >= c.top() && p.y <= c.bottom());
+        // Inside the client area only: past it is the window's resize border,
+        // where the user is about to resize, not reaching for notes.
+        let in_band = i.pointer.is_some_and(|p| {
+            p.x >= c.right() - i.trigger
+                && p.x <= c.right() + 1.0
+                && p.y >= c.top()
+                && p.y <= c.bottom()
+        });
         if !in_band {
             self.entered_down = false;
         } else if i.any_down && self.band_since.is_none() && self.phase == Phase::Hidden {
@@ -787,6 +792,14 @@ mod tests {
         d.update(&at(5.0, 100.0));
         assert_eq!(d.phase(), Phase::Open);
         d.toggle();
+        assert_eq!(d.phase(), Phase::Hidden);
+    }
+
+    #[test]
+    fn resize_border_is_not_the_edge() {
+        let mut d = Drawer::default();
+        d.update(&at(0.0, 1006.0));
+        d.update(&at(0.5, 1006.0));
         assert_eq!(d.phase(), Phase::Hidden);
     }
 
