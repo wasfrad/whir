@@ -8,6 +8,7 @@ use whir_core::find_bar::{FindBar, fmt_int};
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocRequest, Waker};
 
+use crate::editor::{Editor, Move};
 use crate::grid::{self, GridIo};
 use crate::loaded::{Loaded, SaveFailure};
 use crate::view::SheetView;
@@ -34,7 +35,7 @@ pub fn show_loaded(
     // Unbalanced quotes restarted indexing without quoting: forget everything
     // derived from the first parse.
     if l.table.sync() {
-        l.on_reparse(now);
+        l.on_reparse();
         if !l.find.searched.is_empty() {
             l.start_find(l.find.searched.clone(), waker);
         }
@@ -67,8 +68,11 @@ pub fn show_loaded(
     let grid_rect = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - footer_h));
     let footer = Rect::from_min_max(pos2(area.left(), grid_rect.bottom()), area.max);
 
-    // Shortcuts owned by the document.
+    // Shortcuts owned by the document (they end an edit in progress first).
     let keys = FindBar::consume_keys(ui);
+    if keys.open || keys.next || keys.prev {
+        l.commit_editor(Some(ui.ctx()), Move::Leave);
+    }
     if keys.open {
         l.find.bar.open_with(None);
     }
@@ -79,8 +83,12 @@ pub fn show_loaded(
         l.step_match(false);
     }
 
+    // The cell editor's keys come before everything else that reads keys.
+    l.editor_keys(ui);
+
     let find_has_focus = l.find.bar.has_focus(ui.ctx());
     let escape = !find_has_focus
+        && l.editor.is_none()
         && !egui::Popup::is_any_open(ui.ctx())
         && ui.input(|i| i.key_pressed(Key::Escape));
     if escape {
@@ -113,7 +121,7 @@ pub fn show_loaded(
             sorted,
             matches: &loaded.find.display,
             current_match: loaded.find.current,
-            keyboard: !find_has_focus,
+            keyboard: !find_has_focus && no_editor(&loaded.editor),
             editable,
         },
         theme,
@@ -121,6 +129,8 @@ pub fn show_loaded(
     for action in out.actions {
         l.apply(action, ui, waker);
     }
+    // The editor on top of the grid (a press elsewhere commits it).
+    l.show_editor(ui, theme);
 
     if l.find.bar.open {
         let status = l.find.status();
@@ -246,6 +256,11 @@ pub fn show_loaded(
         request = changed_banner(ui, grid_rect, theme, l.is_dirty(), cx);
     }
     request
+}
+
+/// The grid owns the keyboard unless a cell is being edited.
+fn no_editor(editor: &Option<Editor>) -> bool {
+    editor.is_none()
 }
 
 fn banner_frame(

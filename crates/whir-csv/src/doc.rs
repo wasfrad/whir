@@ -298,6 +298,7 @@ fn load(path: &Path, waker: &Waker) -> Result<Opened, String> {
         identity,
         index,
         index_cancel,
+        waker: waker.clone(),
     })
 }
 
@@ -322,6 +323,7 @@ pub fn new_blank(cx: &OpenCx) -> CsvDoc {
         identity: None,
         index: Arc::new(RwLock::new(index)),
         index_cancel: Arc::new(AtomicBool::new(false)),
+        waker: cx.waker.clone(),
     });
     l.blank = true;
     CsvDoc {
@@ -547,3 +549,6 @@ impl Drop for CsvDoc {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ui_tests;

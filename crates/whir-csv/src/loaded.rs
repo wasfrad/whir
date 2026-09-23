@@ -12,6 +12,7 @@ use whir_core::find_bar::{FindBar, FindStatus};
 
 use crate::dialect::{Encoding, Style};
 use crate::edit::{Edits, MAX_EDIT_ROWS, RowKey};
+use crate::editor::Editor;
 use crate::find::{self, FindMsg};
 use crate::grid::{CellPos, Grid, Selection};
 use crate::index::SharedIndex;
@@ -146,6 +147,11 @@ pub struct Loaded {
     /// Identity of the file as loaded (a save refuses to replace a newer version).
     pub file_identity: Option<FileIdentity>,
     pub edits: Edits,
+    pub editor: Option<Editor>,
+    /// The editor's widget id (one per document).
+    pub editor_id: egui::Id,
+    /// An editor closed without a context: its text state is dropped next frame.
+    pub stale_editor: Option<egui::Id>,
     pub order: Option<Order>,
     /// Bumped whenever a sort result is installed or cleared.
     pub order_gen: u64,
@@ -161,6 +167,7 @@ pub struct Loaded {
     pub blank: bool,
     /// Time of the current frame (for status messages set outside `ui`).
     pub now: f64,
+    pub waker: Waker,
 }
 
 /// What the loader found.
@@ -175,6 +182,7 @@ pub struct Opened {
     pub identity: Option<FileIdentity>,
     pub index: SharedIndex,
     pub index_cancel: Arc<AtomicBool>,
+    pub waker: Waker,
 }
 
 impl Loaded {
@@ -189,6 +197,12 @@ impl Loaded {
             style: o.style,
             file_identity: o.identity,
             edits: Edits::default(),
+            editor: None,
+            editor_id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                egui::Id::new(("csv-cell-editor", NEXT.fetch_add(1, Ordering::Relaxed)))
+            },
+            stale_editor: None,
             order: None,
             order_gen: 0,
             sorting: None,
@@ -199,6 +213,7 @@ impl Loaded {
             index_cancel: o.index_cancel,
             blank: false,
             now: 0.0,
+            waker: o.waker,
         }
     }
 
@@ -576,6 +591,9 @@ impl Loaded {
                 .collect();
         }
         let expected_rows = self.rows();
+        if let Some(ed) = self.editor.take() {
+            self.stale_editor = Some(ed.id);
+        }
         self.edits = Edits::default();
         // Work that read the old file restarts on the new one.
         let resort = self.sorting.take().map(|s| {
