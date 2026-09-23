@@ -283,11 +283,15 @@ impl Loaded {
 
     /// Absorb finished sort and find work. Returns a finished save, if any.
     pub fn poll(&mut self) -> Option<(SaveKind, SaveOutcome)> {
-        // Sort results.
-        if let Some(s) = &self.sorting
-            && let Ok(SortMsg::Done(result)) = s.rx.try_recv()
-        {
-            let rev = s.rev;
+        use std::sync::mpsc::TryRecvError;
+        // Sort results (a worker that died without answering counts as failed,
+        // so row edits don't stay blocked).
+        let sorted = self.sorting.as_ref().and_then(|s| match s.rx.try_recv() {
+            Ok(SortMsg::Done(result)) => Some((s.rev, result)),
+            Err(TryRecvError::Disconnected) => Some((s.rev, Err("Sorting stopped.".into()))),
+            Err(TryRecvError::Empty) => None,
+        });
+        if let Some((rev, result)) = sorted {
             self.sorting = None;
             match result {
                 Ok(mut order) => {
@@ -303,7 +307,15 @@ impl Loaded {
         // Find results.
         let mut got = false;
         if let Some(rx) = &self.find.rx {
-            while let Ok(msg) = rx.try_recv() {
+            loop {
+                let msg = match rx.try_recv() {
+                    Ok(msg) => msg,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.find.running = false;
+                        break;
+                    }
+                };
                 match msg {
                     FindMsg::Matches(mut m) => {
                         if !self.find.ignore.is_empty() {
@@ -328,7 +340,15 @@ impl Loaded {
             }
         }
         // A finished save.
-        let done = self.saving.as_ref().and_then(|s| s.rx.try_recv().ok());
+        let done = self.saving.as_ref().and_then(|s| match s.rx.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(TryRecvError::Disconnected) => {
+                Some(SaveOutcome::Failed(whir_core::file::WriteError::Io(
+                    std::io::Error::other("the save stopped unexpectedly"),
+                )))
+            }
+            Err(TryRecvError::Empty) => None,
+        });
         done.map(|outcome| {
             let kind = self.saving.take().map_or(SaveKind::Own, |s| s.kind);
             (kind, outcome)

@@ -302,7 +302,8 @@ impl Loaded {
 
     /// Rename column `col` (header menu, or right after adding a column).
     pub fn start_rename(&mut self, ctx: &Context, col: usize) {
-        if !self.check(self.editable().cols) || col >= self.grid.cols() {
+        // A header value like any cell: only a save blocks it.
+        if !self.check(self.editable().cells) || col >= self.grid.cols() {
             return;
         }
         let k = self.edits.col_key(col);

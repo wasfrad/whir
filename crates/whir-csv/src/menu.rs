@@ -125,11 +125,16 @@ pub fn show(ui: &mut Ui, cx: &MenuCx, out: &mut Vec<Action>) {
                 Action::InsertCols { left: false },
                 out,
             );
+            let rename_gate = if in_range {
+                e.cells
+            } else {
+                Gate::No("No column here.")
+            };
             item(
                 ui,
                 "Rename column…",
                 "",
-                cols_gate,
+                rename_gate,
                 Action::Rename(col),
                 out,
             );
