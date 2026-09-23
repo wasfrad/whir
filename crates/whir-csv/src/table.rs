@@ -101,6 +101,9 @@ impl Table {
         encoding: Encoding,
         index: SharedIndex,
     ) -> Self {
+        // An index that already has quoting off (a save of such a file) isn't
+        // a restart: only a change seen later is.
+        let quoting_disabled_seen = index.read().map(|s| s.quoting_disabled).unwrap_or(false);
         Self {
             source,
             dialect,
@@ -110,7 +113,7 @@ impl Table {
             lru: VecDeque::new(),
             capacity: 96,
             fields: FieldBuf::default(),
-            quoting_disabled_seen: false,
+            quoting_disabled_seen,
         }
     }
 

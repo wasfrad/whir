@@ -93,3 +93,48 @@ pub fn trim(mut v: Vec<String>) -> Vec<String> {
     }
     v
 }
+
+struct NoTextures;
+
+impl whir_core::TextureRegistry for NoTextures {
+    fn create(
+        self: Arc<Self>,
+        _desc: &whir_core::TextureDesc,
+        _pixels: &[u8],
+        _stride: usize,
+    ) -> Result<whir_core::UserTexture, String> {
+        Err("no GPU in tests".into())
+    }
+
+    fn max_texture_side(&self) -> u32 {
+        4096
+    }
+
+    fn release(&self, _id: u64) {}
+}
+
+/// An `OpenCx` whose notes library is `dir`.
+pub fn open_cx(dir: &std::path::Path) -> whir_core::OpenCx {
+    whir_core::OpenCx {
+        textures: Arc::new(NoTextures),
+        waker: whir_core::Waker::noop(),
+        library: whir_core::Library::at(dir.to_path_buf(), whir_core::Waker::noop()),
+    }
+}
+
+/// A fresh, empty directory for a test.
+pub fn test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("whir-csv-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Poll until `done` (panics after 10 s).
+pub fn wait_for(mut poll: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !poll() {
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}

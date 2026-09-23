@@ -11,10 +11,13 @@ mod find;
 mod grid;
 mod index;
 mod keys;
+mod loaded;
 mod menu;
+mod ops;
 mod order;
 mod parse;
 mod scan;
+mod show;
 mod sort;
 mod source;
 mod stream;
@@ -22,6 +25,7 @@ mod table;
 #[cfg(test)]
 mod testutil;
 mod view;
+mod write;
 
 use std::path::PathBuf;
 

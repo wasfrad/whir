@@ -17,6 +17,8 @@ pub trait ByteSource: Send + Sync {
     fn changed(&self) -> bool {
         false
     }
+    /// Drop any OS handle (reopened on the next read).
+    fn release(&self) {}
 }
 
 impl ByteSource for FileSource {
@@ -30,6 +32,10 @@ impl ByteSource for FileSource {
 
     fn changed(&self) -> bool {
         FileSource::changed(self)
+    }
+
+    fn release(&self) {
+        FileSource::release(self)
     }
 }
 
