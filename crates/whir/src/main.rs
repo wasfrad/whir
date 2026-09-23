@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-//! whir: a fast, lean viewer for images, PDFs and CSVs.
+//! whir: a fast, lean viewer and notepad for images, PDFs, CSVs and notes.
 //!
 //! Startup is the product: everything here is ordered so a double-clicked file
 //! is on screen as early as possible.
@@ -9,9 +9,12 @@
 //!   4. create the window cloaked, attach the renderer, render, then uncloak
 
 mod app;
+mod close_flow;
 mod dispatch;
+mod drawer;
 mod keys;
 mod register;
+mod reltime;
 mod single_instance;
 mod tab_bar;
 
@@ -63,6 +66,20 @@ fn relaunch(paths: &[PathBuf], previous: &Args) {
     }
     cmd.args(paths);
     let _ = cmd.spawn();
+}
+
+/// A native Yes/No question (used when the GPU is gone and egui can't draw).
+pub(crate) fn message_yes_no(text: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW};
+    use windows::core::{HSTRING, w};
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            w!("whir"),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
 }
 
 fn message_box(text: &str, error: bool) {
@@ -148,7 +165,12 @@ fn main() {
     let restart = std::rc::Rc::new(std::cell::RefCell::new(None));
     let mut app = app::App::new(textures.clone(), wake.waker(), dark, restart.clone());
     use whir_platform::Handler as _;
-    app.open_files(paths);
+    if paths.is_empty() {
+        // A bare launch is a blank note, ready to type into (no disk access).
+        app.bare_launch();
+    } else {
+        app.open_files(paths);
+    }
     trace::mark("documents started");
 
     let window = match Window::create(
@@ -218,6 +240,8 @@ fn main() {
     trace::flush();
     // Release the single-instance mutex, then skip slow teardown of GPU/COM objects.
     drop(instance);
+    // Let the last note writes land (process::exit would cut them off).
+    whir_notes::saver::wait_idle(std::time::Instant::now() + std::time::Duration::from_secs(2));
     if let Some(paths) = restart.borrow_mut().take() {
         relaunch(&paths, &args);
     }

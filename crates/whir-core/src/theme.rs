@@ -334,20 +334,13 @@ pub enum FontRole {
 /// Named font families for rich text (notes). All are registered at startup,
 /// aliased to the regular faces, so using one never panics; their real faces
 /// load on demand ([`request_rich_fonts`]), except semibold which titles need at once.
+/// (Italics use egui's synthetic slant, so they need no font of their own.)
 pub const SEMIBOLD: &str = "whir-semibold";
 pub const BOLD: &str = "whir-bold";
-pub const ITALIC: &str = "whir-italic";
-pub const BOLD_ITALIC: &str = "whir-bold-italic";
 pub const MONO_BOLD: &str = "whir-mono-bold";
 
 /// `(family, is_monospace)` for every named family.
-pub const NAMED_FAMILIES: &[(&str, bool)] = &[
-    (SEMIBOLD, false),
-    (BOLD, false),
-    (ITALIC, false),
-    (BOLD_ITALIC, false),
-    (MONO_BOLD, true),
-];
+pub const NAMED_FAMILIES: &[(&str, bool)] = &[(SEMIBOLD, false), (BOLD, false), (MONO_BOLD, true)];
 
 pub fn family(name: &'static str) -> egui::FontFamily {
     egui::FontFamily::Name(name.into())
@@ -387,25 +380,13 @@ pub const FONTS: &[FontSpec] = &[
     },
 ];
 
-/// Bold/italic faces, loaded the first time a note uses them.
+/// Bold faces, loaded the first time a note uses them.
 pub const LAZY_RICH_FONTS: &[FontSpec] = &[
     FontSpec {
         name: "Segoe UI Bold",
         file: "segoeuib.ttf",
         index: 0,
         role: FontRole::Family(BOLD),
-    },
-    FontSpec {
-        name: "Segoe UI Italic",
-        file: "segoeuii.ttf",
-        index: 0,
-        role: FontRole::Family(ITALIC),
-    },
-    FontSpec {
-        name: "Segoe UI Bold Italic",
-        file: "segoeuiz.ttf",
-        index: 0,
-        role: FontRole::Family(BOLD_ITALIC),
     },
     FontSpec {
         name: "Consolas Bold",

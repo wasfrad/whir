@@ -16,6 +16,7 @@ whir-gfx = { path = "crates/whir-gfx" }
 whir-image = { path = "crates/whir-image" }
 whir-pdf = { path = "crates/whir-pdf" }
 whir-csv = { path = "crates/whir-csv" }
+whir-notes = { path = "crates/whir-notes" }
 
 # Pinned to the version rerun's re_ui uses, so its theming can be vendored later.
 egui = { version = "=0.36.2", default-features = false, features = ["bytemuck"] }

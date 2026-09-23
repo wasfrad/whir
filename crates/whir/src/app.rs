@@ -1,28 +1,45 @@
-//! The shell: tabs, shortcuts, first-frame logic, and rendering.
+//! The shell: tabs, shortcuts, saving and closing, the notes drawer,
+//! first-frame logic, and rendering.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{CentralPanel, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
+use egui::{CentralPanel, Event, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
 use whir_core::theme::{self, Theme};
-use whir_core::{DocCx, Document, OpenCx, TextureRegistry, trace};
+use whir_core::{
+    DocCx, DocRequest, Document, OpenCx, SaveAsSpec, SaveResult, TextureRegistry, needs_attention,
+    trace,
+};
 use whir_gfx::{GpuTextures, PresentResult, Renderer};
-use whir_platform::{FrameInfo, FrameOutput, Handler, HitMap, RectPx, WindowCommand};
+use whir_platform::{
+    FrameInfo, FrameOutput, Handler, HitMap, RectPx, SaveDialogSpec, WindowCommand,
+};
 
+use crate::close_flow::{self, CloseFlow, Outcome};
 use crate::dispatch;
+use crate::drawer::{self, Drawer};
 use crate::keys::consume_exact;
 use crate::tab_bar::{self, TabInfo};
 
 /// How long the first frame may wait for the active document's content, so a
 /// double-clicked image appears *with* the window instead of a beat later.
 const FIRST_FRAME_CONTENT_WAIT: Duration = Duration::from_millis(150);
+/// The text caret stops blinking this long after the last input, so an idle
+/// whir with a note open uses no CPU.
+const BLINK_FOR: f64 = 5.0;
 
-struct Tab {
-    id: u64,
-    doc: Box<dyn Document>,
+pub(crate) struct Tab {
+    pub id: u64,
+    pub doc: Box<dyn Document>,
+}
+
+/// Why a Save dialog is open.
+enum DialogFor {
+    /// Ctrl+S on a document without a location, or Ctrl+Shift+S.
+    SaveAs(u64),
 }
 
 pub struct App {
@@ -39,11 +56,27 @@ pub struct App {
     first_frame_at: Option<Instant>,
     window_title: String,
     fallback_fonts_loaded: bool,
+    rich_fonts_loaded: bool,
     pending: Vec<WindowCommand>,
     /// Set when the GPU device is lost: `main` relaunches whir with these tabs.
     restart: Rc<RefCell<Option<Vec<PathBuf>>>>,
     /// A close was queued because the last tab closed (not by the user's ✕).
     closing_because_empty: bool,
+
+    /// Closed tabs whose last save is still being written.
+    zombies: Vec<Tab>,
+    close_flow: Option<CloseFlow>,
+    /// The user settled every unsaved document: the window may close.
+    close_confirmed: bool,
+    /// Close once background saves finish (exiting would cut them off).
+    close_when_idle: bool,
+    dialogs: Vec<(u64, DialogFor)>,
+    next_token: u64,
+    drawer: Drawer,
+    library_scanned: bool,
+    toast: Option<(String, f64)>,
+    blink_on: bool,
+    last_input: f64,
 }
 
 impl App {
@@ -58,10 +91,27 @@ impl App {
         ctx.set_fonts(whir_platform::fonts::definitions(theme::FONTS));
         theme.apply(&ctx);
         Theme::set_current(theme.clone());
+        let (double_click, blink_ms) = unsafe {
+            (
+                windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime(),
+                windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime(),
+            )
+        };
         ctx.options_mut(|o| {
             // Viewers own Ctrl+plus/minus/0 for their zoom.
             o.zoom_with_keyboard = false;
+            // Double/triple clicks follow the Windows setting.
+            if (100..=5000).contains(&double_click) {
+                o.input_options.max_double_click_delay = double_click as f64 / 1000.0;
+            }
         });
+        if (100..=5000).contains(&blink_ms) {
+            let secs = blink_ms as f32 / 1000.0;
+            ctx.all_styles_mut(|s| {
+                s.visuals.text_cursor.on_duration = secs;
+                s.visuals.text_cursor.off_duration = secs;
+            });
+        }
         let registry: Arc<dyn TextureRegistry> = textures;
         Self {
             ctx,
@@ -81,9 +131,21 @@ impl App {
             first_frame_at: None,
             window_title: String::new(),
             fallback_fonts_loaded: false,
+            rich_fonts_loaded: false,
             pending: Vec::new(),
             restart,
             closing_because_empty: false,
+            zombies: Vec::new(),
+            close_flow: None,
+            close_confirmed: false,
+            close_when_idle: false,
+            dialogs: Vec::new(),
+            next_token: 0,
+            drawer: Drawer::default(),
+            library_scanned: false,
+            toast: None,
+            blink_on: true,
+            last_input: 0.0,
         }
     }
 
@@ -91,7 +153,25 @@ impl App {
         self.renderer = Some(renderer);
     }
 
+    fn push_tab(&mut self, doc: Box<dyn Document>) -> usize {
+        self.tabs.push(Tab {
+            id: self.next_tab_id,
+            doc,
+        });
+        self.next_tab_id += 1;
+        self.tabs.len() - 1
+    }
+
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        // A lone untouched blank note gives way to what the user opened.
+        if self.tabs.len() == 1 && self.tabs[0].doc.is_pristine() {
+            self.tabs.clear();
+            self.active = 0;
+            self.visible_tab = None;
+        }
         let mut last = None;
         for path in paths {
             let path = whir_platform::ipc::canonicalize(&path);
@@ -104,30 +184,47 @@ impl App {
                 continue;
             }
             let doc = dispatch::open(path, &self.open_cx);
-            self.tabs.push(Tab {
-                id: self.next_tab_id,
-                doc,
-            });
-            self.next_tab_id += 1;
-            last = Some(self.tabs.len() - 1);
+            last = Some(self.push_tab(doc));
         }
         if let Some(i) = last {
             self.active = i;
         }
     }
 
-    fn close_tab(&mut self, index: usize) {
+    /// Ctrl+N: a fresh note (or the untouched one that's already open).
+    fn new_note(&mut self) {
+        if let Some(i) = self.tabs.iter().position(|t| t.doc.is_pristine()) {
+            self.active = i;
+            return;
+        }
+        let doc = whir_notes::new_note(&self.open_cx);
+        self.active = self.push_tab(doc);
+    }
+
+    /// Ctrl+Shift+N: a blank table.
+    fn new_table(&mut self) {
+        let doc = whir_csv::new_blank(&self.open_cx);
+        self.active = self.push_tab(doc);
+    }
+
+    /// Close a tab now, letting an in-flight save finish in the background.
+    fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
-        let tab = self.tabs.remove(index);
+        let mut tab = self.tabs.remove(index);
+        tab.doc.flush();
         if let Some(p) = tab.doc.path() {
             self.recently_closed.push(p.to_owned());
             if self.recently_closed.len() > 32 {
                 self.recently_closed.remove(0);
             }
         }
-        drop(tab);
+        if tab.doc.is_saving() {
+            self.zombies.push(tab);
+        } else {
+            drop(tab);
+        }
         if self.tabs.is_empty() {
             self.closing_because_empty = true;
             self.pending.push(WindowCommand::Close);
@@ -136,6 +233,70 @@ impl App {
         if self.active > index || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
+    }
+
+    /// The user asked to close a tab: ask first if it has unsaved work.
+    fn request_close_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        if self.close_flow.is_some() {
+            return;
+        }
+        if needs_attention(&*tab.doc) {
+            let focus = self.ctx.memory(|m| m.focused());
+            self.active = index;
+            self.close_flow = Some(CloseFlow::new(
+                close_flow::Kind::Tabs,
+                vec![tab.id],
+                vec![tab.id],
+                focus,
+            ));
+        } else {
+            self.close_tab_now(index);
+        }
+    }
+
+    fn close_tabs_by_id(&mut self, ids: &[u64]) {
+        for id in ids {
+            if let Some(i) = self.tabs.iter().position(|t| t.id == *id) {
+                self.close_tab_now(i);
+            }
+        }
+    }
+
+    fn ask_save_path(&mut self, tab: u64, spec: SaveAsSpec) {
+        self.next_token += 1;
+        let token = self.next_token;
+        self.dialogs.push((token, DialogFor::SaveAs(tab)));
+        self.pending.push(save_dialog_command(token, spec));
+    }
+
+    fn save_active(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let id = tab.id;
+        match tab.doc.save() {
+            SaveResult::NeedsPath(spec) => self.ask_save_path(id, spec),
+            SaveResult::Failed(e) => self.show_toast(e),
+            SaveResult::Saved | SaveResult::Started | SaveResult::Unsupported => {}
+        }
+    }
+
+    fn save_active_as(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if let Some(spec) = tab.doc.save_as_spec() {
+            self.ask_save_path(tab.id, spec);
+        }
+    }
+
+    fn show_toast(&mut self, text: impl Into<String>) {
+        let now = self.ctx.input(|i| i.time);
+        self.toast = Some((text.into(), now + 3.0));
+        self.ctx.request_repaint();
     }
 
     fn open_dialog_command() -> WindowCommand {
@@ -152,6 +313,8 @@ impl App {
         let mut goto = None;
         let mut reopen = false;
         let mut open = false;
+        let (mut new_note, mut new_table, mut save, mut save_as, mut drawer) =
+            (false, false, false, false, false);
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
             let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
@@ -170,6 +333,11 @@ impl App {
             if consume_exact(i, ctrl, Key::O) {
                 open = true;
             }
+            new_table = consume_exact(i, ctrl_shift, Key::N);
+            new_note = consume_exact(i, ctrl, Key::N);
+            save_as = consume_exact(i, ctrl_shift, Key::S);
+            save = consume_exact(i, ctrl, Key::S);
+            drawer = consume_exact(i, ctrl, Key::E);
             const DIGITS: [Key; 9] = [
                 Key::Num1,
                 Key::Num2,
@@ -193,6 +361,25 @@ impl App {
         if reopen && let Some(p) = self.recently_closed.pop() {
             self.open_paths(vec![p]);
         }
+        if new_note {
+            self.new_note();
+        }
+        if new_table {
+            self.new_table();
+        }
+        if save {
+            self.save_active();
+        }
+        if save_as {
+            self.save_active_as();
+        }
+        if drawer {
+            self.drawer.toggle();
+            if self.drawer.phase() == drawer::Phase::Open {
+                self.open_cx.library.scan();
+            }
+        }
+        let n = self.tabs.len();
         if n > 0 {
             if step != 0 {
                 self.active = (self.active as i32 + step).rem_euclid(n as i32) as usize;
@@ -203,8 +390,167 @@ impl App {
                 self.active = g;
             }
             if close {
-                self.close_tab(self.active);
+                self.request_close_tab(self.active);
             }
+        }
+    }
+
+    fn poll_zombies(&mut self) {
+        let mut i = 0;
+        while i < self.zombies.len() {
+            self.zombies[i].doc.poll();
+            if self.zombies[i].doc.is_saving() {
+                i += 1;
+                continue;
+            }
+            let z = self.zombies.remove(i);
+            if z.doc.save_error().is_some() {
+                // The last save failed: bring the document back so it isn't lost.
+                self.tabs.push(z);
+                self.active = self.tabs.len() - 1;
+                self.closing_because_empty = false;
+            }
+        }
+    }
+
+    /// The caret blinks only while the user is active.
+    fn update_blink(&mut self, ui: &egui::Ui) {
+        let now = ui.input(|i| i.time);
+        let active_input = ui.input(|i| {
+            i.events.iter().any(|e| {
+                !matches!(
+                    e,
+                    Event::WindowFocused(_) | Event::PointerGone | Event::ModifiersChanged(_)
+                )
+            })
+        });
+        if active_input {
+            self.last_input = now;
+        }
+        let want = now - self.last_input < BLINK_FOR;
+        if want != self.blink_on {
+            self.blink_on = want;
+            self.ctx
+                .all_styles_mut(|s| s.visuals.text_cursor.blink = want);
+        }
+        if want {
+            self.ctx.request_repaint_after(Duration::from_secs_f64(
+                (self.last_input + BLINK_FOR - now).max(0.05),
+            ));
+        }
+    }
+
+    fn run_close_flow(&mut self, ui: &mut egui::Ui) {
+        let Some(mut flow) = self.close_flow.take() else {
+            return;
+        };
+        let (outcome, dialog) =
+            flow.update(&self.ctx, &mut self.tabs, &self.theme, &mut self.next_token);
+        if let Some(d) = dialog {
+            self.pending.push(save_dialog_command(d.token, d.spec));
+        }
+        match outcome {
+            Outcome::Pending => self.close_flow = Some(flow),
+            Outcome::Aborted => {
+                self.close_confirmed = false;
+                if let Some(id) = flow.restore_focus {
+                    self.ctx.memory_mut(|m| m.request_focus(id));
+                }
+            }
+            Outcome::Finished { close } => match flow.kind {
+                close_flow::Kind::Tabs => self.close_tabs_by_id(&close),
+                close_flow::Kind::Window => {
+                    self.close_confirmed = true;
+                    self.pending.push(WindowCommand::Close);
+                }
+            },
+        }
+        // The dialog is modal: documents get no keyboard input meanwhile.
+        if self.close_flow.is_some() {
+            ui.input_mut(|i| {
+                i.events.retain(|e| {
+                    !matches!(
+                        e,
+                        Event::Key { .. }
+                            | Event::Text(_)
+                            | Event::Paste(_)
+                            | Event::Copy
+                            | Event::Cut
+                    )
+                })
+            });
+        }
+    }
+
+    fn handle_requests(&mut self, tab_id: u64, requests: Vec<DocRequest>) {
+        for r in requests {
+            let index = self.tabs.iter().position(|t| t.id == tab_id);
+            match r {
+                DocRequest::Open(paths) => self.open_paths(paths),
+                DocRequest::Save => {
+                    if let Some(i) = index {
+                        self.active = i;
+                        self.save_active();
+                    }
+                }
+                DocRequest::SaveAs => {
+                    if let Some(i) = index {
+                        self.active = i;
+                        self.save_active_as();
+                    }
+                }
+                DocRequest::Close => {
+                    if let Some(i) = index {
+                        self.request_close_tab(i);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_drawer(&mut self, out: drawer::Out) {
+        if out.peeked {
+            let stale = self
+                .open_cx
+                .library
+                .snapshot()
+                .scanned_at
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(2));
+            if stale {
+                self.open_cx.library.scan();
+            }
+        }
+        if let Some(path) = out.open {
+            self.open_paths(vec![path]);
+        }
+        if out.new_note {
+            self.new_note();
+        }
+        if let Some(path) = out.reveal {
+            self.pending.push(WindowCommand::Reveal(path));
+        }
+        if let Some(path) = out.delete {
+            // Close it without saving (the user is deleting it), then recycle.
+            if let Some(i) = self.tabs.iter().position(|t| {
+                t.doc
+                    .path()
+                    .is_some_and(|p| whir_core::library::paths_equal(p, &path))
+            }) {
+                let mut tab = self.tabs.remove(i);
+                tab.doc.discard();
+                drop(tab);
+                if self.tabs.is_empty() {
+                    // Deleting the last open note never closes whir.
+                    let doc = whir_notes::new_note(&self.open_cx);
+                    self.push_tab(doc);
+                }
+                self.active = self.active.min(self.tabs.len() - 1);
+            }
+            self.pending.push(WindowCommand::Recycle(path));
+        }
+        if let Some(secs) = out.wake {
+            self.ctx
+                .request_repaint_after(Duration::from_secs_f64(secs.max(0.0)));
         }
     }
 
@@ -212,7 +558,17 @@ impl App {
         for tab in &mut self.tabs {
             tab.doc.poll();
         }
-        self.handle_shortcuts(ui);
+        self.poll_zombies();
+        self.update_blink(ui);
+        if self.close_flow.is_some() {
+            self.run_close_flow(ui);
+        }
+        let mut drawer_out = drawer::Out::default();
+        if self.close_flow.is_none() {
+            let snapshot = self.open_cx.library.snapshot();
+            self.drawer.keys(ui, &snapshot.entries, &mut drawer_out);
+            self.handle_shortcuts(ui);
+        }
         let theme = self.theme.clone();
         let m = theme.metrics;
         let ppp = info.pixels_per_point;
@@ -227,6 +583,8 @@ impl App {
                 tooltip: t.doc.path().map(|p| p.display().to_string()),
                 kind: t.doc.kind(),
                 loading: t.doc.is_loading(),
+                dirty: needs_attention(&*t.doc) && t.doc.save_error().is_none(),
+                error: t.doc.save_error().is_some(),
             })
             .collect();
         let strip = Panel::top("tab_strip")
@@ -252,10 +610,16 @@ impl App {
             self.active = i;
         }
         if let Some(i) = bar.close {
-            self.close_tab(i);
+            self.request_close_tab(i);
         }
         if bar.open_dialog {
             self.pending.push(Self::open_dialog_command());
+        }
+        if bar.new_note {
+            self.new_note();
+        }
+        if bar.new_table {
+            self.new_table();
         }
         if bar.minimize {
             self.pending.push(WindowCommand::Minimize);
@@ -287,7 +651,7 @@ impl App {
         let active = self.active;
         let mut open_requested = false;
         let mut requests = Vec::new();
-        CentralPanel::no_frame()
+        let content = CentralPanel::no_frame()
             .frame(Frame::NONE.fill(theme.content_bg))
             .show(ui, |ui| match self.tabs.get_mut(active) {
                 Some(tab) => {
@@ -304,9 +668,58 @@ impl App {
         if open_requested {
             self.pending.push(Self::open_dialog_command());
         }
+        if let Some(id) = active_id
+            && !requests.is_empty()
+        {
+            self.handle_requests(id, requests);
+        }
+
+        // The notes drawer, over the document.
+        let snapshot = self.open_cx.library.snapshot();
+        let blocked = self.close_flow.is_some()
+            || info.in_size_move
+            || (self.drawer.phase() == drawer::Phase::Hidden
+                && egui::Popup::is_any_open(&self.ctx));
+        let active_path = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.doc.path().map(Path::to_path_buf));
+        let out = self.drawer.show(
+            &self.ctx,
+            content.response.rect,
+            &snapshot,
+            self.open_cx.library.dir(),
+            active_path.as_deref(),
+            blocked,
+            &theme,
+        );
+        drawer_out.open = drawer_out.open.or(out.open);
+        drawer_out.new_note |= out.new_note;
+        drawer_out.reveal = drawer_out.reveal.or(out.reveal);
+        drawer_out.delete = drawer_out.delete.or(out.delete);
+        drawer_out.peeked |= out.peeked;
+        drawer_out.wake = out.wake;
+        self.handle_drawer(drawer_out);
+
+        paint_toast(ui, content.response.rect, &mut self.toast, &theme);
+
+        // Popups over the caption (the "+" menu) must get clicks, not window drags.
+        let caption_bottom = strip.response.rect.bottom();
+        let popups: Vec<egui::Rect> = self.ctx.memory(|mem| {
+            mem.areas()
+                .visible_layer_ids()
+                .into_iter()
+                .filter(|l| l.order == egui::Order::Foreground || l.order == egui::Order::Tooltip)
+                .filter_map(|l| mem.area_rect(l.id))
+                .filter(|r| r.top() < caption_bottom)
+                .collect()
+        });
+        hit.interactive
+            .extend(popups.into_iter().map(|r| RectPx::from_points(r, ppp)));
 
         // Window title (taskbar, Alt+Tab).
         let title = match self.tabs.get(self.active) {
+            Some(t) if needs_attention(&*t.doc) => format!("● {} - whir", t.doc.title()),
             Some(t) => format!("{} - whir", t.doc.title()),
             None => "whir".to_owned(),
         };
@@ -314,6 +727,97 @@ impl App {
             self.pending.push(WindowCommand::SetTitle(title.clone()));
             self.window_title = title;
         }
+
+        // Closing is waiting for background saves.
+        if self.close_when_idle {
+            let saving = self
+                .tabs
+                .iter()
+                .chain(&self.zombies)
+                .any(|t| t.doc.is_saving());
+            if !saving {
+                self.close_when_idle = false;
+                if self.tabs.iter().any(|t| t.doc.save_error().is_some()) {
+                    // A save failed: stay open so nothing is lost.
+                    self.close_confirmed = false;
+                    self.show_toast("A document couldn't be saved, so whir stayed open.");
+                } else {
+                    self.pending.push(WindowCommand::Close);
+                }
+            } else {
+                self.ctx.request_repaint_after(Duration::from_millis(50));
+            }
+        }
+    }
+
+    /// GPU device lost: whir restarts with the same files. Save what we can
+    /// first, asking with native message boxes (the GPU is gone).
+    fn close_for_restart(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for t in &mut self.tabs {
+            let _ = t.doc.flush_blocking(deadline);
+        }
+        for t in &mut self.tabs {
+            if !needs_attention(&*t.doc) {
+                continue;
+            }
+            let ask = format!(
+                "The graphics driver was reset, so whir needs to restart.\n\nSave changes to “{}” first?",
+                t.doc.title()
+            );
+            if !crate::message_yes_no(&ask) {
+                continue;
+            }
+            let mut result = t.doc.save();
+            if let SaveResult::NeedsPath(spec) = result {
+                let filters: Vec<(&str, &str)> = spec
+                    .filters
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
+                result = match whir_platform::dialogs::save_file(
+                    windows::Win32::Foundation::HWND::default(),
+                    &whir_platform::dialogs::SaveOptions {
+                        title: &spec.title,
+                        suggested_name: &spec.suggested_name,
+                        filters: &filters,
+                        default_ext: &spec.default_ext,
+                        folder: spec.folder.as_deref(),
+                    },
+                ) {
+                    Some(p) => t.doc.save_as(p),
+                    None => SaveResult::Saved,
+                };
+            }
+            if let SaveResult::Started = result {
+                let until = Instant::now() + Duration::from_secs(30);
+                while t.doc.is_saving() && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(20));
+                    t.doc.poll();
+                }
+            }
+        }
+        // Notes that were just saved for the first time now have paths.
+        let paths = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.doc.path().map(Path::to_path_buf))
+            .collect();
+        *self.restart.borrow_mut() = Some(paths);
+        true
+    }
+}
+
+fn save_dialog_command(token: u64, spec: SaveAsSpec) -> WindowCommand {
+    WindowCommand::SaveFileDialog {
+        token,
+        spec: SaveDialogSpec {
+            title: spec.title,
+            suggested_name: spec.suggested_name,
+            filters: spec.filters,
+            default_ext: spec.default_ext,
+            folder: spec.folder,
+        },
     }
 }
 
@@ -327,11 +831,48 @@ fn empty_state(ui: &mut egui::Ui, theme: &Theme) -> bool {
                 .color(theme.text),
         );
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Images, PDFs and CSV files").color(theme.text_dim));
+        ui.label(
+            egui::RichText::new("Images, PDFs, CSV files and notes · Ctrl+N for a new note")
+                .color(theme.text_dim),
+        );
         ui.add_space(14.0);
         clicked = ui.button("  Open…  ").clicked();
     });
     clicked
+}
+
+fn paint_toast(ui: &egui::Ui, area: egui::Rect, toast: &mut Option<(String, f64)>, theme: &Theme) {
+    let Some((text, until)) = toast else { return };
+    let now = ui.input(|i| i.time);
+    if now >= *until {
+        *toast = None;
+        return;
+    }
+    let alpha = ((*until - now) / 0.3).clamp(0.0, 1.0) as f32;
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("whir.toast"),
+    ));
+    let galley = painter.layout_no_wrap(
+        text.clone(),
+        egui::FontId::proportional(12.5),
+        theme.text.gamma_multiply(alpha),
+    );
+    let pad = egui::vec2(12.0, 6.0);
+    let size = galley.size() + pad * 2.0;
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(area.center().x, area.bottom() - 28.0 - size.y / 2.0),
+        size,
+    );
+    painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
+    painter.rect_stroke(
+        rect,
+        size.y / 2.0,
+        egui::Stroke::new(1.0, theme.separator.gamma_multiply(alpha)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, theme.text);
+    ui.ctx().request_repaint_after(Duration::from_millis(50));
 }
 
 impl Handler for App {
@@ -345,6 +886,10 @@ impl Handler for App {
         if !self.fallback_fonts_loaded && theme::fallback_fonts_requested() {
             self.fallback_fonts_loaded = true;
             whir_platform::fonts::add_fallbacks(&self.ctx, theme::LAZY_FALLBACK_FONTS);
+        }
+        if !self.rich_fonts_loaded && theme::rich_fonts_requested() {
+            self.rich_fonts_loaded = true;
+            whir_platform::fonts::add_family_fonts(&self.ctx, theme::LAZY_RICH_FONTS);
         }
         if let Some(r) = &self.renderer {
             input.max_texture_side = Some(r.max_texture_side() as usize);
@@ -360,19 +905,30 @@ impl Handler for App {
             ..Default::default()
         };
         for cmd in full.platform_output.commands {
-            if let OutputCommand::CopyText(text) = cmd {
-                out.copied_text = Some(text);
+            match cmd {
+                OutputCommand::CopyText(text) => out.copied_text = Some(text),
+                OutputCommand::OpenUrl(open) => {
+                    out.commands.push(WindowCommand::OpenUrl(open.url));
+                }
+                _ => {}
             }
         }
-        let delay = full
-            .viewport_output
-            .get(&ViewportId::ROOT)
-            .map_or(Duration::MAX, |v| v.repaint_delay);
+        let viewport = full.viewport_output.get(&ViewportId::ROOT);
+        if viewport.is_some_and(|v| {
+            v.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::RequestPaste))
+        }) {
+            out.commands.push(WindowCommand::Paste);
+        }
+        let delay = viewport.map_or(Duration::MAX, |v| v.repaint_delay);
         if delay < Duration::from_secs(60 * 60) {
             out.repaint_after = Some(delay);
         }
-        // Text needing CJK/emoji glyphs appeared this frame: load fallbacks now.
-        if !self.fallback_fonts_loaded && theme::fallback_fonts_requested() {
+        // Text needing CJK/emoji glyphs (or bold) appeared this frame: load fonts now.
+        if (!self.fallback_fonts_loaded && theme::fallback_fonts_requested())
+            || (!self.rich_fonts_loaded && theme::rich_fonts_requested())
+        {
             out.repaint_after = Some(Duration::ZERO);
         }
 
@@ -423,6 +979,10 @@ impl Handler for App {
                 let remaining = FIRST_FRAME_CONTENT_WAIT - waited;
                 out.repaint_after = Some(out.repaint_after.map_or(remaining, |d| d.min(remaining)));
             }
+        } else if !self.library_scanned {
+            // The notes list is read once the window is up (never on the startup path).
+            self.library_scanned = true;
+            self.open_cx.library.scan();
         }
 
         out.commands.append(&mut self.pending);
@@ -439,15 +999,64 @@ impl Handler for App {
         self.open_paths(paths);
     }
 
+    fn bare_launch(&mut self) {
+        self.new_note();
+    }
+
     fn close_requested(&mut self) -> bool {
+        if self.restart.borrow().is_some() {
+            return self.close_for_restart();
+        }
         // "Close because empty" is void if files arrived in the meantime.
-        let cancel =
-            self.closing_because_empty && !self.tabs.is_empty() && self.restart.borrow().is_none();
+        if self.closing_because_empty && !self.tabs.is_empty() {
+            self.closing_because_empty = false;
+            return false;
+        }
         self.closing_because_empty = false;
-        !cancel
+        if !self.close_confirmed {
+            if self.close_flow.is_some() {
+                return false;
+            }
+            for t in &mut self.tabs {
+                t.doc.flush();
+            }
+            let queue: Vec<u64> = self
+                .tabs
+                .iter()
+                .filter(|t| needs_attention(&*t.doc))
+                .map(|t| t.id)
+                .collect();
+            if !queue.is_empty() {
+                let focus = self.ctx.memory(|m| m.focused());
+                self.close_flow = Some(CloseFlow::new(
+                    close_flow::Kind::Window,
+                    queue,
+                    Vec::new(),
+                    focus,
+                ));
+                self.ctx.request_repaint();
+                return false;
+            }
+        }
+        // Background saves must finish first (the process exits right after).
+        if self
+            .tabs
+            .iter()
+            .chain(&self.zombies)
+            .any(|t| t.doc.is_saving())
+        {
+            self.close_confirmed = true;
+            self.close_when_idle = true;
+            self.ctx.request_repaint();
+            return false;
+        }
+        true
     }
 
     fn activated(&mut self, active: bool) {
+        for t in &mut self.tabs {
+            t.doc.app_activated(active);
+        }
         if !active {
             // Let other apps save/replace files we have open.
             whir_core::file::release_all();
@@ -462,5 +1071,69 @@ impl Handler for App {
             Theme::set_current(self.theme.clone());
             self.pending.push(WindowCommand::SetDarkMode(dark));
         }
+    }
+
+    fn save_dialog_closed(&mut self, token: u64, path: Option<PathBuf>) {
+        if let Some(flow) = &mut self.close_flow
+            && flow.owns_dialog(token)
+        {
+            flow.dialog_closed(path, &mut self.tabs);
+            return;
+        }
+        let Some(pos) = self.dialogs.iter().position(|(t, _)| *t == token) else {
+            return;
+        };
+        let (_, purpose) = self.dialogs.remove(pos);
+        let DialogFor::SaveAs(tab) = purpose;
+        let Some(path) = path else { return };
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab)
+            && let SaveResult::Failed(e) = t.doc.save_as(path)
+        {
+            self.show_toast(e);
+        }
+    }
+
+    fn recycled(&mut self, path: PathBuf, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.show_toast("Moved to the Recycle Bin"),
+            Err(e) => self.show_toast(e),
+        }
+        self.open_cx.library.refresh(vec![path]);
+    }
+
+    fn query_end_session(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for t in &mut self.tabs {
+            let _ = t.doc.flush_blocking(deadline);
+        }
+        let queue: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|t| needs_attention(&*t.doc))
+            .map(|t| t.id)
+            .collect();
+        if queue.is_empty() {
+            return true;
+        }
+        // Unsaved work: ask Windows to wait, and ask the user.
+        if self.close_flow.is_none() {
+            self.close_flow = Some(CloseFlow::new(
+                close_flow::Kind::Window,
+                queue,
+                Vec::new(),
+                None,
+            ));
+        }
+        self.ctx.request_repaint();
+        false
+    }
+
+    fn end_session(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for t in self.tabs.iter_mut().chain(self.zombies.iter_mut()) {
+            let _ = t.doc.flush_blocking(deadline);
+        }
+        let _ = whir_notes::saver::wait_idle(deadline);
+        trace::flush();
     }
 }

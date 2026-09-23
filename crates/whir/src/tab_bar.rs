@@ -13,6 +13,10 @@ pub struct TabInfo<'a> {
     pub tooltip: Option<String>,
     pub kind: DocKind,
     pub loading: bool,
+    /// Unsaved changes the user must save: a dot instead of ✕ until hovered.
+    pub dirty: bool,
+    /// Saving failed.
+    pub error: bool,
 }
 
 #[derive(Default)]
@@ -20,6 +24,8 @@ pub struct TabBarOutput {
     pub activate: Option<usize>,
     pub close: Option<usize>,
     pub open_dialog: bool,
+    pub new_note: bool,
+    pub new_table: bool,
     pub minimize: bool,
     pub toggle_maximize: bool,
     pub close_window: bool,
@@ -189,8 +195,9 @@ pub fn show(
                 .with_clip_rect(rect)
                 .galley(pos, galley, theme.tab_text);
         }
+        let flagged = tab.dirty || tab.error;
         if let Some(cr) = &close_resp
-            && (is_active || resp.hovered() || cr.hovered())
+            && (is_active || resp.hovered() || cr.hovered() || flagged)
         {
             if cr.hovered() {
                 let bg = if cr.is_pointer_button_down_on() {
@@ -200,12 +207,22 @@ pub fn show(
                 };
                 painter.rect_filled(close_rect, 4.0, bg);
             }
-            paint_glyph(
-                &painter,
-                close_rect.center(),
-                Glyph::CloseSmall,
-                text_color(is_active),
-            );
+            if flagged && !cr.hovered() {
+                // Unsaved (or failed to save): a dot where the ✕ goes.
+                let color = if tab.error {
+                    theme.danger
+                } else {
+                    text_color(is_active)
+                };
+                painter.circle_filled(close_rect.center(), 3.5, color);
+            } else {
+                paint_glyph(
+                    &painter,
+                    close_rect.center(),
+                    Glyph::CloseSmall,
+                    text_color(is_active),
+                );
+            }
         }
     }
 
@@ -223,7 +240,7 @@ pub fn show(
     }
     out.interactive.extend(rects.iter().copied());
 
-    // --- open button ---
+    // --- new note button (right-click: more) ---
     let plus_left = rects.last().map_or(left, |r| r.right() + m.tab_gap + 2.0);
     let plus = Rect::from_min_size(
         pos2(
@@ -232,7 +249,7 @@ pub fn show(
         ),
         vec2(plus_size, plus_size),
     );
-    let plus_resp = ui.interact(plus, ui.id().with("open"), Sense::CLICK);
+    let plus_resp = ui.interact(plus, ui.id().with("new"), Sense::CLICK);
     if plus_resp.hovered() {
         painter.rect_filled(plus, 6.0, theme.tab_hover_bg);
     }
@@ -243,9 +260,34 @@ pub fn show(
         theme.tab_text_inactive,
     );
     if plus_resp.clicked() {
-        out.open_dialog = true;
+        out.new_note = true;
     }
-    plus_resp.on_hover_text("Open file (Ctrl+O)");
+    plus_resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        if ui
+            .add(egui::Button::new("New note").shortcut_text("Ctrl+N"))
+            .clicked()
+        {
+            out.new_note = true;
+            ui.close();
+        }
+        if ui
+            .add(egui::Button::new("New table").shortcut_text("Ctrl+Shift+N"))
+            .clicked()
+        {
+            out.new_table = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add(egui::Button::new("Open file…").shortcut_text("Ctrl+O"))
+            .clicked()
+        {
+            out.open_dialog = true;
+            ui.close();
+        }
+    });
+    plus_resp.on_hover_text("New note (Ctrl+N) · right-click for more");
     out.interactive.push(plus);
     out
 }
@@ -352,7 +394,7 @@ fn paint_glyph(painter: &egui::Painter, center: Pos2, glyph: Glyph, color: Color
     }
 }
 
-fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &Theme) {
+pub(crate) fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &Theme) {
     let color = match kind {
         DocKind::Image => Color32::from_rgb(0x4c, 0x9a, 0xff),
         DocKind::Pdf => Color32::from_rgb(0xf0, 0x55, 0x4a),

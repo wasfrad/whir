@@ -1260,6 +1260,10 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 if s.with_handler(|h| h.close_requested()).unwrap_or(true) {
                     let _ = DestroyWindow(hwnd);
+                } else {
+                    // The app is asking the user first (or waiting for saves):
+                    // it needs a frame to show that.
+                    s.request_repaint();
                 }
                 LRESULT(0)
             }

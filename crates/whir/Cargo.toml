@@ -18,5 +18,6 @@ whir-gfx.workspace = true
 whir-image.workspace = true
 whir-pdf.workspace = true
 whir-csv.workspace = true
+whir-notes.workspace = true
 egui.workspace = true
 windows.workspace = true

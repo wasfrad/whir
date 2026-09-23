@@ -635,6 +635,7 @@ dependencies = [
  "whir-csv",
  "whir-gfx",
  "whir-image",
+ "whir-notes",
  "whir-pdf",
  "whir-platform",
  "windows",
@@ -674,6 +675,14 @@ dependencies = [
  "egui",
  "whir-core",
  "windows",
+]
+
+[[package]]
+name = "whir-notes"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "whir-core",
 ]
 
 [[package]]

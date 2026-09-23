@@ -10,6 +10,7 @@ pub enum Kind {
     Image,
     Pdf,
     Csv,
+    Note,
 }
 
 pub fn kind_from_extension(path: &Path) -> Option<Kind> {
@@ -20,6 +21,8 @@ pub fn kind_from_extension(path: &Path) -> Option<Kind> {
         Some(Kind::Pdf)
     } else if whir_csv::EXTENSIONS.contains(&ext.as_str()) {
         Some(Kind::Csv)
+    } else if whir_notes::EXTENSIONS.contains(&ext.as_str()) {
+        Some(Kind::Note)
     } else {
         None
     }
@@ -59,9 +62,10 @@ pub fn open(path: PathBuf, cx: &OpenCx) -> Box<dyn Document> {
         Some(Kind::Image) => whir_image::open(path, cx),
         Some(Kind::Pdf) => whir_pdf::open(path, cx),
         Some(Kind::Csv) => whir_csv::open(path, cx),
+        Some(Kind::Note) => whir_notes::open(path, cx),
         None => {
             let detail = if path.exists() {
-                "whir opens images, PDFs and CSV files."
+                "whir opens images, PDFs, CSV files, and Markdown or text notes."
             } else {
                 "The file doesn't exist."
             };
@@ -82,6 +86,7 @@ pub fn open_dialog_filters() -> Vec<(String, String)> {
         .iter()
         .chain(whir_pdf::EXTENSIONS)
         .chain(whir_csv::EXTENSIONS)
+        .chain(whir_notes::EXTENSIONS)
         .copied()
         .collect();
     vec![
@@ -89,6 +94,7 @@ pub fn open_dialog_filters() -> Vec<(String, String)> {
         ("Images".to_owned(), pattern(whir_image::EXTENSIONS)),
         ("PDF documents".to_owned(), pattern(whir_pdf::EXTENSIONS)),
         ("CSV / TSV".to_owned(), pattern(whir_csv::EXTENSIONS)),
+        ("Notes & text".to_owned(), pattern(whir_notes::EXTENSIONS)),
         ("All files".to_owned(), "*.*".to_owned()),
     ]
 }
@@ -102,6 +108,8 @@ mod tests {
         assert_eq!(kind_from_extension(Path::new("a/B.PNG")), Some(Kind::Image));
         assert_eq!(kind_from_extension(Path::new("x.pdf")), Some(Kind::Pdf));
         assert_eq!(kind_from_extension(Path::new("x.tsv")), Some(Kind::Csv));
+        assert_eq!(kind_from_extension(Path::new("x.md")), Some(Kind::Note));
+        assert_eq!(kind_from_extension(Path::new("x.TXT")), Some(Kind::Note));
         assert_eq!(kind_from_extension(Path::new("x.docx")), None);
         assert_eq!(kind_from_extension(Path::new("noext")), None);
     }

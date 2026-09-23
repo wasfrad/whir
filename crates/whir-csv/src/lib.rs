@@ -23,3 +23,13 @@ pub const EXTENSIONS: &[&str] = &["csv", "tsv", "tab"];
 pub fn open(path: PathBuf, cx: &OpenCx) -> Box<dyn Document> {
     Box::new(doc::CsvDoc::open(path, cx))
 }
+
+/// A new, empty table (placeholder until table editing lands).
+pub fn new_blank(_cx: &OpenCx) -> Box<dyn Document> {
+    whir_core::MessageDoc::new(
+        None,
+        "New tables are coming",
+        "Table editing is on its way.",
+    )
+    .boxed()
+}
