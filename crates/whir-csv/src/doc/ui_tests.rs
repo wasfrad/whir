@@ -681,3 +681,79 @@ fn right_click_selects_like_excel() {
     assert_eq!(h.cursor(), (2, 2));
     assert_eq!(h.l().grid.sel.unwrap().cell_count(), 1);
 }
+
+#[test]
+fn a_new_table_saves_into_the_library() {
+    let mut h = Harness::blank("ui-blank");
+    assert_eq!(h.doc.title(), "Untitled table");
+    assert!(h.doc.path().is_none());
+    assert!(h.doc.is_pristine());
+    assert_eq!(header(&mut h), ["Column 1", "Column 2", "Column 3"]);
+    // Nothing typed: saving writes nothing.
+    assert!(matches!(h.doc.save(), SaveResult::Saved));
+    assert!(std::fs::read_dir(&h._dir).unwrap().next().is_none());
+    // Type straight away: the cursor is on the "+" row.
+    h.type_text("hello");
+    h.key(Key::Tab, NONE);
+    h.type_text("world");
+    h.key(Key::Enter, NONE);
+    assert!(!h.doc.is_pristine());
+    assert!(h.doc.is_dirty());
+    assert_eq!(h.l().rows(), 1);
+    assert_eq!(
+        h.cursor(),
+        (1, 0),
+        "Enter: the next \"+\" row, first column"
+    );
+    assert!(matches!(h.doc.save(), SaveResult::Started));
+    wait_for(|| {
+        h.doc.poll();
+        !h.doc.is_saving()
+    });
+    assert_eq!(h.doc.save_error(), None);
+    let path = h.doc.path().unwrap().to_path_buf();
+    assert_eq!(path.parent().unwrap(), h._dir.as_path());
+    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+    assert!(whir_core::library::is_untitled_stem(&stem), "{stem}");
+    assert_eq!(h.doc.title(), path.file_name().unwrap().to_string_lossy());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        "\u{feff}Column 1,Column 2,Column 3\r\nhello,world,\r\n".as_bytes()
+    );
+    assert!(!h.doc.is_dirty());
+    assert!(!h.doc.is_pristine());
+    // Now it is an ordinary file in the library: Save As exports a copy.
+    let copy = h._dir.join("sub");
+    std::fs::create_dir_all(&copy).unwrap();
+    let copy = copy.join("copy.tsv");
+    h.doc.save_as(copy.clone());
+    wait_for(|| {
+        h.doc.poll();
+        !h.doc.is_saving()
+    });
+    assert_eq!(h.doc.path(), Some(path.as_path()));
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        "\u{feff}Column 1\tColumn 2\tColumn 3\r\nhello\tworld\t\r\n".as_bytes()
+    );
+}
+
+#[test]
+fn an_empty_file_grows_a_header() {
+    let mut h = Harness::open("ui-empty", b"");
+    assert_eq!(h.l().grid.cols(), 0);
+    h.act(crate::grid::Action::AppendColumn);
+    h.type_text("Name");
+    h.key(Key::Enter, NONE);
+    h.select(0, 0); // the "+" row
+    h.type_text("Ann");
+    h.key(Key::Enter, NONE);
+    h.doc.save();
+    wait_for(|| {
+        h.doc.poll();
+        !h.doc.is_saving()
+    });
+    assert_eq!(h.doc.save_error(), None);
+    let path = h.doc.path().unwrap().to_path_buf();
+    assert_eq!(std::fs::read(&path).unwrap(), b"Name\r\nAnn\r\n");
+}

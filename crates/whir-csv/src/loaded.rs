@@ -163,8 +163,6 @@ pub struct Loaded {
     /// Rows a reload after saving will have (until indexing catches up).
     pub expected_rows: Option<u64>,
     pub index_cancel: Arc<AtomicBool>,
-    /// A new table that was never saved.
-    pub blank: bool,
     /// Time of the current frame (for status messages set outside `ui`).
     pub now: f64,
     pub waker: Waker,
@@ -211,7 +209,6 @@ impl Loaded {
             status: None,
             expected_rows: None,
             index_cancel: o.index_cancel,
-            blank: false,
             now: 0.0,
             waker: o.waker,
         }

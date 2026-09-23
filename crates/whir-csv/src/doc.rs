@@ -325,7 +325,11 @@ pub fn new_blank(cx: &OpenCx) -> CsvDoc {
         index_cancel: Arc::new(AtomicBool::new(false)),
         waker: cx.waker.clone(),
     });
-    l.blank = true;
+    // Ready to type: the cursor sits on the "+" row.
+    l.grid.sel = Some(crate::grid::Selection::single(crate::grid::CellPos {
+        row: 0,
+        col: 0,
+    }));
     CsvDoc {
         path: None,
         title: UNTITLED.to_owned(),
