@@ -1,8 +1,9 @@
 # whir
 
-A fast, lean, native Windows viewer for the three file types that matter at work:
-**images, PDFs and CSVs**. Double-click a file and it's on screen; open another and it
-becomes a tab in the same window.
+A fast, lean, native Windows app for the files that matter at work: **images, PDFs,
+CSVs and notes**. Double-click a file and it's on screen; open another and it becomes a
+tab in the same window. Start whir on its own and you get a blank note to type into —
+it saves itself, no questions asked.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
 - One portable folder: `whir.exe` (~3.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
@@ -12,7 +13,7 @@ becomes a tab in the same window.
 
 1. Build (below) or copy `dist\whir\` anywhere you can write (e.g. `%LOCALAPPDATA%\Programs\whir`).
 2. Run once: `whir.exe --register`
-   This adds per-user "Open with" entries for images, PDFs and CSVs (HKCU only).
+   This adds per-user "Open with" entries for images, PDFs, CSVs, Markdown and text files (HKCU only).
 3. Right-click a `.png`, `.pdf` and `.csv` → **Open with → Choose another app → whir → Always**.
    (Windows doesn't let programs make themselves the default; this click is required once per type.)
 
@@ -25,12 +26,38 @@ folder first. If it's blocked there, it will be blocked everywhere.
 
 | Everywhere | |
 |---|---|
+| Ctrl+N · `+` | New note |
+| Ctrl+Shift+N · right-click `+` | New table (CSV) |
 | Ctrl+O | Open files |
+| Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
+| Ctrl+E · rest the pointer on the right edge | Notes drawer |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |
 | Ctrl+1 … Ctrl+8, Ctrl+9 | Go to tab n / last tab |
 | Ctrl+Shift+T | Reopen closed tab |
 | Drag files onto the window | Open them |
+
+A ● on a tab means unsaved changes; closing it (or whir) asks whether to save.
+
+| Notes | |
+|---|---|
+| Title field · ↓ / Enter | Name the note (it becomes the file name) · go to the text |
+| Enter in a list / task / quote | Continue it (Enter on an empty item ends it) |
+| Tab / Shift+Tab | Indent / outdent list items or selected lines |
+| Ctrl+Enter · click a box | Toggle a `- [ ]` task |
+| Ctrl+B · Ctrl+I · Ctrl+K | Bold · italic · link |
+| Ctrl+click a link | Open it |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
+
+Notes are plain Markdown files in `Documents\whir`, saved about a second after you stop
+typing (and whenever you switch away). Other `.md` / `.txt` files open in the same editor
+and are saved with Ctrl+S.
+
+| Notes drawer | |
+|---|---|
+| Rest the pointer on the right edge, then on the strip | Peek, then open the list (newest first) |
+| Click · right-click | Open · Show in Explorer / Delete (to the Recycle Bin) |
+| Ctrl+E, then ↑ ↓ · Enter · Delete · Esc | Keyboard: move · open · delete · close |
 
 | Images | |
 |---|---|
@@ -72,6 +99,7 @@ Diagnostics:
 - `WHIR_TRACE=1` appends a startup timeline (ms since process creation) to
   `%LOCALAPPDATA%\whir\trace.log`.
 - `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
+- `WHIR_NOTES_DIR=<folder>` keeps notes somewhere other than `Documents\whir` (testing).
 
 ## Measured (release build, desktop with NVIDIA GPU, files in the OS cache)
 
@@ -94,10 +122,14 @@ Much of the baseline memory is the GPU driver itself. On weak or remote machines
 
 ```
 crates/
-  whir/           exe: startup ordering, single instance, tabs + title bar, shortcuts, --register
-  whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop, input → egui
+  whir/           exe: startup ordering, single instance, tabs + title bar, shortcuts, save/close
+                  prompts, the notes drawer, --register
+  whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
+                  input → egui, Open/Save dialogs, Recycle Bin, session end
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
-  whir-core/      Document trait, lock-free-for-others file access, f64 scrolling, theme tokens, tracing
+  whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
+                  replace, the notes library, find bar, f64 scrolling, theme tokens, tracing
+  whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures
   whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
   whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background find/sort
@@ -110,6 +142,9 @@ Principles:
 - **Never lock your files.** Everything is opened with full sharing and never memory-mapped, and
   handles are dropped when whir loses focus. Excel can save a CSV that's open in whir, and
   the CSV tab notices the change and offers to reload.
+- **Never lose your work.** Saves go to a temp file next to the original and replace it
+  atomically (`ReplaceFileW`, keeping permissions); notes save themselves; whir asks before
+  closing anything unsaved, and waits for in-flight saves before exiting.
 - **Memory follows the screen.**
   - Images keep a screen-sized level and decode full resolution only when you zoom in.
   - The CSV index costs about 1.25 MB per 10M rows.
@@ -122,7 +157,8 @@ the font list are in `crates/whir-core/src/theme.rs`, which is the single seam f
 re_ui's design tokens later. Fonts are loaded from `%WINDIR%\Fonts` (memory-mapped).
 CJK and emoji fallbacks load on first use.
 
-## Not in v1
+## Not yet
 
-PDF text selection/search/passwords, animated GIFs, ICC colour management, editing,
-tab reordering, WebP/HEIC without the Microsoft Store codecs.
+PDF passwords, animated GIFs, ICC colour management, image editing, tab reordering,
+WebP/HEIC without the Microsoft Store codecs, IME composition at the caret, spell check,
+subfolders in the notes library.
