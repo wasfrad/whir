@@ -48,6 +48,11 @@ impl Layout {
         self.tops[page]
     }
 
+    /// Bottom edge of a page, in PDF points from the top of the document.
+    pub fn bottom(&self, page: usize) -> f64 {
+        self.tops[page] + self.sizes[page][1] as f64
+    }
+
     pub fn content_width(&self) -> f64 {
         self.max_width + 2.0 * MARGIN
     }
