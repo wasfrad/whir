@@ -11,12 +11,16 @@ use whir_core::theme::Theme;
 use whir_core::{DocCx, DocKind, Document, FileSource, OpenCx, Waker};
 
 use crate::dialect::{Encoding, Sniffed, sniff};
+use crate::edit::{Edits, MAX_EDIT_ROWS, RowKey};
 use crate::find::{self, FindMsg};
-use crate::grid::{self, CellPos, Grid, GridIo, Selection};
+use crate::grid::{self, Action, CellPos, Editable, Grid, GridIo, Selection};
 use crate::index::{self, IndexState, SharedIndex};
-use crate::sort::{self, Direction, SortMsg, SortSpec, Sorted};
+use crate::order::Order;
+use crate::sort::{self, Direction, SortMsg, SortSpec};
 use crate::source::{ByteSource, transcode_utf16};
+use crate::stream::StreamInput;
 use crate::table::Table;
+use crate::view::SheetView;
 
 /// Copy at most this many cells / bytes to the clipboard.
 const MAX_COPY_CELLS: u64 = 2_000_000;
@@ -33,18 +37,19 @@ enum LoadMsg {
     Failed(String),
 }
 
-struct FindState {
-    bar: FindBar,
+pub(crate) struct FindState {
+    pub bar: FindBar,
     /// Query the current results belong to.
-    searched: String,
-    raw: Vec<(u32, u32)>,
+    pub searched: String,
+    /// Matches by row key (stable across edits and sorting).
+    pub raw: Vec<(RowKey, u32)>,
     /// (display row, col), sorted: what the grid highlights.
-    display: Vec<(u64, u32)>,
-    current: Option<usize>,
-    running: bool,
-    truncated: bool,
-    cancel: Option<Arc<AtomicBool>>,
-    rx: Option<Receiver<FindMsg>>,
+    pub display: Vec<(u64, u32)>,
+    pub current: Option<usize>,
+    pub running: bool,
+    pub truncated: bool,
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub rx: Option<Receiver<FindMsg>>,
 }
 
 impl Default for FindState {
@@ -84,17 +89,31 @@ impl FindState {
     }
 }
 
-struct Loaded {
-    table: Table,
-    grid: Grid,
-    measured_rows: u64,
-    original_encoding: Encoding,
-    sorted: Option<Sorted>,
-    sorting: Option<(SortSpec, Arc<AtomicBool>, Receiver<SortMsg>)>,
-    find: FindState,
+/// A sort being computed on its thread.
+pub(crate) struct Sorting {
+    pub spec: SortSpec,
+    pub cancel: Arc<AtomicBool>,
+    pub rx: Receiver<SortMsg>,
+    /// `edits.rev` when it started: later cell edits make the result stale.
+    pub rev: u64,
+}
+
+pub(crate) struct Loaded {
+    pub table: Table,
+    pub grid: Grid,
+    pub measured_rows: u64,
+    pub original_encoding: Encoding,
+    /// Where the header row starts (after a BOM).
+    pub header_offset: u64,
+    pub edits: Edits,
+    pub order: Option<Order>,
+    /// Bumped whenever a sort result is installed or cleared.
+    pub order_gen: u64,
+    pub sorting: Option<Sorting>,
+    pub find: FindState,
     /// Transient footer message and when it expires.
-    status: Option<(String, f64)>,
-    index_cancel: Arc<AtomicBool>,
+    pub status: Option<(String, f64)>,
+    pub index_cancel: Arc<AtomicBool>,
 }
 
 enum Phase {
@@ -127,7 +146,7 @@ impl CsvDoc {
 
     fn reload(&mut self) {
         if let Phase::Ready(l) = &self.phase {
-            l.index_cancel.store(true, Ordering::Relaxed);
+            l.cancel_workers();
         }
         self.phase = Phase::Loading(start_loading(self.path.clone(), self.waker.clone()));
     }
@@ -190,46 +209,88 @@ fn load(path: &Path, waker: &Waker) -> Result<LoadMsg, String> {
 }
 
 impl Loaded {
-    fn data_rows(&self) -> u64 {
-        match &self.sorted {
-            Some(s) => s.perm.len() as u64,
-            None => self.table.progress().rows.saturating_sub(1),
+    fn new(
+        source: Arc<dyn ByteSource>,
+        sniffed: Sniffed,
+        original_encoding: Encoding,
+        index: SharedIndex,
+        index_cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            table: Table::new(source, sniffed.dialect, sniffed.encoding, index),
+            grid: Grid::default(),
+            measured_rows: 0,
+            original_encoding,
+            header_offset: sniffed.bom_len,
+            edits: Edits::default(),
+            order: None,
+            order_gen: 0,
+            sorting: None,
+            find: FindState::default(),
+            status: None,
+            index_cancel,
         }
     }
 
-    fn perm(&self) -> Option<&[u32]> {
-        self.sorted.as_ref().map(|s| &s.perm[..])
+    /// Data rows in the file (so far, while indexing).
+    pub fn base_rows(&self) -> u64 {
+        self.table.progress().rows.saturating_sub(1)
     }
 
-    fn first_row_offset(&self) -> u64 {
-        self.table
-            .index
-            .read()
-            .ok()
-            .and_then(|s| s.checkpoints.first().copied())
-            .unwrap_or(0)
+    /// Rows shown (excluding the header and the "+" row).
+    pub fn rows(&self) -> u64 {
+        match &self.order {
+            Some(o) => o.len(),
+            None => self.edits.logical_len(self.base_rows()),
+        }
     }
 
-    fn set_status(&mut self, text: impl Into<String>, now: f64) {
+    pub fn display_of(&self, k: RowKey) -> Option<u64> {
+        match &self.order {
+            Some(o) => o.display_of(k),
+            None => self.edits.index_of(k, self.base_rows()),
+        }
+    }
+
+    /// Everything a worker needs to read the table as it is now.
+    pub fn stream_input(&self) -> StreamInput {
+        StreamInput {
+            source: self.table.source.clone(),
+            dialect: self.table.effective_dialect(),
+            header_offset: self.header_offset,
+            index: self.table.index.clone(),
+            edits: self.edits.snapshot(),
+        }
+    }
+
+    pub fn set_status(&mut self, text: impl Into<String>, now: f64) {
         self.status = Some((text.into(), now + 3.0));
     }
 
-    fn poll(&mut self, waker: &Waker) {
+    fn cancel_workers(&self) {
+        self.index_cancel.store(true, Ordering::Relaxed);
+        if let Some(c) = &self.find.cancel {
+            c.store(true, Ordering::Relaxed);
+        }
+        if let Some(s) = &self.sorting {
+            s.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn poll(&mut self) {
         // Sort results.
-        if let Some((spec, _, rx)) = &self.sorting
-            && let Ok(SortMsg::Done(result)) = rx.try_recv()
+        if let Some(s) = &self.sorting
+            && let Ok(SortMsg::Done(result)) = s.rx.try_recv()
         {
-            let spec = *spec;
+            let rev = s.rev;
             self.sorting = None;
             match result {
-                Ok(sorted) => {
-                    self.table.set_cache_capacity(1024);
-                    self.sorted = Some(sorted);
-                    self.remap_matches();
+                Ok(mut order) => {
+                    order.stale = rev != self.edits.rev;
+                    self.install_order(Some(order));
                 }
                 Err(e) if e != "cancelled" => {
                     self.status = Some((e, f64::INFINITY));
-                    let _ = spec;
                 }
                 Err(_) => {}
             }
@@ -257,38 +318,46 @@ impl Loaded {
                 self.reveal_match();
             }
         }
-        let _ = waker;
     }
 
-    fn remap_matches(&mut self) {
+    /// Show a new display order (or the file order).
+    pub fn install_order(&mut self, order: Option<Order>) {
+        self.order_gen += 1;
+        self.table
+            .set_cache_capacity(if order.is_some() { 1024 } else { 96 });
+        self.order = order.map(|mut o| {
+            o.generation = self.order_gen;
+            o
+        });
+        self.remap_matches();
+    }
+
+    /// Recompute display positions of find matches (after sorting or row changes).
+    pub fn remap_matches(&mut self) {
         let current = self
             .find
             .current
             .and_then(|i| self.find.display.get(i).copied());
-        self.find.display = match &self.sorted {
-            Some(s) => {
-                let mut v: Vec<(u64, u32)> = self
-                    .find
-                    .raw
-                    .iter()
-                    .filter_map(|&(r, c)| s.inverse.get(r as usize).map(|&d| (d as u64, c)))
-                    .collect();
-                v.sort_unstable();
-                v
-            }
-            None => self.find.raw.iter().map(|&(r, c)| (r as u64, c)).collect(),
-        };
+        let mut v: Vec<(u64, u32)> = self
+            .find
+            .raw
+            .iter()
+            .filter_map(|&(k, c)| self.display_of(k).map(|d| (d, c)))
+            .collect();
+        v.sort_unstable();
+        self.find.display = v;
         if let Some(cur) = current {
             self.find.current = self
                 .find
                 .display
                 .iter()
                 .position(|&m| m == cur)
-                .or(self.find.current);
+                .or(self.find.current)
+                .filter(|&i| i < self.find.display.len());
         }
     }
 
-    fn start_find(&mut self, query: String, waker: &Waker) {
+    pub fn start_find(&mut self, query: String, waker: &Waker) {
         if let Some(c) = self.find.cancel.take() {
             c.store(true, Ordering::Relaxed);
         }
@@ -305,10 +374,8 @@ impl Loaded {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         find::spawn(
-            self.table.source.clone(),
-            self.table.effective_dialect(),
+            self.stream_input(),
             self.table.encoding,
-            self.first_row_offset(),
             self.find.searched.clone(),
             cancel.clone(),
             tx,
@@ -343,34 +410,47 @@ impl Loaded {
         }
     }
 
-    fn toggle_sort(&mut self, col: usize, waker: &Waker, now: f64) {
-        let progress = self.table.progress();
-        if !progress.done || progress.error.is_some() {
-            self.set_status(
-                "Sorting is available once the whole file has been read.",
-                now,
-            );
-            return;
-        }
-        let current = self
-            .sorting
+    /// Current (or computing) sort.
+    pub fn sort_spec(&self) -> Option<SortSpec> {
+        self.sorting
             .as_ref()
-            .map(|s| s.0)
-            .or(self.sorted.as_ref().map(|s| s.spec));
-        let next = match current {
+            .map(|s| s.spec)
+            .or(self.order.as_ref().and_then(|o| o.spec))
+    }
+
+    /// Header click: ascending → descending → original order.
+    fn toggle_sort(&mut self, col: usize, waker: &Waker, now: f64) {
+        let next = match self.sort_spec() {
             Some(s) if s.column == col && s.direction == Direction::Ascending => {
                 Some(Direction::Descending)
             }
             Some(s) if s.column == col && s.direction == Direction::Descending => None,
             _ => Some(Direction::Ascending),
         };
-        if let Some((_, cancel, _)) = self.sorting.take() {
-            cancel.store(true, Ordering::Relaxed);
+        self.sort(col, next, waker, now);
+    }
+
+    /// Sort by `col` (`None`: back to file order).
+    pub fn sort(&mut self, col: usize, direction: Option<Direction>, waker: &Waker, now: f64) {
+        let progress = self.table.progress();
+        if direction.is_some() && (!progress.done || progress.error.is_some()) {
+            self.set_status(
+                "Sorting is available once the whole file has been read.",
+                now,
+            );
+            return;
         }
-        let Some(direction) = next else {
-            self.sorted = None;
-            self.table.set_cache_capacity(96);
-            self.remap_matches();
+        if direction.is_some() && self.base_rows() >= MAX_EDIT_ROWS {
+            self.set_status("This file has too many rows to sort.", now);
+            return;
+        }
+        if let Some(s) = self.sorting.take() {
+            s.cancel.store(true, Ordering::Relaxed);
+        }
+        let Some(direction) = direction else {
+            if self.order.is_some() {
+                self.install_order(None);
+            }
             return;
         };
         let spec = SortSpec {
@@ -380,20 +460,25 @@ impl Loaded {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         sort::spawn(
-            self.table.source.clone(),
-            self.table.effective_dialect(),
-            self.first_row_offset(),
+            self.stream_input(),
+            self.table.encoding,
             spec,
             cancel.clone(),
             tx,
             waker.clone(),
         );
-        self.sorting = Some((spec, cancel, rx));
+        self.sorting = Some(Sorting {
+            spec,
+            cancel,
+            rx,
+            rev: self.edits.rev,
+        });
     }
 
     /// Selection as tab-separated text (Excel-compatible quoting).
     fn copy_text(&mut self) -> Option<(String, u64, bool)> {
-        let sel = self.grid.sel?;
+        let rows = self.rows();
+        let sel = self.grid.sel?.clamped(rows, self.grid.cols())?;
         let (r0, r1) = sel.rows();
         let (c0, c1) = sel.cols();
         let cols = (c1 - c0 + 1) as u64;
@@ -401,17 +486,19 @@ impl Loaded {
         let r1_capped = r1.min(r0 + max_rows - 1);
         let mut out = String::new();
         let mut truncated = r1_capped < r1;
-        let mut rows = 0u64;
+        let mut n = 0u64;
+        let base_rows = self.base_rows();
+        let mut view = SheetView {
+            table: &mut self.table,
+            edits: &self.edits,
+            order: self.order.as_ref(),
+            base_rows,
+        };
         for r in r0..=r1_capped {
-            let data_row = self
-                .perm()
-                .map_or(r, |p| p.get(r as usize).copied().unwrap_or(0) as u64);
-            let row = self.table.row(data_row + 1);
+            let row = view.row(r);
             for c in c0..=c1 {
-                if let Some((b, i)) = &row
-                    && let Some(view) = b.row(*i)
-                {
-                    let cell = view.cell(c);
+                if let Some(row) = &row {
+                    let cell = row.cell(c).text;
                     if cell.contains(['\t', '\n', '\r', '"']) {
                         out.push('"');
                         out.push_str(&cell.replace('"', "\"\""));
@@ -425,16 +512,16 @@ impl Loaded {
                 }
             }
             out.push('\n');
-            rows += 1;
+            n += 1;
             if out.len() > MAX_COPY_BYTES {
                 truncated = true;
                 break;
             }
         }
-        if out.ends_with('\n') && rows == 1 && c0 == c1 {
+        if out.ends_with('\n') && n == 1 && c0 == c1 {
             out.pop(); // a single cell pastes without a trailing newline
         }
-        Some((out, rows * cols, truncated))
+        Some((out, n * cols, truncated))
     }
 }
 
@@ -473,22 +560,18 @@ impl Document for CsvDoc {
                     original_encoding,
                     index,
                     index_cancel,
-                } => Phase::Ready(Box::new(Loaded {
-                    table: Table::new(source, sniffed.dialect, sniffed.encoding, index),
-                    grid: Grid::default(),
-                    measured_rows: 0,
+                } => Phase::Ready(Box::new(Loaded::new(
+                    source,
+                    sniffed,
                     original_encoding,
-                    sorted: None,
-                    sorting: None,
-                    find: FindState::default(),
-                    status: None,
+                    index,
                     index_cancel,
-                })),
+                ))),
                 LoadMsg::Failed(e) => Phase::Failed(e),
             };
         }
         if let Phase::Ready(l) = &mut self.phase {
-            l.poll(&self.waker);
+            l.poll();
         }
     }
 
@@ -542,9 +625,10 @@ fn show_loaded(
         }
     }
     let progress = l.table.progress();
+    let base_rows = progress.rows.saturating_sub(1);
 
     // Column widths from a sample, once the first rows are in (again at 1000 rows).
-    let available = progress.rows.saturating_sub(1);
+    let available = base_rows;
     let target = available.min(1000);
     if progress.rows > 0
         && (l.measured_rows == 0
@@ -552,7 +636,13 @@ fn show_loaded(
                 && target > l.measured_rows
                 && (target == 1000 || progress.done)))
     {
-        grid::measure_columns(ui, &mut l.grid, &mut l.table, target, theme);
+        let mut view = SheetView {
+            table: &mut l.table,
+            edits: &l.edits,
+            order: l.order.as_ref(),
+            base_rows,
+        };
+        grid::measure_columns(ui, &mut l.grid, &mut view, target, theme);
         l.measured_rows = target.max(1);
     }
 
@@ -573,7 +663,9 @@ fn show_loaded(
     }
 
     let find_has_focus = l.find.bar.has_focus(ui.ctx());
-    let escape = !find_has_focus && ui.input(|i| i.key_pressed(Key::Escape));
+    let escape = !find_has_focus
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|i| i.key_pressed(Key::Escape));
     if escape {
         if l.find.bar.open {
             l.find.bar.close();
@@ -582,49 +674,57 @@ fn show_loaded(
         }
     }
 
-    let rows = l.data_rows();
-    let sort_spec = l
-        .sorting
-        .as_ref()
-        .map(|s| s.0)
-        .or(l.sorted.as_ref().map(|s| s.spec));
-    let sorting = l.sorting.is_some();
+    let sort_spec = l.sort_spec();
+    let sort_dim = l.sorting.is_some() || l.order.as_ref().is_some_and(|o| o.stale);
+    let sorted = l.order.is_some();
     let loaded = &mut *l;
+    let mut view = SheetView {
+        table: &mut loaded.table,
+        edits: &loaded.edits,
+        order: loaded.order.as_ref(),
+        base_rows,
+    };
+    let rows = view.rows();
     let out = loaded.grid.show(
         ui,
         grid_rect,
         GridIo {
-            table: &mut loaded.table,
-            rows,
-            perm: loaded.sorted.as_ref().map(|s| s.perm.as_slice()),
+            view: &mut view,
             sort: sort_spec,
-            sorting,
+            sort_dim,
+            sorted,
             matches: &loaded.find.display,
             current_match: loaded.find.current,
             keyboard: !find_has_focus,
+            editable: Editable::READ_ONLY,
         },
         theme,
     );
-    if let Some(col) = out.sort_clicked {
-        l.toggle_sort(col, waker, now);
-    }
-    if out.copy
-        && let Some((text, cells, truncated)) = l.copy_text()
-    {
-        ui.ctx().copy_text(text);
-        let msg = if truncated {
-            format!(
-                "Copied the first {} cells (selection too large)",
-                fmt_int(cells)
-            )
-        } else {
-            format!(
-                "Copied {} cell{}",
-                fmt_int(cells),
-                if cells == 1 { "" } else { "s" }
-            )
-        };
-        l.set_status(msg, now);
+    for action in out.actions {
+        match action {
+            Action::ToggleSort(col) => l.toggle_sort(col, waker, now),
+            Action::Sort(col, dir) => l.sort(col, Some(dir), waker, now),
+            Action::OriginalOrder => l.sort(0, None, waker, now),
+            Action::Copy => {
+                if let Some((text, cells, truncated)) = l.copy_text() {
+                    ui.ctx().copy_text(text);
+                    let msg = if truncated {
+                        format!(
+                            "Copied the first {} cells (selection too large)",
+                            fmt_int(cells)
+                        )
+                    } else {
+                        format!(
+                            "Copied {} cell{}",
+                            fmt_int(cells),
+                            if cells == 1 { "" } else { "s" }
+                        )
+                    };
+                    l.set_status(msg, now);
+                }
+            }
+            _ => {}
+        }
     }
 
     if l.find.bar.open {
@@ -659,13 +759,17 @@ fn show_loaded(
         let pct = progress.scanned as f64 / progress.total as f64 * 100.0;
         left.push_str(&format!("   ·   indexing {pct:.0}%"));
     }
-    if let Some((spec, _, _)) = &l.sorting {
+    if let Some(s) = &l.sorting {
+        let mut view = SheetView {
+            table: &mut l.table,
+            edits: &l.edits,
+            order: l.order.as_ref(),
+            base_rows,
+        };
+        let name = view.header().cell(s.spec.column).text.to_owned();
         left.push_str(&format!(
             "   ·   sorting by {}…",
-            l.grid
-                .header
-                .get(spec.column)
-                .map_or("column", |s| s.as_str())
+            if name.is_empty() { "column" } else { &name }
         ));
     }
     if let Some(sel) = l.grid.sel
@@ -737,13 +841,7 @@ fn show_loaded(
 impl Drop for CsvDoc {
     fn drop(&mut self) {
         if let Phase::Ready(l) = &self.phase {
-            l.index_cancel.store(true, Ordering::Relaxed);
-            if let Some(c) = &l.find.cancel {
-                c.store(true, Ordering::Relaxed);
-            }
-            if let Some((_, c, _)) = &l.sorting {
-                c.store(true, Ordering::Relaxed);
-            }
+            l.cancel_workers();
         }
     }
 }

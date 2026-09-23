@@ -6,14 +6,22 @@
 mod dialect;
 mod doc;
 mod edit;
+mod editor;
 mod find;
 mod grid;
 mod index;
+mod keys;
+mod menu;
+mod order;
 mod parse;
 mod scan;
 mod sort;
 mod source;
+mod stream;
 mod table;
+#[cfg(test)]
+mod testutil;
+mod view;
 
 use std::path::PathBuf;
 

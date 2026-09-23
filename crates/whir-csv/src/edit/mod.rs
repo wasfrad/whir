@@ -523,6 +523,11 @@ pub struct Tx<'a> {
 }
 
 impl Tx<'_> {
+    /// The overlay as changed so far (keys of rows added in this step).
+    pub fn edits(&self) -> &Edits {
+        self.e
+    }
+
     /// Set cells: `None` clears the override (back to the file's value — the
     /// caller passes `None` for values equal to the file's).
     pub fn set_cells(
