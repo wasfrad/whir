@@ -52,6 +52,44 @@ impl ScrollAxis {
     }
 }
 
+/// Where this pass's scrollbar thumbs are, so overlays near the window edge
+/// (the notes drawer) can stay out of the way of someone reaching for one.
+#[derive(Clone, Debug, Default)]
+pub struct ScrollbarActivity {
+    pass: u64,
+    /// Every thumb drawn this pass (screen points).
+    pub thumbs: Vec<Rect>,
+    /// A scrollbar is being dragged.
+    pub dragging: bool,
+}
+
+fn activity_id() -> egui::Id {
+    egui::Id::new("whir.scrollbar.activity")
+}
+
+/// Scrollbars drawn so far in the current pass.
+pub fn activity(ctx: &egui::Context) -> ScrollbarActivity {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<ScrollbarActivity>(activity_id()))
+        .filter(|a| a.pass == pass)
+        .unwrap_or_default()
+}
+
+fn record(ctx: &egui::Context, thumb: Rect, dragging: bool) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        let a = d.get_temp_mut_or_default::<ScrollbarActivity>(activity_id());
+        if a.pass != pass {
+            *a = ScrollbarActivity {
+                pass,
+                ..Default::default()
+            };
+        }
+        a.thumbs.push(thumb);
+        a.dragging |= dragging;
+    });
+}
+
 /// A thin overlay scrollbar. Returns true if the user moved it.
 ///
 /// `track` is the full rect the bar may occupy (e.g. a 10pt strip at the right).
@@ -77,7 +115,8 @@ pub fn scrollbar(
     let t = axis.offset / axis.max_offset().max(1e-9);
     let thumb_start = t * travel;
 
-    let resp = ui.interact(track, id, Sense::click_and_drag());
+    // Not focusable: a focused widget would be "clicked" by Space/Enter.
+    let resp = ui.interact(track, id, Sense::CLICK | Sense::DRAG);
     let mut changed = false;
 
     // Dragging the thumb: remember where it was grabbed.
@@ -153,6 +192,7 @@ pub fn scrollbar(
         theme.text_dim.gamma_multiply(0.55)
     };
     ui.painter().rect_filled(thumb, thickness / 2.0, color);
+    record(ui.ctx(), thumb, resp.dragged());
     changed
 }
 

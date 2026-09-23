@@ -102,6 +102,29 @@ pub enum WindowCommand {
     Focus,
     /// Dark or light system frame / border.
     SetDarkMode(bool),
+    /// Show the native Save dialog; the result arrives via
+    /// [`Handler::save_dialog_closed`] with the same `token`.
+    SaveFileDialog {
+        token: u64,
+        spec: SaveDialogSpec,
+    },
+    /// Move a file to the Recycle Bin; the result arrives via [`Handler::recycled`].
+    Recycle(PathBuf),
+    /// Open Explorer with this file selected.
+    Reveal(PathBuf),
+    /// Open an http(s)/mailto link in the default app.
+    OpenUrl(String),
+    /// Deliver the clipboard text as an `Event::Paste` next frame (menu "Paste").
+    Paste,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SaveDialogSpec {
+    pub title: String,
+    pub suggested_name: String,
+    pub filters: Vec<(String, String)>,
+    pub default_ext: String,
+    pub folder: Option<PathBuf>,
 }
 
 pub struct FrameInfo {
@@ -128,11 +151,39 @@ pub trait Handler {
     fn frame(&mut self, input: egui::RawInput, info: &FrameInfo) -> FrameOutput;
     fn resized(&mut self, size_px: [u32; 2]);
     fn open_files(&mut self, paths: Vec<PathBuf>);
+    /// whir was launched again with no files while running.
+    fn bare_launch(&mut self) {}
     fn activated(&mut self, _active: bool) {}
     fn close_requested(&mut self) -> bool {
         true
     }
     fn system_theme_changed(&mut self) {}
+    /// Result of [`WindowCommand::SaveFileDialog`]: `None` if cancelled.
+    fn save_dialog_closed(&mut self, _token: u64, _path: Option<PathBuf>) {}
+    /// Result of [`WindowCommand::Recycle`].
+    fn recycled(&mut self, _path: PathBuf, _result: Result<(), String>) {}
+    /// Logoff/shutdown is asking. `false` asks Windows to wait (unsaved work).
+    fn query_end_session(&mut self) -> bool {
+        true
+    }
+    /// The session is ending now: save what can be saved.
+    fn end_session(&mut self) {}
+}
+
+/// Results of native UI (dialogs, shell operations) and IPC, queued and handed
+/// to the handler from the message loop, never from inside a modal loop.
+#[derive(Default)]
+struct Pending {
+    files: Vec<PathBuf>,
+    bare: bool,
+    saves: Vec<(u64, Option<PathBuf>)>,
+    recycled: Vec<(PathBuf, Result<(), String>)>,
+}
+
+impl Pending {
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && !self.bare && self.saves.is_empty() && self.recycled.is_empty()
+    }
 }
 
 pub struct WindowOptions {
@@ -176,7 +227,7 @@ struct State {
     handler: RefCell<Option<Box<dyn Handler>>>,
     input: RefCell<InputCollector>,
     hit: RefCell<HitMap>,
-    pending_files: RefCell<Vec<PathBuf>>,
+    pending: RefCell<Pending>,
     repaint_at: Cell<Option<Instant>>,
     size_px: Cell<[u32; 2]>,
     delivered_size: Cell<[u32; 2]>,
@@ -203,7 +254,7 @@ impl Window {
             handler: RefCell::new(None),
             input: RefCell::new(InputCollector::new(1.0)),
             hit: RefCell::new(HitMap::default()),
-            pending_files: RefCell::new(Vec::new()),
+            pending: RefCell::new(Pending::default()),
             repaint_at: Cell::new(Some(Instant::now())),
             size_px: Cell::new([1, 1]),
             delivered_size: Cell::new([0, 0]),
@@ -346,7 +397,7 @@ impl Window {
     pub fn run(self, handler: Box<dyn Handler>) -> i32 {
         let state = self.state;
         *state.handler.borrow_mut() = Some(handler);
-        state.deliver_pending_files();
+        state.deliver_pending();
         state.request_repaint();
 
         let timer = unsafe {
@@ -477,24 +528,59 @@ impl State {
         Some(f(handler.as_mut()))
     }
 
-    fn queue_files(&self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        self.pending_files.borrow_mut().extend(paths);
+    fn queue(&self, f: impl FnOnce(&mut Pending)) {
+        f(&mut self.pending.borrow_mut());
         unsafe {
             let _ = PostMessageW(Some(self.hwnd()), WM_APP_OPEN, WPARAM(0), LPARAM(0));
         }
     }
 
-    fn deliver_pending_files(&self) {
-        if self.pending_files.borrow().is_empty() {
+    fn queue_files(&self, paths: Vec<PathBuf>) {
+        if !paths.is_empty() {
+            self.queue(|p| p.files.extend(paths));
+        }
+    }
+
+    fn deliver_pending(&self) {
+        if self.pending.borrow().is_empty() {
             return;
         }
-        let paths = std::mem::take(&mut *self.pending_files.borrow_mut());
-        let delivered = self.with_handler(|h| h.open_files(paths.clone())).is_some();
-        if !delivered {
-            self.pending_files.borrow_mut().extend(paths);
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        let mut undelivered = Pending::default();
+        let Pending {
+            files,
+            bare,
+            saves,
+            recycled,
+        } = pending;
+        if !files.is_empty() && self.with_handler(|h| h.open_files(files.clone())).is_none() {
+            undelivered.files = files;
+        }
+        if bare && self.with_handler(|h| h.bare_launch()).is_none() {
+            undelivered.bare = true;
+        }
+        for (token, path) in saves {
+            if self
+                .with_handler(|h| h.save_dialog_closed(token, path.clone()))
+                .is_none()
+            {
+                undelivered.saves.push((token, path));
+            }
+        }
+        for (path, result) in recycled {
+            if self
+                .with_handler(|h| h.recycled(path.clone(), result.clone()))
+                .is_none()
+            {
+                undelivered.recycled.push((path, result));
+            }
+        }
+        if !undelivered.is_empty() {
+            let mut p = self.pending.borrow_mut();
+            p.files.extend(undelivered.files);
+            p.bare |= undelivered.bare;
+            p.saves.extend(undelivered.saves);
+            p.recycled.extend(undelivered.recycled);
         }
         self.request_repaint();
     }
@@ -592,6 +678,38 @@ impl State {
                 }
                 WindowCommand::SetDarkMode(dark) => {
                     set_bool_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark);
+                }
+                WindowCommand::SaveFileDialog { token, spec } => {
+                    let filters: Vec<(&str, &str)> = spec
+                        .filters
+                        .iter()
+                        .map(|(a, b)| (a.as_str(), b.as_str()))
+                        .collect();
+                    let path = crate::dialogs::save_file(
+                        hwnd,
+                        &crate::dialogs::SaveOptions {
+                            title: &spec.title,
+                            suggested_name: &spec.suggested_name,
+                            filters: &filters,
+                            default_ext: &spec.default_ext,
+                            folder: spec.folder.as_deref(),
+                        },
+                    );
+                    self.queue(|p| p.saves.push((token, path)));
+                }
+                WindowCommand::Recycle(path) => {
+                    let result = crate::shell::recycle(hwnd, &path);
+                    self.queue(|p| p.recycled.push((path, result)));
+                }
+                WindowCommand::Reveal(path) => crate::shell::reveal(&path),
+                WindowCommand::OpenUrl(url) => crate::shell::open_url(&url),
+                WindowCommand::Paste => {
+                    if let Some(text) = crate::clipboard::get_text()
+                        && !text.is_empty()
+                    {
+                        self.input.borrow_mut().push_event(egui::Event::Paste(text));
+                        self.request_repaint();
+                    }
                 }
             }
         }
@@ -1084,12 +1202,20 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     return LRESULT(0);
                 }
                 // Copy out and return quickly so the sender isn't held up.
-                if !cds.lpData.is_null() && cds.cbData >= 2 {
+                let paths = if !cds.lpData.is_null() && cds.cbData >= 2 {
                     let units = std::slice::from_raw_parts(
                         cds.lpData as *const u16,
                         cds.cbData as usize / 2,
                     );
-                    s.queue_files(decode_paths(units));
+                    decode_paths(units)
+                } else {
+                    Vec::new()
+                };
+                if paths.is_empty() {
+                    // whir.exe launched again without files.
+                    s.queue(|p| p.bare = true);
+                } else {
+                    s.queue_files(paths);
                 }
                 // The sender granted us foreground rights (AllowSetForegroundWindow).
                 s.execute(WindowCommand::Focus);
@@ -1110,7 +1236,7 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
             WM_APP_OPEN => {
-                s.deliver_pending_files();
+                s.deliver_pending();
                 LRESULT(0)
             }
             WM_APP_WAKE => {
@@ -1128,12 +1254,33 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 // Files handed over by another whir.exe after the close was queued
                 // (e.g. the last tab was closed as a new file was double-clicked):
                 // open them instead of closing, or they'd be lost.
-                if !s.pending_files.borrow().is_empty() {
-                    s.deliver_pending_files();
+                if !s.pending.borrow().is_empty() {
+                    s.deliver_pending();
                     return LRESULT(0);
                 }
                 if s.with_handler(|h| h.close_requested()).unwrap_or(true) {
                     let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_QUERYENDSESSION => {
+                let ok = s.with_handler(|h| h.query_end_session()).unwrap_or(true);
+                if !ok {
+                    use windows::Win32::System::Shutdown::ShutdownBlockReasonCreate;
+                    let _ = ShutdownBlockReasonCreate(
+                        hwnd,
+                        windows::core::w!("whir has unsaved changes"),
+                    );
+                }
+                s.request_repaint();
+                LRESULT(ok as isize)
+            }
+            WM_ENDSESSION => {
+                if wparam.0 != 0 {
+                    s.with_handler(|h| h.end_session());
+                } else {
+                    use windows::Win32::System::Shutdown::ShutdownBlockReasonDestroy;
+                    let _ = ShutdownBlockReasonDestroy(hwnd);
                 }
                 LRESULT(0)
             }

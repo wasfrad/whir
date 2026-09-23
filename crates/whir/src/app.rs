@@ -13,6 +13,7 @@ use whir_gfx::{GpuTextures, PresentResult, Renderer};
 use whir_platform::{FrameInfo, FrameOutput, Handler, HitMap, RectPx, WindowCommand};
 
 use crate::dispatch;
+use crate::keys::consume_exact;
 use crate::tab_bar::{self, TabInfo};
 
 /// How long the first frame may wait for the active document's content, so a
@@ -67,6 +68,7 @@ impl App {
             renderer: None,
             open_cx: OpenCx {
                 textures: registry,
+                library: whir_core::Library::new(waker.clone()),
                 waker,
             },
             tabs: Vec::new(),
@@ -153,19 +155,19 @@ impl App {
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
             let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
-            if i.consume_key(ctrl_shift, Key::T) {
+            if consume_exact(i, ctrl_shift, Key::T) {
                 reopen = true;
             }
-            if i.consume_key(ctrl_shift, Key::Tab) || i.consume_key(ctrl, Key::PageUp) {
+            if consume_exact(i, ctrl_shift, Key::Tab) || consume_exact(i, ctrl, Key::PageUp) {
                 step = -1;
             }
-            if i.consume_key(ctrl, Key::Tab) || i.consume_key(ctrl, Key::PageDown) {
+            if consume_exact(i, ctrl, Key::Tab) || consume_exact(i, ctrl, Key::PageDown) {
                 step = 1;
             }
-            if i.consume_key(ctrl, Key::W) || i.consume_key(ctrl, Key::F4) {
+            if consume_exact(i, ctrl, Key::W) || consume_exact(i, ctrl, Key::F4) {
                 close = true;
             }
-            if i.consume_key(ctrl, Key::O) {
+            if consume_exact(i, ctrl, Key::O) {
                 open = true;
             }
             const DIGITS: [Key; 9] = [
@@ -180,7 +182,7 @@ impl App {
                 Key::Num9,
             ];
             for (d, key) in DIGITS.iter().enumerate() {
-                if i.consume_key(ctrl, *key) {
+                if consume_exact(i, ctrl, *key) {
                     goto = Some(if d == 8 { n.saturating_sub(1) } else { d });
                 }
             }
@@ -284,6 +286,7 @@ impl App {
         let open_cx = self.open_cx.clone();
         let active = self.active;
         let mut open_requested = false;
+        let mut requests = Vec::new();
         CentralPanel::no_frame()
             .frame(Frame::NONE.fill(theme.content_bg))
             .show(ui, |ui| match self.tabs.get_mut(active) {
@@ -292,6 +295,7 @@ impl App {
                         textures: &open_cx.textures,
                         waker: &open_cx.waker,
                         just_activated,
+                        requests: &mut requests,
                     };
                     tab.doc.ui(ui, &mut cx);
                 }

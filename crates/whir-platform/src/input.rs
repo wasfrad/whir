@@ -46,6 +46,11 @@ impl InputCollector {
         !self.events.is_empty()
     }
 
+    /// Inject an event for the next frame (e.g. a menu-initiated paste).
+    pub fn push_event(&mut self, ev: Event) {
+        self.events.push(ev);
+    }
+
     pub fn buttons_down(&self) -> bool {
         self.buttons_down != 0
     }
@@ -233,11 +238,19 @@ fn is_printable(ch: char) -> bool {
 
 pub fn modifiers() -> Modifiers {
     let down = |vk: VIRTUAL_KEY| unsafe { GetKeyState(vk.0 as i32) } < 0;
-    let ctrl = down(VK_CONTROL);
+    // AltGr (right Alt on many European layouts) arrives as LeftCtrl + RightAlt.
+    // It types characters (ą, €, @), so it must not look like Ctrl+Alt to egui,
+    // or text fields would run their Ctrl shortcuts (Ctrl+A select all, ...).
+    let altgr = down(VK_RMENU) && down(VK_LCONTROL);
+    modifiers_from(down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT), altgr)
+}
+
+fn modifiers_from(ctrl: bool, alt: bool, shift: bool, altgr: bool) -> Modifiers {
+    let (ctrl, alt) = if altgr { (false, false) } else { (ctrl, alt) };
     Modifiers {
-        alt: down(VK_MENU),
+        alt,
         ctrl,
-        shift: down(VK_SHIFT),
+        shift,
         mac_cmd: false,
         command: ctrl,
     }
@@ -347,6 +360,14 @@ mod tests {
         assert_eq!(vk_to_key(VK_PRIOR), Some(Key::PageUp));
         assert_eq!(vk_to_key(VK_F3), Some(Key::F3));
         assert_eq!(vk_to_key(VK_LWIN), None);
+    }
+
+    #[test]
+    fn altgr_is_not_ctrl_alt() {
+        let m = modifiers_from(true, true, false, true);
+        assert!(!m.ctrl && !m.alt && !m.command);
+        let m = modifiers_from(true, true, true, false);
+        assert!(m.ctrl && m.alt && m.shift && m.command);
     }
 
     #[test]

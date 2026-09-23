@@ -599,7 +599,8 @@ impl Document for ImageDoc {
     fn ui(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
         self.drain();
         let theme = Theme::current();
-        let (viewport, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (viewport, resp) =
+            ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
         ui.painter().rect_filled(viewport, 0.0, theme.canvas_bg);
 
         if let Some(image) = self.shown.as_ref().map(Shown::full_size) {

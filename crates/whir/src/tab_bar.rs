@@ -95,7 +95,7 @@ pub fn show(
         let rect = rect.intersect(Rect::everything_left_of(tabs_right));
         rects.push(rect);
         let id = ui.id().with(("tab", tab.id));
-        let resp = ui.interact(rect, id, Sense::click());
+        let resp = ui.interact(rect, id, Sense::CLICK);
         if resp.hovered() {
             hovered_index = Some(i);
         }
@@ -107,7 +107,7 @@ pub fn show(
             pos2(rect.right() - 16.0, rect.center().y - 1.0),
             vec2(18.0, 18.0),
         );
-        let close_resp = show_close.then(|| ui.interact(close_rect, id.with("x"), Sense::click()));
+        let close_resp = show_close.then(|| ui.interact(close_rect, id.with("x"), Sense::CLICK));
         let close_hovered = close_resp.as_ref().is_some_and(|r| r.hovered());
 
         if resp.hovered()
@@ -232,7 +232,7 @@ pub fn show(
         ),
         vec2(plus_size, plus_size),
     );
-    let plus_resp = ui.interact(plus, ui.id().with("open"), Sense::click());
+    let plus_resp = ui.interact(plus, ui.id().with("open"), Sense::CLICK);
     if plus_resp.hovered() {
         painter.rect_filled(plus, 6.0, theme.tab_hover_bg);
     }
@@ -268,7 +268,7 @@ fn caption_button(
     is_close: bool,
     glyph: Glyph,
 ) -> egui::Response {
-    let resp = ui.interact(rect, ui.id().with(("caption", id)), Sense::click());
+    let resp = ui.interact(rect, ui.id().with(("caption", id)), Sense::CLICK);
     let (bg, fg) = if resp.is_pointer_button_down_on() {
         (
             Some(if is_close {
@@ -357,6 +357,7 @@ fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &The
         DocKind::Image => Color32::from_rgb(0x4c, 0x9a, 0xff),
         DocKind::Pdf => Color32::from_rgb(0xf0, 0x55, 0x4a),
         DocKind::Csv => Color32::from_rgb(0x3c, 0xb3, 0x71),
+        DocKind::Note => theme.note_glyph,
         DocKind::Error => theme.text_dim,
     };
     let s = Stroke::new(1.3, color);
@@ -443,6 +444,45 @@ fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &The
                 ],
                 thin,
             );
+        }
+        DocKind::Note => {
+            // A page with its bottom-right corner folded, and three text lines.
+            let r = Rect::from_center_size(c, vec2(11.0, 13.0));
+            let fold = 3.5;
+            let pts = [
+                r.left_top(),
+                r.right_top(),
+                pos2(r.right(), r.bottom() - fold),
+                pos2(r.right() - fold, r.bottom()),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            for w in pts.windows(2) {
+                painter.line_segment([w[0], w[1]], s);
+            }
+            painter.line_segment(
+                [
+                    pos2(r.right() - fold, r.bottom()),
+                    pos2(r.right() - fold, r.bottom() - fold),
+                ],
+                Stroke::new(1.0, color),
+            );
+            painter.line_segment(
+                [
+                    pos2(r.right() - fold, r.bottom() - fold),
+                    pos2(r.right(), r.bottom() - fold),
+                ],
+                Stroke::new(1.0, color),
+            );
+            for (dy, w) in [(3.5, 6.0), (6.0, 6.0), (8.5, 3.5)] {
+                painter.line_segment(
+                    [
+                        pos2(r.left() + 2.5, r.top() + dy),
+                        pos2(r.left() + 2.5 + w, r.top() + dy),
+                    ],
+                    Stroke::new(1.0, color),
+                );
+            }
         }
         DocKind::Error => {
             painter.circle_stroke(c, 6.0, s);

@@ -10,6 +10,7 @@
 
 mod app;
 mod dispatch;
+mod keys;
 mod register;
 mod single_instance;
 mod tab_bar;

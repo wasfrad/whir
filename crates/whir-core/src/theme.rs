@@ -43,6 +43,40 @@ pub struct Theme {
 
     pub overlay_bg: Color32,
 
+    /// On-paper colours: PDF pages are white in both themes.
+    pub page_selection: Color32,
+    pub page_match: Color32,
+    pub page_match_current: Color32,
+    pub page_match_outline: Color32,
+
+    /// Unsaved edits in a table.
+    pub edited_bg: Color32,
+    pub edited_mark: Color32,
+
+    /// Markdown styling in notes.
+    pub md_syntax: Color32,
+    pub md_list_marker: Color32,
+    pub md_code_bg: Color32,
+    pub md_code_block_bg: Color32,
+    pub md_quote_bar: Color32,
+    pub md_quote_text: Color32,
+    pub md_link: Color32,
+    pub md_task_done: Color32,
+    pub md_rule: Color32,
+
+    /// The notes drawer.
+    pub drawer_bg: Color32,
+    pub drawer_border: Color32,
+    pub drawer_shadow: Color32,
+    pub drawer_item_hover: Color32,
+    pub drawer_item_active: Color32,
+    pub drawer_grip: Color32,
+
+    pub modal_backdrop: Color32,
+    pub danger: Color32,
+    /// Tab / drawer glyph for notes.
+    pub note_glyph: Color32,
+
     pub metrics: Metrics,
 }
 
@@ -59,6 +93,22 @@ pub struct Metrics {
     pub body_text_size: f32,
     pub small_text_size: f32,
     pub corner_radius: f32,
+
+    /// Notes: widest text column, side/top padding, type sizes.
+    pub note_column_max: f32,
+    pub note_side_pad: f32,
+    pub note_top_pad: f32,
+    pub note_title_size: f32,
+    pub note_body_size: f32,
+    /// Line height as a multiple of the body size.
+    pub note_line_factor: f32,
+    pub note_code_size: f32,
+
+    /// Drawer: open width, peek strip width, edge trigger band, list row height.
+    pub drawer_width: f32,
+    pub drawer_strip: f32,
+    pub drawer_trigger: f32,
+    pub drawer_row_h: f32,
 }
 
 impl Default for Metrics {
@@ -73,6 +123,17 @@ impl Default for Metrics {
             body_text_size: 13.0,
             small_text_size: 11.5,
             corner_radius: 6.0,
+            note_column_max: 720.0,
+            note_side_pad: 32.0,
+            note_top_pad: 44.0,
+            note_title_size: 26.0,
+            note_body_size: 15.0,
+            note_line_factor: 1.55,
+            note_code_size: 13.5,
+            drawer_width: 300.0,
+            drawer_strip: 14.0,
+            drawer_trigger: 6.0,
+            drawer_row_h: 52.0,
         }
     }
 }
@@ -105,6 +166,30 @@ impl Theme {
             header_bg: Color32::from_rgb(0x2c, 0x2c, 0x31),
             gutter_bg: Color32::from_rgb(0x20, 0x20, 0x24),
             overlay_bg: Color32::from_rgba_premultiplied(0x10, 0x10, 0x12, 0xd8),
+            page_selection: Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 0x5c),
+            page_match: Color32::from_rgba_unmultiplied(0xff, 0xd4, 0x00, 0x66),
+            page_match_current: Color32::from_rgba_unmultiplied(0xff, 0x8a, 0x00, 0x8c),
+            page_match_outline: Color32::from_rgb(0xd9, 0x6c, 0x00),
+            edited_bg: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x22),
+            edited_mark: Color32::from_rgb(0x4c, 0x8d, 0xff),
+            md_syntax: Color32::from_rgb(0x6c, 0x6c, 0x76),
+            md_list_marker: Color32::from_rgb(0x7f, 0xa6, 0xf0),
+            md_code_bg: Color32::from_rgb(0x30, 0x30, 0x36),
+            md_code_block_bg: Color32::from_rgb(0x1e, 0x1e, 0x22),
+            md_quote_bar: Color32::from_rgb(0x4a, 0x4a, 0x52),
+            md_quote_text: Color32::from_rgb(0xb4, 0xb4, 0xbc),
+            md_link: Color32::from_rgb(0x6f, 0xa3, 0xff),
+            md_task_done: Color32::from_rgb(0x80, 0x80, 0x88),
+            md_rule: Color32::from_rgb(0x3e, 0x3e, 0x46),
+            drawer_bg: Color32::from_rgb(0x1f, 0x1f, 0x23),
+            drawer_border: Color32::from_rgb(0x38, 0x38, 0x3e),
+            drawer_shadow: Color32::from_black_alpha(0x70),
+            drawer_item_hover: Color32::from_rgb(0x2a, 0x2a, 0x30),
+            drawer_item_active: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x2e),
+            drawer_grip: Color32::from_rgb(0x70, 0x70, 0x7a),
+            modal_backdrop: Color32::from_black_alpha(0x80),
+            danger: Color32::from_rgb(0xff, 0x6b, 0x6b),
+            note_glyph: Color32::from_rgb(0xe8, 0xa3, 0x3d),
             metrics: Metrics::default(),
         }
     }
@@ -136,6 +221,30 @@ impl Theme {
             header_bg: Color32::from_rgb(0xf0, 0xf0, 0xf3),
             gutter_bg: Color32::from_rgb(0xf4, 0xf4, 0xf6),
             overlay_bg: Color32::from_rgba_premultiplied(0xf8, 0xf8, 0xfa, 0xf0),
+            page_selection: Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 0x5c),
+            page_match: Color32::from_rgba_unmultiplied(0xff, 0xd4, 0x00, 0x66),
+            page_match_current: Color32::from_rgba_unmultiplied(0xff, 0x8a, 0x00, 0x8c),
+            page_match_outline: Color32::from_rgb(0xd9, 0x6c, 0x00),
+            edited_bg: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x1a),
+            edited_mark: Color32::from_rgb(0x25, 0x63, 0xeb),
+            md_syntax: Color32::from_rgb(0xa2, 0xa2, 0xaa),
+            md_list_marker: Color32::from_rgb(0x3a, 0x6c, 0xd8),
+            md_code_bg: Color32::from_rgb(0xec, 0xec, 0xf0),
+            md_code_block_bg: Color32::from_rgb(0xf2, 0xf2, 0xf5),
+            md_quote_bar: Color32::from_rgb(0xcf, 0xcf, 0xd6),
+            md_quote_text: Color32::from_rgb(0x4a, 0x4a, 0x52),
+            md_link: Color32::from_rgb(0x25, 0x63, 0xeb),
+            md_task_done: Color32::from_rgb(0x8a, 0x8a, 0x92),
+            md_rule: Color32::from_rgb(0xd6, 0xd6, 0xdc),
+            drawer_bg: Color32::from_rgb(0xf5, 0xf5, 0xf7),
+            drawer_border: Color32::from_rgb(0xd4, 0xd4, 0xda),
+            drawer_shadow: Color32::from_black_alpha(0x2c),
+            drawer_item_hover: Color32::from_rgb(0xe7, 0xe7, 0xeb),
+            drawer_item_active: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x1f),
+            drawer_grip: Color32::from_rgb(0x9a, 0x9a, 0xa2),
+            modal_backdrop: Color32::from_black_alpha(0x50),
+            danger: Color32::from_rgb(0xc0, 0x1c, 0x28),
+            note_glyph: Color32::from_rgb(0xd9, 0x8a, 0x1c),
             metrics: Metrics::default(),
         }
     }
@@ -218,6 +327,30 @@ pub enum FontRole {
     Monospace,
     /// Appended to both families as a glyph fallback.
     Fallback,
+    /// Primary face of a named family (bold, italic, ...).
+    Family(&'static str),
+}
+
+/// Named font families for rich text (notes). All are registered at startup,
+/// aliased to the regular faces, so using one never panics; their real faces
+/// load on demand ([`request_rich_fonts`]), except semibold which titles need at once.
+pub const SEMIBOLD: &str = "whir-semibold";
+pub const BOLD: &str = "whir-bold";
+pub const ITALIC: &str = "whir-italic";
+pub const BOLD_ITALIC: &str = "whir-bold-italic";
+pub const MONO_BOLD: &str = "whir-mono-bold";
+
+/// `(family, is_monospace)` for every named family.
+pub const NAMED_FAMILIES: &[(&str, bool)] = &[
+    (SEMIBOLD, false),
+    (BOLD, false),
+    (ITALIC, false),
+    (BOLD_ITALIC, false),
+    (MONO_BOLD, true),
+];
+
+pub fn family(name: &'static str) -> egui::FontFamily {
+    egui::FontFamily::Name(name.into())
 }
 
 /// A font the shell loads from `%WINDIR%\Fonts` at startup.
@@ -245,6 +378,40 @@ pub const FONTS: &[FontSpec] = &[
         file: "consola.ttf",
         index: 0,
         role: FontRole::Monospace,
+    },
+    FontSpec {
+        name: "Segoe UI Semibold",
+        file: "seguisb.ttf",
+        index: 0,
+        role: FontRole::Family(SEMIBOLD),
+    },
+];
+
+/// Bold/italic faces, loaded the first time a note uses them.
+pub const LAZY_RICH_FONTS: &[FontSpec] = &[
+    FontSpec {
+        name: "Segoe UI Bold",
+        file: "segoeuib.ttf",
+        index: 0,
+        role: FontRole::Family(BOLD),
+    },
+    FontSpec {
+        name: "Segoe UI Italic",
+        file: "segoeuii.ttf",
+        index: 0,
+        role: FontRole::Family(ITALIC),
+    },
+    FontSpec {
+        name: "Segoe UI Bold Italic",
+        file: "segoeuiz.ttf",
+        index: 0,
+        role: FontRole::Family(BOLD_ITALIC),
+    },
+    FontSpec {
+        name: "Consolas Bold",
+        file: "consolab.ttf",
+        index: 0,
+        role: FontRole::Family(MONO_BOLD),
     },
 ];
 
@@ -319,4 +486,16 @@ pub fn request_fallback_fonts() {
 /// The shell polls this once per frame.
 pub fn fallback_fonts_requested() -> bool {
     FALLBACK_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static RICH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Text styled bold/italic is about to be shown: load [`LAZY_RICH_FONTS`].
+pub fn request_rich_fonts() {
+    RICH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The shell polls this once per frame.
+pub fn rich_fonts_requested() -> bool {
+    RICH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
 }

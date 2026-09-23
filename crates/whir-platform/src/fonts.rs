@@ -8,7 +8,7 @@ use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use egui::{FontData, FontDefinitions, FontFamily};
-use whir_core::theme::{FontRole, FontSpec};
+use whir_core::theme::{FontRole, FontSpec, NAMED_FAMILIES};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
@@ -57,6 +57,9 @@ pub fn load_font(spec: &FontSpec) -> Option<FontData> {
 }
 
 /// Build egui font definitions from system font specs. Missing files are skipped.
+///
+/// Every named family in [`NAMED_FAMILIES`] is registered, falling back to the
+/// regular faces, so rich text can use them before (or without) their own files.
 pub fn definitions(specs: &[FontSpec]) -> FontDefinitions {
     let mut defs = FontDefinitions::empty();
     let mut fallbacks = Vec::new();
@@ -71,6 +74,9 @@ pub fn definitions(specs: &[FontSpec]) -> FontDefinitions {
             }
             FontRole::Monospace => fam(&mut defs, FontFamily::Monospace).push(spec.name.to_owned()),
             FontRole::Fallback => fallbacks.push(spec.name.to_owned()),
+            FontRole::Family(name) => {
+                fam(&mut defs, FontFamily::Name(name.into())).push(spec.name.to_owned())
+            }
         }
     }
     // Each family falls back to the other family's primary, then the symbol fonts.
@@ -80,6 +86,18 @@ pub fn definitions(specs: &[FontSpec]) -> FontDefinitions {
     fam(&mut defs, FontFamily::Monospace).extend(prop.iter().cloned());
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         fam(&mut defs, family).extend(fallbacks.iter().cloned());
+    }
+    // Named families: their own face first (if loaded), then the regular chain.
+    let prop = fam(&mut defs, FontFamily::Proportional).clone();
+    let mono = fam(&mut defs, FontFamily::Monospace).clone();
+    for &(name, is_mono) in NAMED_FAMILIES {
+        let chain = if is_mono { &mono } else { &prop };
+        let family = fam(&mut defs, FontFamily::Name(name.into()));
+        for f in chain {
+            if !family.contains(f) {
+                family.push(f.clone());
+            }
+        }
     }
     defs
 }
@@ -91,19 +109,41 @@ pub fn add_fallbacks(ctx: &egui::Context, specs: &[FontSpec]) {
         let Some(data) = load_font(spec) else {
             continue;
         };
+        let mut families = vec![
+            InsertFontFamily {
+                family: FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ];
+        families.extend(NAMED_FAMILIES.iter().map(|&(name, _)| InsertFontFamily {
+            family: FontFamily::Name(name.into()),
+            priority: FontPriority::Lowest,
+        }));
+        ctx.add_font(FontInsert::new(spec.name, data, families));
+    }
+}
+
+/// Load the real faces of named families (bold, italic, ...) on demand.
+pub fn add_family_fonts(ctx: &egui::Context, specs: &[FontSpec]) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+    for spec in specs {
+        let FontRole::Family(name) = spec.role else {
+            continue;
+        };
+        let Some(data) = load_font(spec) else {
+            continue;
+        };
         ctx.add_font(FontInsert::new(
             spec.name,
             data,
-            vec![
-                InsertFontFamily {
-                    family: FontFamily::Proportional,
-                    priority: FontPriority::Lowest,
-                },
-                InsertFontFamily {
-                    family: FontFamily::Monospace,
-                    priority: FontPriority::Lowest,
-                },
-            ],
+            vec![InsertFontFamily {
+                family: FontFamily::Name(name.into()),
+                priority: FontPriority::Highest,
+            }],
         ));
     }
 }

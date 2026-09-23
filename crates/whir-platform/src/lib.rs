@@ -7,8 +7,10 @@ pub mod fonts;
 pub mod input;
 pub mod ipc;
 pub mod os;
+pub mod shell;
 mod window;
 
 pub use window::{
-    FrameInfo, FrameOutput, Handler, HitMap, RectPx, WakeSlot, Window, WindowCommand, WindowOptions,
+    FrameInfo, FrameOutput, Handler, HitMap, RectPx, SaveDialogSpec, WakeSlot, Window,
+    WindowCommand, WindowOptions,
 };

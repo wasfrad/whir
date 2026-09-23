@@ -5,10 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, RwLock};
 
-use egui::{
-    Align, FontId, Frame, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke, UiBuilder, pos2,
-    vec2,
-};
+use egui::{FontId, Frame, Key, Rect, RichText, Stroke, UiBuilder, pos2, vec2};
+use whir_core::find_bar::{FindBar, FindStatus, fmt_int};
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocKind, Document, FileSource, OpenCx, Waker};
 
@@ -35,15 +33,10 @@ enum LoadMsg {
     Failed(String),
 }
 
-#[derive(Default)]
 struct FindState {
-    open: bool,
-    focus: bool,
-    query: String,
+    bar: FindBar,
     /// Query the current results belong to.
     searched: String,
-    /// Time of the last edit, for debouncing.
-    edited_at: Option<f64>,
     raw: Vec<(u32, u32)>,
     /// (display row, col), sorted: what the grid highlights.
     display: Vec<(u64, u32)>,
@@ -52,6 +45,43 @@ struct FindState {
     truncated: bool,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<Receiver<FindMsg>>,
+}
+
+impl Default for FindState {
+    fn default() -> Self {
+        Self {
+            bar: FindBar::new("Find in file", 0.2),
+            searched: String::new(),
+            raw: Vec::new(),
+            display: Vec::new(),
+            current: None,
+            running: false,
+            truncated: false,
+            cancel: None,
+            rx: None,
+        }
+    }
+}
+
+impl FindState {
+    fn status(&self) -> FindStatus {
+        let n = self.display.len();
+        if self.searched.is_empty() {
+            FindStatus::Idle
+        } else if n == 0 {
+            if self.running {
+                FindStatus::Searching { progress: None }
+            } else {
+                FindStatus::NoResults
+            }
+        } else {
+            FindStatus::Results {
+                current: self.current,
+                total: n,
+                more: self.running || self.truncated,
+            }
+        }
+    }
 }
 
 struct Loaded {
@@ -258,7 +288,7 @@ impl Loaded {
         }
     }
 
-    fn start_find(&mut self, waker: &Waker) {
+    fn start_find(&mut self, query: String, waker: &Waker) {
         if let Some(c) = self.find.cancel.take() {
             c.store(true, Ordering::Relaxed);
         }
@@ -266,8 +296,8 @@ impl Loaded {
         self.find.display.clear();
         self.find.current = None;
         self.find.truncated = false;
-        self.find.searched = self.find.query.clone();
-        if self.find.query.is_empty() {
+        self.find.searched = query;
+        if self.find.searched.is_empty() {
             self.find.running = false;
             self.find.rx = None;
             return;
@@ -279,7 +309,7 @@ impl Loaded {
             self.table.effective_dialect(),
             self.table.encoding,
             self.first_row_offset(),
-            self.find.query.clone(),
+            self.find.searched.clone(),
             cancel.clone(),
             tx,
             waker.clone(),
@@ -508,7 +538,7 @@ fn show_loaded(
         l.measured_rows = 0;
         l.grid.sel = None;
         if !l.find.searched.is_empty() {
-            l.start_find(waker);
+            l.start_find(l.find.searched.clone(), waker);
         }
     }
     let progress = l.table.progress();
@@ -531,29 +561,22 @@ fn show_loaded(
     let footer = Rect::from_min_max(pos2(area.left(), grid_rect.bottom()), area.max);
 
     // Shortcuts owned by the document.
-    let (open_find, f3, shift_f3, escape) = ui.input_mut(|i| {
-        (
-            i.consume_key(Modifiers::CTRL, Key::F),
-            i.consume_key(Modifiers::NONE, Key::F3),
-            i.consume_key(Modifiers::SHIFT, Key::F3),
-            i.key_pressed(Key::Escape),
-        )
-    });
-    if open_find {
-        l.find.open = true;
-        l.find.focus = true;
+    let keys = FindBar::consume_keys(ui);
+    if keys.open {
+        l.find.bar.open_with(None);
     }
-    if f3 {
+    if keys.next {
         l.step_match(true);
     }
-    if shift_f3 {
+    if keys.prev {
         l.step_match(false);
     }
 
-    let find_has_focus = l.find.open && ui.memory(|m| m.has_focus(egui::Id::new("csv-find-box")));
-    if escape && !find_has_focus {
-        if l.find.open {
-            l.find.open = false;
+    let find_has_focus = l.find.bar.has_focus(ui.ctx());
+    let escape = !find_has_focus && ui.input(|i| i.key_pressed(Key::Escape));
+    if escape {
+        if l.find.bar.open {
+            l.find.bar.close();
         } else {
             l.grid.sel = None;
         }
@@ -604,8 +627,18 @@ fn show_loaded(
         l.set_status(msg, now);
     }
 
-    if l.find.open {
-        find_bar(ui, l, grid_rect, theme, waker, now);
+    if l.find.bar.open {
+        let status = l.find.status();
+        let out = l.find.bar.show(ui, grid_rect, grid::HEADER_H, &status);
+        if let Some(q) = out.search {
+            l.start_find(q, waker);
+        }
+        if out.next {
+            l.step_match(true);
+        }
+        if out.prev {
+            l.step_match(false);
+        }
     }
     if l.sorting.is_some() || l.find.running || !progress.done {
         ui.ctx()
@@ -701,133 +734,6 @@ fn show_loaded(
     false
 }
 
-fn find_bar(
-    ui: &mut egui::Ui,
-    l: &mut Loaded,
-    grid_rect: Rect,
-    theme: &Theme,
-    waker: &Waker,
-    now: f64,
-) {
-    let size = vec2(390.0, 36.0);
-    let rect = Rect::from_min_size(
-        pos2(
-            grid_rect.right() - size.x - 20.0,
-            grid_rect.top() + grid::HEADER_H + 8.0,
-        ),
-        size,
-    );
-    // Swallow clicks on the bar's background so they don't reach the grid.
-    ui.interact(rect, egui::Id::new("csv-find-bg"), Sense::click_and_drag());
-    let mut close = false;
-    let (mut next, mut prev) = (false, false);
-    ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-        Frame::NONE
-            .fill(theme.overlay_bg)
-            .stroke(Stroke::new(1.0, theme.separator))
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                ui.set_min_size(size - vec2(16.0, 8.0));
-                ui.horizontal_centered(|ui| {
-                    let edit = egui::TextEdit::singleline(&mut l.find.query)
-                        .id(egui::Id::new("csv-find-box"))
-                        .hint_text("Find in file")
-                        // Enter steps through matches instead of dropping focus.
-                        .return_key(None)
-                        .desired_width(190.0);
-                    let resp = ui.add(edit);
-                    if l.find.focus {
-                        resp.request_focus();
-                        l.find.focus = false;
-                    }
-                    if resp.changed() {
-                        l.find.edited_at = Some(now);
-                    }
-                    if resp.has_focus() {
-                        let (shift_enter, enter, esc) = ui.input_mut(|i| {
-                            (
-                                i.consume_key(Modifiers::SHIFT, Key::Enter),
-                                i.consume_key(Modifiers::NONE, Key::Enter),
-                                i.consume_key(Modifiers::NONE, Key::Escape),
-                            )
-                        });
-                        next |= enter;
-                        prev |= shift_enter;
-                        close |= esc;
-                    }
-                    let n = l.find.display.len();
-                    let count = if l.find.query.is_empty() {
-                        String::new()
-                    } else if n == 0 {
-                        if l.find.running {
-                            "Searching…".into()
-                        } else {
-                            "No results".into()
-                        }
-                    } else {
-                        let cur = l.find.current.map_or(0, |i| i + 1);
-                        let more = if l.find.running || l.find.truncated {
-                            "+"
-                        } else {
-                            ""
-                        };
-                        format!("{} of {}{more}", fmt_int(cur as u64), fmt_int(n as u64))
-                    };
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        close |= ui
-                            .add(egui::Button::new("✕").frame(false))
-                            .on_hover_text("Close (Esc)")
-                            .clicked();
-                        next |= ui
-                            .add(egui::Button::new("↓").frame(false))
-                            .on_hover_text("Next (Enter, F3)")
-                            .clicked();
-                        prev |= ui
-                            .add(egui::Button::new("↑").frame(false))
-                            .on_hover_text("Previous (Shift+Enter)")
-                            .clicked();
-                        ui.label(RichText::new(count).small().color(theme.text_dim));
-                    });
-                });
-            });
-    });
-    // Debounced search as you type.
-    if let Some(t) = l.find.edited_at
-        && now - t > 0.2
-    {
-        l.find.edited_at = None;
-        if l.find.query != l.find.searched {
-            l.start_find(waker);
-        }
-    } else if l.find.edited_at.is_some() {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(60));
-    }
-    if next || prev {
-        if l.find.query != l.find.searched {
-            l.start_find(waker);
-        } else {
-            l.step_match(next);
-        }
-    }
-    if close {
-        l.find.open = false;
-    }
-}
-
-fn fmt_int(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 impl Drop for CsvDoc {
     fn drop(&mut self) {
         if let Phase::Ready(l) = &self.phase {
@@ -839,16 +745,5 @@ impl Drop for CsvDoc {
                 c.store(true, Ordering::Relaxed);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn thousands() {
-        assert_eq!(super::fmt_int(0), "0");
-        assert_eq!(super::fmt_int(999), "999");
-        assert_eq!(super::fmt_int(1000), "1,000");
-        assert_eq!(super::fmt_int(1234567), "1,234,567");
     }
 }

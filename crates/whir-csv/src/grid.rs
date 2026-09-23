@@ -251,7 +251,7 @@ impl Grid {
         self.sx.clamp();
 
         let id = ui.id().with("csv-grid");
-        let resp = ui.interact(rect, id, Sense::click_and_drag());
+        let resp = ui.interact(rect, id, Sense::CLICK | Sense::DRAG);
         let pointer = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()));
         let mods = ui.input(|i| i.modifiers);
 

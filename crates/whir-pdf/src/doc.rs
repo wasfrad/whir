@@ -150,7 +150,7 @@ impl PdfDoc {
         let now = ui.input(|i| i.time);
         self.frame += 1;
 
-        let (vp, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (vp, resp) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
         let painter = ui.painter().with_clip_rect(vp);
         painter.rect_filled(vp, 0.0, theme.canvas_bg);
         if layout.is_empty() {
