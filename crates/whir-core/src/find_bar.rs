@@ -162,6 +162,12 @@ impl FindBar {
         // Swallow clicks on the bar's background so they don't reach the document.
         ui.interact(rect, self.id.with("bg"), Sense::CLICK | Sense::DRAG);
 
+        // Focus before the field runs: egui collapses the selection of an
+        // unfocused text field, which would undo the select-all below.
+        if self.focus_pending {
+            self.focus_pending = false;
+            ui.memory_mut(|m| m.request_focus(edit_id));
+        }
         if self.select_all_pending {
             self.select_all_pending = false;
             let mut state =
@@ -201,10 +207,6 @@ impl FindBar {
                             })
                             .desired_width(190.0);
                         let resp = ui.add(edit);
-                        if self.focus_pending {
-                            resp.request_focus();
-                            self.focus_pending = false;
-                        }
                         if resp.changed() {
                             self.edited_at = Some(now);
                         }
@@ -227,7 +229,7 @@ impl FindBar {
                         };
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             close |= ui
-                                .add(egui::Button::new("✕").frame(false))
+                                .add(egui::Button::new("×").frame(false))
                                 .on_hover_text("Close (Esc)")
                                 .clicked();
                             next |= ui
