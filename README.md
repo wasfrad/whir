@@ -90,6 +90,23 @@ background as soon as they open, so Ctrl+F is instant.
 | Click a header | Sort ascending → descending → original order |
 | Drag / double-click a header border | Resize / fit a column |
 | Ctrl+F · Enter / F3 · Shift+Enter / Shift+F3 · Esc | Find in the whole file · next · previous · close |
+| Type · Enter / Shift+Enter · Tab / Shift+Tab · Esc | Edit the cell (starts with what you type) · commit and move down/up · right/left (Enter returns to where the Tabs started) · cancel |
+| F2 / double-click · Backspace | Edit the cell's value (arrows move the caret; F2 toggles) · start empty |
+| Alt+Enter · Ctrl+Enter (while editing) | Line break in the cell · put the value in every selected cell |
+| Ctrl+X · Ctrl+V · Delete | Cut · paste tab-separated text (e.g. from Excel; grows the table) · clear |
+| Ctrl+D · Ctrl+R | Fill down · fill right |
+| Ctrl+Z · Ctrl+Y / Ctrl+Shift+Z | Undo · redo |
+| Ctrl+Shift+= (Ctrl+numpad +) · Ctrl+− | Insert rows above (columns when whole columns are selected) · delete them |
+| Shift+Space · Ctrl+Space | Select rows · columns |
+| Type in the "+" row · click the "+" header | Add a row · add a column |
+| Right-click row numbers, headers, cells | Insert/delete rows and columns, rename a column, sort / original order, cut/copy/paste/clear |
+| Ctrl+S · Ctrl+Shift+S | Save · Save As (`.tsv` saves tab-separated) |
+
+Edits sit on top of the file until you save, so even huge CSVs stay instant to edit.
+Saving streams the file once: untouched rows are copied byte for byte (a one-cell change
+changes one line), and quoting, line endings and encoding are kept. Sorting is a view —
+it doesn't reorder the saved file. New tables (Ctrl+Shift+N) save into `Documents\whir`
+and appear in the notes drawer.
 
 ## Building
 
@@ -140,7 +157,8 @@ crates/
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures
   whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
-  whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background find/sort
+  whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background find/sort,
+                  an edit overlay (row piece table + cell overrides) and a streaming save
 ```
 
 Principles:
@@ -168,5 +186,6 @@ CJK and emoji fallbacks load on first use.
 ## Not yet
 
 PDF passwords, animated GIFs, ICC colour management, image editing, tab reordering,
+spreadsheet formulas, cell formatting and multiple sheets,
 WebP/HEIC without the Microsoft Store codecs, IME composition at the caret, spell check,
 subfolders in the notes library.

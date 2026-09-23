@@ -61,6 +61,20 @@ fn title_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Tab label: the file name, except that a table whir named itself
+/// ("Untitled table 2026-09-23 1412.csv") stays "Untitled table", as in the drawer.
+fn tab_title_of(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if whir_core::library::is_untitled_stem(&stem) {
+        UNTITLED.to_owned()
+    } else {
+        title_of(path)
+    }
+}
+
 impl CsvDoc {
     pub fn open(path: PathBuf, cx: &OpenCx) -> Self {
         let phase = Phase::Loading {
@@ -68,7 +82,7 @@ impl CsvDoc {
             carry: None,
         };
         Self {
-            title: title_of(&path),
+            title: tab_title_of(&path),
             path: Some(path),
             waker: cx.waker.clone(),
             library: cx.library.clone(),
@@ -216,7 +230,7 @@ impl CsvDoc {
                     return;
                 }
                 if kind == SaveKind::Rebind || self.path.is_none() {
-                    self.title = title_of(&path);
+                    self.title = tab_title_of(&path);
                     self.path = Some(path);
                 }
                 let Some(l) = self.loaded() else { return };

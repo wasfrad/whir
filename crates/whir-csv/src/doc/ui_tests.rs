@@ -722,7 +722,8 @@ fn a_new_table_saves_into_the_library() {
     assert_eq!(path.parent().unwrap(), h._dir.as_path());
     let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
     assert!(whir_core::library::is_untitled_stem(&stem), "{stem}");
-    assert_eq!(h.doc.title(), path.file_name().unwrap().to_string_lossy());
+    // Named by whir: the tab keeps the friendly name (as the drawer does).
+    assert_eq!(h.doc.title(), "Untitled table");
     assert_eq!(
         std::fs::read(&path).unwrap(),
         "\u{feff}Column 1,Column 2,Column 3\r\nhello,world,\r\n".as_bytes()
