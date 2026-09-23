@@ -17,6 +17,7 @@ use windows::core::{HSTRING, PCSTR};
 pub type Document = *mut c_void;
 pub type Page = *mut c_void;
 pub type Bitmap = *mut c_void;
+pub type TextPage = *mut c_void;
 
 pub const BITMAP_BGRA: i32 = 4;
 pub const FLAG_ANNOT: i32 = 0x01;
@@ -54,6 +55,44 @@ pub struct SizeF {
     pub height: f32,
 }
 
+/// `FS_RECTF` (field order as declared: left, top, right, bottom).
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RectF {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+/// Text extraction (`fpdf_text.h`) plus the page transform. Optional: a
+/// pdfium.dll without these still renders; selection and search are off.
+pub struct TextApi {
+    /// `FPDFText_LoadPage`: NULL on error.
+    pub load_page: unsafe extern "C" fn(Page) -> TextPage,
+    pub close_page: unsafe extern "C" fn(TextPage),
+    /// −1 on error.
+    pub count_chars: unsafe extern "C" fn(TextPage) -> i32,
+    /// 0 when the character has no Unicode mapping.
+    pub get_unicode: unsafe extern "C" fn(TextPage, i32) -> u32,
+    /// 1 / 0 / −1 (error).
+    pub is_generated: unsafe extern "C" fn(TextPage, i32) -> i32,
+    /// 1 / 0 / −1 (error).
+    pub is_hyphen: unsafe extern "C" fn(TextPage, i32) -> i32,
+    /// Radians in [0, 2π), −1 on error.
+    pub char_angle: unsafe extern "C" fn(TextPage, i32) -> f32,
+    /// `FPDFText_GetLooseCharBox`: font ascent/descent box, page space.
+    pub loose_box: unsafe extern "C" fn(TextPage, i32, *mut RectF) -> i32,
+    /// `FPDFText_GetCharBox`: tight glyph box. Note the out-parameter order:
+    /// left, *right*, *bottom*, top.
+    pub char_box:
+        unsafe extern "C" fn(TextPage, i32, *mut f64, *mut f64, *mut f64, *mut f64) -> i32,
+    /// `FPDF_DeviceToPage(page, start_x, start_y, size_x, size_y, rotate,
+    /// device_x, device_y, *page_x, *page_y)`.
+    pub device_to_page:
+        unsafe extern "C" fn(Page, i32, i32, i32, i32, i32, i32, i32, *mut f64, *mut f64) -> i32,
+}
+
 pub struct Api {
     _lib: HMODULE,
     pub init_library: unsafe extern "C" fn(),
@@ -71,6 +110,7 @@ pub struct Api {
         unsafe extern "C" fn(Bitmap, Page, i32, i32, i32, i32, i32, i32, *mut Pause) -> i32,
     pub render_continue: unsafe extern "C" fn(Page, *mut Pause) -> i32,
     pub render_close: unsafe extern "C" fn(Page),
+    pub text: Option<TextApi>,
 }
 
 // Function pointers into a DLL that is never unloaded.
@@ -132,6 +172,32 @@ impl Api {
                 }
             }};
         }
+        // Like `sym!`, but a missing symbol is `None` instead of an error.
+        macro_rules! opt_sym {
+            ($name:literal) => {{
+                let p = unsafe { GetProcAddress(lib, PCSTR(concat!($name, "\0").as_ptr())) };
+                // SAFETY: the signature matches the PDFium header for this symbol.
+                p.map(|f| unsafe {
+                    std::mem::transmute::<unsafe extern "system" fn() -> isize, _>(f)
+                })
+            }};
+        }
+
+        // All or nothing: half a text API is no text API.
+        let text = (|| {
+            Some(TextApi {
+                load_page: opt_sym!("FPDFText_LoadPage")?,
+                close_page: opt_sym!("FPDFText_ClosePage")?,
+                count_chars: opt_sym!("FPDFText_CountChars")?,
+                get_unicode: opt_sym!("FPDFText_GetUnicode")?,
+                is_generated: opt_sym!("FPDFText_IsGenerated")?,
+                is_hyphen: opt_sym!("FPDFText_IsHyphen")?,
+                char_angle: opt_sym!("FPDFText_GetCharAngle")?,
+                loose_box: opt_sym!("FPDFText_GetLooseCharBox")?,
+                char_box: opt_sym!("FPDFText_GetCharBox")?,
+                device_to_page: opt_sym!("FPDF_DeviceToPage")?,
+            })
+        })();
 
         Ok(Self {
             _lib: lib,
@@ -149,6 +215,7 @@ impl Api {
             render_start: sym!("FPDF_RenderPageBitmap_Start"),
             render_continue: sym!("FPDF_RenderPage_Continue"),
             render_close: sym!("FPDF_RenderPage_Close"),
+            text,
         })
     }
 
