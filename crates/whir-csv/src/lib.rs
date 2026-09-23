@@ -5,6 +5,7 @@
 
 mod dialect;
 mod doc;
+mod edit;
 mod find;
 mod grid;
 mod index;
