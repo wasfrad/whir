@@ -18,7 +18,9 @@ pub const COPYDATA_OPEN: usize = 0x5748_4952; // "WHIR"
 
 pub fn find_main_window() -> Option<HWND> {
     let class = HSTRING::from(WINDOW_CLASS);
-    unsafe { FindWindowW(&class, PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())
+    unsafe { FindWindowW(&class, PCWSTR::null()) }
+        .ok()
+        .filter(|h| !h.is_invalid())
 }
 
 /// NUL-separated UTF-16 paths.
@@ -94,7 +96,10 @@ mod tests {
 
     #[test]
     fn roundtrip_paths() {
-        let paths = vec![PathBuf::from(r"C:\a b\c.png"), PathBuf::from(r"D:\ünï\x.csv")];
+        let paths = vec![
+            PathBuf::from(r"C:\a b\c.png"),
+            PathBuf::from(r"D:\ünï\x.csv"),
+        ];
         assert_eq!(decode_paths(&encode_paths(&paths)), paths);
     }
 }

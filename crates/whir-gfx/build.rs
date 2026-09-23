@@ -92,6 +92,14 @@ fn main() {
     println!("cargo:rerun-if-changed={path}");
     let src = std::fs::read_to_string(path).unwrap();
     // level_9_3 targets keep WARP and very old GPUs working.
-    std::fs::write(out.join("egui_vs.dxbc"), compile(&src, path, "vs_main", "vs_4_0_level_9_3")).unwrap();
-    std::fs::write(out.join("egui_ps.dxbc"), compile(&src, path, "ps_main", "ps_4_0_level_9_3")).unwrap();
+    std::fs::write(
+        out.join("egui_vs.dxbc"),
+        compile(&src, path, "vs_main", "vs_4_0_level_9_3"),
+    )
+    .unwrap();
+    std::fs::write(
+        out.join("egui_ps.dxbc"),
+        compile(&src, path, "ps_main", "ps_4_0_level_9_3"),
+    )
+    .unwrap();
 }

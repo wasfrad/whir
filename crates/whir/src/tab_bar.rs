@@ -44,13 +44,18 @@ pub fn show(
 
     // --- caption buttons (right) ---
     let bw = m.caption_button_width;
-    let close_rect = Rect::from_min_max(pos2(strip.right() - bw, strip.top()), strip.right_bottom());
+    let close_rect =
+        Rect::from_min_max(pos2(strip.right() - bw, strip.top()), strip.right_bottom());
     let max_rect = close_rect.translate(vec2(-bw, 0.0));
     let min_rect = max_rect.translate(vec2(-bw, 0.0));
     if caption_button(ui, min_rect, "min", theme, false, Glyph::Minimize).clicked() {
         out.minimize = true;
     }
-    let glyph = if maximized { Glyph::Restore } else { Glyph::Maximize };
+    let glyph = if maximized {
+        Glyph::Restore
+    } else {
+        Glyph::Maximize
+    };
     if caption_button(ui, max_rect, "max", theme, false, glyph).clicked() {
         out.toggle_maximize = true;
     }
@@ -70,7 +75,13 @@ pub fn show(
     let n = tabs.len().max(1) as f32;
     let tab_w = (avail / n - m.tab_gap).clamp(36.0, m.tab_max_width);
     let tab_h = strip.height() - top_gap;
-    let text_color = |active: bool| if active { theme.tab_text } else { theme.tab_text_inactive };
+    let text_color = |active: bool| {
+        if active {
+            theme.tab_text
+        } else {
+            theme.tab_text_inactive
+        }
+    };
 
     let mut x = left;
     let mut hovered_index = None;
@@ -92,7 +103,10 @@ pub fn show(
 
         // Close button: registered after the tab so it wins hit-testing.
         let show_close = rect.width() >= 60.0 || is_active;
-        let close_rect = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y - 1.0), vec2(18.0, 18.0));
+        let close_rect = Rect::from_center_size(
+            pos2(rect.right() - 16.0, rect.center().y - 1.0),
+            vec2(18.0, 18.0),
+        );
         let close_resp = show_close.then(|| ui.interact(close_rect, id.with("x"), Sense::click()));
         let close_hovered = close_resp.as_ref().is_some_and(|r| r.hovered());
 
@@ -102,7 +116,9 @@ pub fn show(
         {
             out.activate = Some(i);
         }
-        if resp.clicked_by(PointerButton::Middle) || close_resp.as_ref().is_some_and(|r| r.clicked()) {
+        if resp.clicked_by(PointerButton::Middle)
+            || close_resp.as_ref().is_some_and(|r| r.clicked())
+        {
             out.close = Some(i);
         }
         if let Some(tip) = &tab.tooltip {
@@ -113,26 +129,53 @@ pub fn show(
         let r = m.corner_radius as u8;
         if is_active {
             let body = Rect::from_min_max(rect.min, pos2(rect.right(), strip.bottom()));
-            painter.rect_filled(body, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, theme.content_bg);
+            painter.rect_filled(
+                body,
+                CornerRadius {
+                    nw: r,
+                    ne: r,
+                    sw: 0,
+                    se: 0,
+                },
+                theme.content_bg,
+            );
         } else if resp.hovered() {
-            painter.rect_filled(rect.shrink2(vec2(0.0, 2.0)).translate(vec2(0.0, -1.0)), r, theme.tab_hover_bg);
+            painter.rect_filled(
+                rect.shrink2(vec2(0.0, 2.0)).translate(vec2(0.0, -1.0)),
+                r,
+                theme.tab_hover_bg,
+            );
         }
         let icon_center = pos2(rect.left() + 17.0, rect.center().y - 1.0);
         if rect.width() >= 44.0 || !show_close {
             if tab.loading {
-                paint_spinner(&painter, icon_center, 6.0, theme.accent, ui.input(|i| i.time));
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                paint_spinner(
+                    &painter,
+                    icon_center,
+                    6.0,
+                    theme.accent,
+                    ui.input(|i| i.time),
+                );
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
             } else {
                 paint_kind_glyph(&painter, icon_center, tab.kind, theme);
             }
         }
         let text_left = rect.left() + 31.0;
-        let text_right = if show_close { close_rect.left() - 4.0 } else { rect.right() - 8.0 };
+        let text_right = if show_close {
+            close_rect.left() - 4.0
+        } else {
+            rect.right() - 8.0
+        };
         if text_right - text_left > 8.0 {
             whir_core::theme::note_text(tab.title);
             let mut job = LayoutJob::single_section(
                 tab.title.to_owned(),
-                TextFormat::simple(FontId::proportional(m.body_text_size), text_color(is_active)),
+                TextFormat::simple(
+                    FontId::proportional(m.body_text_size),
+                    text_color(is_active),
+                ),
             );
             job.wrap = TextWrapping {
                 max_width: text_right - text_left,
@@ -142,25 +185,36 @@ pub fn show(
             };
             let galley = painter.layout_job(job);
             let pos = pos2(text_left, icon_center.y - galley.size().y / 2.0);
-            painter.with_clip_rect(rect).galley(pos, galley, theme.tab_text);
+            painter
+                .with_clip_rect(rect)
+                .galley(pos, galley, theme.tab_text);
         }
         if let Some(cr) = &close_resp
             && (is_active || resp.hovered() || cr.hovered())
         {
             if cr.hovered() {
-                let bg = if cr.is_pointer_button_down_on() { theme.caption_pressed } else { theme.caption_hover };
+                let bg = if cr.is_pointer_button_down_on() {
+                    theme.caption_pressed
+                } else {
+                    theme.caption_hover
+                };
                 painter.rect_filled(close_rect, 4.0, bg);
             }
-            paint_glyph(&painter, close_rect.center(), Glyph::CloseSmall, text_color(is_active));
+            paint_glyph(
+                &painter,
+                close_rect.center(),
+                Glyph::CloseSmall,
+                text_color(is_active),
+            );
         }
     }
 
     // Subtle separators between inactive, un-hovered neighbours.
-    for i in 1..rects.len() {
+    for (i, rect) in rects.iter().enumerate().skip(1) {
         let quiet = |j: usize| j != active && Some(j) != hovered_index;
         if quiet(i - 1) && quiet(i) {
-            let x = painter.round_to_pixel_center(rects[i].left() - m.tab_gap / 2.0);
-            let y = rects[i].center().y;
+            let x = painter.round_to_pixel_center(rect.left() - m.tab_gap / 2.0);
+            let y = rect.center().y;
             painter.line_segment(
                 [pos2(x, y - 8.0), pos2(x, y + 8.0)],
                 Stroke::new(1.0, theme.separator),
@@ -172,14 +226,22 @@ pub fn show(
     // --- open button ---
     let plus_left = rects.last().map_or(left, |r| r.right() + m.tab_gap + 2.0);
     let plus = Rect::from_min_size(
-        pos2(plus_left, strip.top() + top_gap + (tab_h - plus_size) / 2.0 - 1.0),
+        pos2(
+            plus_left,
+            strip.top() + top_gap + (tab_h - plus_size) / 2.0 - 1.0,
+        ),
         vec2(plus_size, plus_size),
     );
     let plus_resp = ui.interact(plus, ui.id().with("open"), Sense::click());
     if plus_resp.hovered() {
         painter.rect_filled(plus, 6.0, theme.tab_hover_bg);
     }
-    paint_glyph(&painter, plus.center(), Glyph::Plus, theme.tab_text_inactive);
+    paint_glyph(
+        &painter,
+        plus.center(),
+        Glyph::Plus,
+        theme.tab_text_inactive,
+    );
     if plus_resp.clicked() {
         out.open_dialog = true;
     }
@@ -198,17 +260,40 @@ enum Glyph {
     Plus,
 }
 
-fn caption_button(ui: &mut Ui, rect: Rect, id: &str, theme: &Theme, is_close: bool, glyph: Glyph) -> egui::Response {
+fn caption_button(
+    ui: &mut Ui,
+    rect: Rect,
+    id: &str,
+    theme: &Theme,
+    is_close: bool,
+    glyph: Glyph,
+) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("caption", id)), Sense::click());
     let (bg, fg) = if resp.is_pointer_button_down_on() {
         (
-            Some(if is_close { theme.close_pressed } else { theme.caption_pressed }),
-            if is_close { Color32::WHITE } else { theme.tab_text },
+            Some(if is_close {
+                theme.close_pressed
+            } else {
+                theme.caption_pressed
+            }),
+            if is_close {
+                Color32::WHITE
+            } else {
+                theme.tab_text
+            },
         )
     } else if resp.hovered() {
         (
-            Some(if is_close { theme.close_hover } else { theme.caption_hover }),
-            if is_close { Color32::WHITE } else { theme.tab_text },
+            Some(if is_close {
+                theme.close_hover
+            } else {
+                theme.caption_hover
+            }),
+            if is_close {
+                Color32::WHITE
+            } else {
+                theme.tab_text
+            },
         )
     } else {
         (None, theme.tab_text)
@@ -241,7 +326,10 @@ fn paint_glyph(painter: &egui::Painter, center: Pos2, glyph: Glyph, color: Color
             painter.line_segment([pos2(back.left(), front.top()), back.left_top()], stroke);
             painter.line_segment([back.left_top(), back.right_top()], stroke);
             painter.line_segment([back.right_top(), back.right_bottom()], stroke);
-            painter.line_segment([back.right_bottom(), pos2(front.right(), back.bottom())], stroke);
+            painter.line_segment(
+                [back.right_bottom(), pos2(front.right(), back.bottom())],
+                stroke,
+            );
             painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Middle);
         }
         Glyph::Close => {
@@ -276,10 +364,34 @@ fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &The
         DocKind::Image => {
             let r = Rect::from_center_size(c, vec2(13.0, 11.0));
             painter.rect_stroke(r, 2.0, s, egui::StrokeKind::Middle);
-            painter.line_segment([pos2(r.left() + 1.5, r.bottom() - 2.0), pos2(r.left() + 5.0, r.top() + 5.0)], s);
-            painter.line_segment([pos2(r.left() + 5.0, r.top() + 5.0), pos2(r.left() + 8.0, r.bottom() - 3.5)], s);
-            painter.line_segment([pos2(r.left() + 7.5, r.bottom() - 3.0), pos2(r.left() + 9.5, r.top() + 6.5)], s);
-            painter.line_segment([pos2(r.left() + 9.5, r.top() + 6.5), pos2(r.right() - 1.5, r.bottom() - 2.0)], s);
+            painter.line_segment(
+                [
+                    pos2(r.left() + 1.5, r.bottom() - 2.0),
+                    pos2(r.left() + 5.0, r.top() + 5.0),
+                ],
+                s,
+            );
+            painter.line_segment(
+                [
+                    pos2(r.left() + 5.0, r.top() + 5.0),
+                    pos2(r.left() + 8.0, r.bottom() - 3.5),
+                ],
+                s,
+            );
+            painter.line_segment(
+                [
+                    pos2(r.left() + 7.5, r.bottom() - 3.0),
+                    pos2(r.left() + 9.5, r.top() + 6.5),
+                ],
+                s,
+            );
+            painter.line_segment(
+                [
+                    pos2(r.left() + 9.5, r.top() + 6.5),
+                    pos2(r.right() - 1.5, r.bottom() - 2.0),
+                ],
+                s,
+            );
             painter.circle_filled(pos2(r.right() - 3.5, r.top() + 3.5), 1.3, color);
         }
         DocKind::Pdf => {
@@ -297,20 +409,50 @@ fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &The
                 painter.line_segment([w[0], w[1]], s);
             }
             for dy in [5.5, 8.0, 10.5] {
-                painter.line_segment([pos2(r.left() + 2.5, r.top() + dy), pos2(r.right() - 2.5, r.top() + dy)], Stroke::new(1.0, color));
+                painter.line_segment(
+                    [
+                        pos2(r.left() + 2.5, r.top() + dy),
+                        pos2(r.right() - 2.5, r.top() + dy),
+                    ],
+                    Stroke::new(1.0, color),
+                );
             }
         }
         DocKind::Csv => {
             let r = Rect::from_center_size(c, vec2(13.0, 12.0));
             painter.rect_stroke(r, 1.5, s, egui::StrokeKind::Middle);
             let thin = Stroke::new(1.0, color);
-            painter.line_segment([pos2(r.left(), r.top() + 4.0), pos2(r.right(), r.top() + 4.0)], thin);
-            painter.line_segment([pos2(r.left(), r.top() + 8.0), pos2(r.right(), r.top() + 8.0)], thin);
-            painter.line_segment([pos2(r.left() + 5.0, r.top()), pos2(r.left() + 5.0, r.bottom())], thin);
+            painter.line_segment(
+                [
+                    pos2(r.left(), r.top() + 4.0),
+                    pos2(r.right(), r.top() + 4.0),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    pos2(r.left(), r.top() + 8.0),
+                    pos2(r.right(), r.top() + 8.0),
+                ],
+                thin,
+            );
+            painter.line_segment(
+                [
+                    pos2(r.left() + 5.0, r.top()),
+                    pos2(r.left() + 5.0, r.bottom()),
+                ],
+                thin,
+            );
         }
         DocKind::Error => {
             painter.circle_stroke(c, 6.0, s);
-            painter.text(c, Align2::CENTER_CENTER, "!", FontId::proportional(10.0), color);
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                "!",
+                FontId::proportional(10.0),
+                color,
+            );
         }
     }
 }

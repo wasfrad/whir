@@ -103,7 +103,11 @@ pub fn register() -> Result<usize, String> {
                 Some(g.prog_id),
                 "",
             )?;
-            set_string(&format!(r"{app}\SupportedTypes"), Some(&format!(".{ext}")), "")?;
+            set_string(
+                &format!(r"{app}\SupportedTypes"),
+                Some(&format!(".{ext}")),
+                "",
+            )?;
             set_string(
                 &format!(r"{CAPABILITIES}\FileAssociations"),
                 Some(&format!(".{ext}")),
@@ -112,7 +116,11 @@ pub fn register() -> Result<usize, String> {
             count += 1;
         }
     }
-    set_string(r"Software\RegisteredApplications", Some("whir"), CAPABILITIES)?;
+    set_string(
+        r"Software\RegisteredApplications",
+        Some("whir"),
+        CAPABILITIES,
+    )?;
     notify();
     Ok(count)
 }
@@ -123,12 +131,19 @@ pub fn unregister() {
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path));
         };
         let del_value = |path: &str, name: &str| {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(path), &HSTRING::from(name));
+            let _ = RegDeleteKeyValueW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(path),
+                &HSTRING::from(name),
+            );
         };
         for g in groups() {
             del_tree(&format!(r"Software\Classes\{}", g.prog_id));
             for ext in g.extensions {
-                del_value(&format!(r"Software\Classes\.{ext}\OpenWithProgids"), g.prog_id);
+                del_value(
+                    &format!(r"Software\Classes\.{ext}\OpenWithProgids"),
+                    g.prog_id,
+                );
             }
         }
         del_tree(r"Software\Classes\Applications\whir.exe");

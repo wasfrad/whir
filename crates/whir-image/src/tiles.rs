@@ -52,7 +52,9 @@ pub fn upload(textures: &Arc<dyn TextureRegistry>, d: &Decoded) -> Result<Level,
                 mipmaps: true,
                 filter: Filter::Linear,
             };
-            let texture = textures.clone().create(&desc, &d.pixels[offset..], d.stride)?;
+            let texture = textures
+                .clone()
+                .create(&desc, &d.pixels[offset..], d.stride)?;
             tiles.push(Tile {
                 origin: [x, y],
                 size: [tw, th],

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use egui::epaint::{ClippedPrimitive, textures::TexturesDelta};
 use windows::Win32::Foundation::HWND;
 
+use crate::Device;
 use crate::painter::Painter;
 use crate::surface::{PresentResult, Surface};
 use crate::textures::GpuTextures;
-use crate::Device;
 
 /// Device + swapchain + painter for one window.
 pub struct Renderer {
@@ -27,7 +27,11 @@ impl Renderer {
         let [r, g, b, _] = background.to_normalized_gamma_f32();
         let surface = Surface::new(&device, hwnd, size_px[0], size_px[1], [r, g, b])?;
         let painter = Painter::new(&device.device)?;
-        textures.set_device(&device.device, device.max_texture_side());
+        textures.set_device(
+            &device.device,
+            device.max_texture_side(),
+            device.npot_mipmaps(),
+        );
         Ok(Self {
             device,
             surface,
@@ -86,7 +90,6 @@ impl Renderer {
         self.surface.wait_for_frame();
         let ctx = self.device.context.clone();
         self.set_textures(delta);
-        self.textures.process_pending(&ctx);
 
         let Ok(rtv) = self.surface.render_target(&self.device) else {
             self.free_textures(delta);
@@ -96,9 +99,14 @@ impl Renderer {
             ctx.ClearRenderTargetView(&rtv, &clear.to_normalized_gamma_f32());
         }
         let size = self.surface.size();
-        let _ = self
-            .painter
-            .paint(&ctx, &rtv, size, pixels_per_point, primitives, &self.textures);
+        let _ = self.painter.paint(
+            &ctx,
+            &rtv,
+            size,
+            pixels_per_point,
+            primitives,
+            &self.textures,
+        );
         self.free_textures(delta);
         self.surface.present(vsync)
     }

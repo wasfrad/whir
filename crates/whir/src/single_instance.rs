@@ -8,12 +8,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use whir_platform::ipc;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::core::w;
-use whir_platform::ipc;
 
 pub enum Instance {
     /// We are the primary instance; keep this alive until the window is destroyed.

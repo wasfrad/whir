@@ -9,7 +9,10 @@ use egui::{Pos2, Rect, Vec2, pos2, vec2};
 pub enum Mode {
     /// Fit the whole image in the viewport (never upscaling beyond 100%).
     Fit,
-    Manual { zoom: f32, center: Pos2 },
+    Manual {
+        zoom: f32,
+        center: Pos2,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +80,10 @@ impl View {
     }
 
     pub fn pan(&mut self, delta_points: Vec2, image: Vec2, viewport: Vec2, ppp: f32) {
+        // Nothing to pan: stay in Fit so the image keeps following window resizes.
+        if matches!(self.mode, Mode::Fit) && !self.pannable(image, viewport, ppp) {
+            return;
+        }
         let zoom = self.zoom(image, viewport, ppp);
         let center = self.center(image) - delta_points / zoom;
         self.mode = Mode::Manual { zoom, center };
@@ -97,7 +104,10 @@ impl View {
                 c.clamp(half, img - half)
             }
         };
-        let center = pos2(axis(center.x, image.x, half.x), axis(center.y, image.y, half.y));
+        let center = pos2(
+            axis(center.x, image.x, half.x),
+            axis(center.y, image.y, half.y),
+        );
         self.mode = Mode::Manual { zoom, center };
         let _ = ppp;
     }
@@ -109,7 +119,10 @@ impl View {
         let min = viewport.center() - self.center(image).to_vec2() * zoom;
         let snap = |v: f32| (v * ppp).round() / ppp;
         let min = pos2(snap(min.x), snap(min.y));
-        Rect::from_min_size(min, vec2(snap(size.x).max(1.0 / ppp), snap(size.y).max(1.0 / ppp)))
+        Rect::from_min_size(
+            min,
+            vec2(snap(size.x).max(1.0 / ppp), snap(size.y).max(1.0 / ppp)),
+        )
     }
 
     /// Whether the image is larger than the viewport (so it can be panned).
@@ -161,6 +174,13 @@ mod tests {
         v.pan(vec2(1e6, 1e6), IMG, VP, 1.0);
         let c = v.center(IMG);
         assert_eq!(c, pos2(500.0, 400.0));
+    }
+
+    #[test]
+    fn dragging_a_fitted_image_keeps_fit() {
+        let mut v = View::default();
+        v.pan(vec2(30.0, 10.0), IMG, VP, 1.0);
+        assert_eq!(v.mode, Mode::Fit);
     }
 
     #[test]

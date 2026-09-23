@@ -171,11 +171,26 @@ impl Theme {
         ctx.all_styles_mut(|style| {
             use egui::{FontFamily, FontId, TextStyle};
             style.text_styles = [
-                (TextStyle::Small, FontId::new(m.small_text_size, FontFamily::Proportional)),
-                (TextStyle::Body, FontId::new(m.body_text_size, FontFamily::Proportional)),
-                (TextStyle::Button, FontId::new(m.body_text_size, FontFamily::Proportional)),
-                (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
-                (TextStyle::Monospace, FontId::new(m.body_text_size, FontFamily::Monospace)),
+                (
+                    TextStyle::Small,
+                    FontId::new(m.small_text_size, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Body,
+                    FontId::new(m.body_text_size, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Button,
+                    FontId::new(m.body_text_size, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Heading,
+                    FontId::new(18.0, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Monospace,
+                    FontId::new(m.body_text_size, FontFamily::Monospace),
+                ),
             ]
             .into();
             style.interaction.tooltip_delay = 0.35;
@@ -219,22 +234,63 @@ pub struct FontSpec {
 /// Loaded in order; the first of each role is the primary face.
 /// Ships no font bytes in the binary: every Windows 10/11 install has these.
 pub const FONTS: &[FontSpec] = &[
-    FontSpec { name: "Segoe UI", file: "segoeui.ttf", index: 0, role: FontRole::Proportional },
-    FontSpec { name: "Consolas", file: "consola.ttf", index: 0, role: FontRole::Monospace },
+    FontSpec {
+        name: "Segoe UI",
+        file: "segoeui.ttf",
+        index: 0,
+        role: FontRole::Proportional,
+    },
+    FontSpec {
+        name: "Consolas",
+        file: "consola.ttf",
+        index: 0,
+        role: FontRole::Monospace,
+    },
 ];
 
 /// Loaded on demand the first time text needs glyphs the primary fonts lack
 /// (symbols, CJK, emoji) — see [`request_fallback_fonts`]. Never loaded at startup.
 pub const LAZY_FALLBACK_FONTS: &[FontSpec] = &[
-    FontSpec { name: "Segoe UI Symbol", file: "seguisym.ttf", index: 0, role: FontRole::Fallback },
-    FontSpec { name: "Microsoft YaHei", file: "msyh.ttc", index: 0, role: FontRole::Fallback },
-    FontSpec { name: "Yu Gothic", file: "YuGothM.ttc", index: 0, role: FontRole::Fallback },
-    FontSpec { name: "Malgun Gothic", file: "malgun.ttf", index: 0, role: FontRole::Fallback },
-    FontSpec { name: "Nirmala UI", file: "Nirmala.ttc", index: 0, role: FontRole::Fallback },
-    FontSpec { name: "Segoe UI Emoji", file: "seguiemj.ttf", index: 0, role: FontRole::Fallback },
+    FontSpec {
+        name: "Segoe UI Symbol",
+        file: "seguisym.ttf",
+        index: 0,
+        role: FontRole::Fallback,
+    },
+    FontSpec {
+        name: "Microsoft YaHei",
+        file: "msyh.ttc",
+        index: 0,
+        role: FontRole::Fallback,
+    },
+    FontSpec {
+        name: "Yu Gothic",
+        file: "YuGothM.ttc",
+        index: 0,
+        role: FontRole::Fallback,
+    },
+    FontSpec {
+        name: "Malgun Gothic",
+        file: "malgun.ttf",
+        index: 0,
+        role: FontRole::Fallback,
+    },
+    FontSpec {
+        name: "Nirmala UI",
+        file: "Nirmala.ttc",
+        index: 0,
+        role: FontRole::Fallback,
+    },
+    FontSpec {
+        name: "Segoe UI Emoji",
+        file: "seguiemj.ttf",
+        index: 0,
+        role: FontRole::Fallback,
+    },
 ];
 
-static FALLBACK_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FALLBACK_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Segoe UI covers Latin, Greek, Cyrillic, Hebrew and Arabic; most scripts
 /// beyond that (Indic, Thai, CJK, emoji, many symbols) need the lazy fallbacks.

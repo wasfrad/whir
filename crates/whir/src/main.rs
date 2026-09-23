@@ -25,6 +25,8 @@ struct Args {
     register: bool,
     unregister: bool,
     warp: bool,
+    /// Relaunched after losing the GPU device.
+    restarted: bool,
 }
 
 fn parse_args() -> Args {
@@ -33,22 +35,45 @@ fn parse_args() -> Args {
         register: false,
         unregister: false,
         warp: false,
+        restarted: false,
     };
     for a in std::env::args_os().skip(1) {
         match a.to_str() {
             Some("--register") => args.register = true,
             Some("--unregister") => args.unregister = true,
             Some("--warp") => args.warp = true,
+            Some("--restarted") => args.restarted = true,
             _ => args.files.push(PathBuf::from(a)),
         }
     }
     args
 }
 
+/// Relaunch after a lost GPU device. A second loss in a row falls back to
+/// software rendering (WARP) so a broken driver can't cause a restart loop.
+fn relaunch(paths: &[PathBuf], previous: &Args) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--restarted");
+    if previous.restarted || previous.warp {
+        cmd.arg("--warp");
+    }
+    cmd.args(paths);
+    let _ = cmd.spawn();
+}
+
 fn message_box(text: &str, error: bool) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    };
     use windows::core::{HSTRING, w};
-    let icon = if error { MB_ICONERROR } else { MB_ICONINFORMATION };
+    let icon = if error {
+        MB_ICONERROR
+    } else {
+        MB_ICONINFORMATION
+    };
     unsafe {
         MessageBoxW(None, &HSTRING::from(text), w!("whir"), MB_OK | icon);
     }
@@ -94,28 +119,33 @@ fn main() {
     };
     trace::mark("primary instance");
 
-    // GPU device creation (~10-50 ms of driver work) overlaps everything below.
+    // GPU device creation (driver load: 30-150+ ms) overlaps everything below.
     let warp = args.warp;
-    let device_thread = std::thread::Builder::new()
+    let (device_tx, device_rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
         .name("gpu-init".into())
         .spawn(move || {
             let d = Device::create(warp);
             trace::mark("gpu device ready");
-            d
+            let _ = device_tx.send(d);
         })
         .expect("spawn gpu-init");
 
     unsafe {
-        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+        };
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     }
 
     let textures = GpuTextures::new();
     let wake = WakeSlot::new();
-    let dark = whir_platform::os::system_uses_dark_theme();
+    trace::mark("com initialized");
+    let dark = whir_platform::os::prefers_dark();
 
     // Documents start loading now: decoders only need the GPU at upload time.
-    let mut app = app::App::new(textures.clone(), wake.waker(), dark);
+    let restart = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut app = app::App::new(textures.clone(), wake.waker(), dark, restart.clone());
     use whir_platform::Handler as _;
     app.open_files(paths);
     trace::mark("documents started");
@@ -135,24 +165,44 @@ fn main() {
     };
     trace::mark("window created");
 
-    let device = match device_thread.join() {
+    let theme = if dark {
+        whir_core::theme::Theme::dark()
+    } else {
+        whir_core::theme::Theme::light()
+    };
+    // A slow GPU driver shouldn't delay the window itself: after a short grace
+    // period, show a placeholder in the app's colours until the device is ready.
+    let device = match device_rx.recv_timeout(std::time::Duration::from_millis(40)) {
+        Ok(d) => Ok(d),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let strip_px =
+                (theme.metrics.tab_strip_height * window.pixels_per_point()).round() as i32;
+            window.show_placeholder(theme.strip_bg, theme.content_bg, strip_px);
+            trace::mark("placeholder shown");
+            device_rx.recv().map_err(|_| ())
+        }
+        Err(_) => Err(()),
+    };
+    let device = match device {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
             textures.set_failed();
             message_box(&format!("No usable graphics device (D3D11): {e}"), true);
             return;
         }
-        Err(_) => {
+        Err(()) => {
             textures.set_failed();
             return;
         }
     };
-    let background = if dark {
-        whir_core::theme::Theme::dark().strip_bg
-    } else {
-        whir_core::theme::Theme::light().strip_bg
-    };
-    match Renderer::new(device, textures.clone(), window.hwnd(), window.size_px(), background) {
+    let background = theme.strip_bg;
+    match Renderer::new(
+        device,
+        textures.clone(),
+        window.hwnd(),
+        window.size_px(),
+        background,
+    ) {
         Ok(r) => app.set_renderer(r),
         Err(e) => {
             textures.set_failed();
@@ -167,5 +217,8 @@ fn main() {
     trace::flush();
     // Release the single-instance mutex, then skip slow teardown of GPU/COM objects.
     drop(instance);
+    if let Some(paths) = restart.borrow_mut().take() {
+        relaunch(&paths, &args);
+    }
     std::process::exit(code);
 }

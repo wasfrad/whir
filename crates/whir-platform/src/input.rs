@@ -166,12 +166,16 @@ impl InputCollector {
                 match key {
                     Key::C | Key::Insert => Some(Event::Copy),
                     Key::X => Some(Event::Cut),
-                    Key::V => Some(Event::Paste(crate::clipboard::get_text().unwrap_or_default())),
+                    Key::V => Some(Event::Paste(
+                        crate::clipboard::get_text().unwrap_or_default(),
+                    )),
                     _ => None,
                 }
             } else if mods.shift && !mods.ctrl && !mods.alt {
                 match key {
-                    Key::Insert => Some(Event::Paste(crate::clipboard::get_text().unwrap_or_default())),
+                    Key::Insert => Some(Event::Paste(
+                        crate::clipboard::get_text().unwrap_or_default(),
+                    )),
                     Key::Delete => Some(Event::Cut),
                     _ => None,
                 }

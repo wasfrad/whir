@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use egui::{Color32, ColorImage, CursorIcon, Key, Modifiers, Rect, Sense, TextureOptions, pos2, vec2};
+use egui::{
+    Color32, ColorImage, CursorIcon, Key, Modifiers, Rect, Sense, TextureOptions, pos2, vec2,
+};
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, Waker};
 
@@ -62,10 +64,14 @@ pub struct ImageDoc {
     error: Option<String>,
     fit_job: Option<JobHandle>,
     full_job: Option<JobHandle>,
+    /// Full resolution couldn't be decoded/uploaded for the current image.
+    full_failed: bool,
     visible: bool,
     view: View,
     folder: Option<Vec<PathBuf>>,
     folder_requested: bool,
+    /// The user has navigated with ←/→ at least once.
+    browsing: bool,
     /// Pre-decoded neighbours (fit level), for instant ←/→.
     cache: Vec<(PathBuf, Arc<Level>)>,
     prefetching: Vec<PathBuf>,
@@ -97,10 +103,12 @@ impl ImageDoc {
             error: None,
             fit_job: None,
             full_job: None,
+            full_failed: false,
             visible: false,
             view: View::default(),
             folder: None,
             folder_requested: false,
+            browsing: false,
             cache: Vec::new(),
             prefetching: Vec::new(),
             toast: None,
@@ -138,10 +146,14 @@ impl ImageDoc {
     }
 
     fn request_full(&mut self) {
-        if self.full_job.is_some() {
+        if self.full_job.is_some() || self.full_failed {
             return;
         }
         let Some(shown) = &self.shown else { return };
+        // While ←/→ is still decoding the next image, `shown` is the previous one.
+        if !folder::same_path(&shown.path, &self.path) {
+            return;
+        }
         if shown.fit.is_full_resolution() || shown.full.is_some() {
             return;
         }
@@ -183,7 +195,9 @@ impl ImageDoc {
                         }
                         Err(e) => {
                             if full {
+                                // Keep showing the fit level; don't retry every frame.
                                 self.full_job = None;
+                                self.full_failed = true;
                             } else {
                                 self.fit_job = None;
                                 self.loading = false;
@@ -257,7 +271,9 @@ impl ImageDoc {
     }
 
     fn prefetch_neighbours(&mut self) {
-        if !self.visible || self.shown.is_none() {
+        // Only once the user is browsing (has pressed ←/→): opening a single
+        // image shouldn't pay memory for its neighbours.
+        if !self.browsing || !self.visible || self.shown.is_none() {
             return;
         }
         self.trim_cache();
@@ -268,7 +284,8 @@ impl ImageDoc {
                 continue;
             }
             self.prefetching.push(path.clone());
-            let (tx, waker, textures) = (self.tx.clone(), self.waker.clone(), self.textures.clone());
+            let (tx, waker, textures) =
+                (self.tx.clone(), self.waker.clone(), self.textures.clone());
             pool::submit(Priority::Prefetch, move || {
                 let level = decode::decode(&path, Some(fit_cap()))
                     .ok()
@@ -282,6 +299,7 @@ impl ImageDoc {
     }
 
     fn navigate(&mut self, delta: isize, time: f64) {
+        self.browsing = true;
         let (Some(list), Some(i)) = (&self.folder, self.index_in_folder()) else {
             return;
         };
@@ -307,6 +325,7 @@ impl ImageDoc {
             j.cancel();
         }
         self.generation += 1;
+        self.full_failed = false;
         self.title = file_title(&path);
         self.path = path;
         self.view = View::default();
@@ -351,7 +370,13 @@ impl ImageDoc {
             .id()
     }
 
-    fn handle_input(&mut self, ui: &egui::Ui, resp: &egui::Response, viewport: Rect, image: egui::Vec2) {
+    fn handle_input(
+        &mut self,
+        ui: &egui::Ui,
+        resp: &egui::Response,
+        viewport: Rect,
+        image: egui::Vec2,
+    ) {
         let ppp = ui.ctx().pixels_per_point();
         let vp = viewport.size();
         let time = ui.input(|i| i.time);
@@ -370,14 +395,19 @@ impl ImageDoc {
                 self.view.zoom_by(factor, anchor, image, vp, ppp);
             }
         }
-        if resp.dragged_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Middle) {
+        if resp.dragged_by(egui::PointerButton::Primary)
+            || resp.dragged_by(egui::PointerButton::Middle)
+        {
             self.view.pan(resp.drag_delta(), image, vp, ppp);
         }
         if resp.double_clicked() {
-            let anchor = resp.interact_pointer_pos().map_or(egui::Vec2::ZERO, |p| p - viewport.center());
+            let anchor = resp
+                .interact_pointer_pos()
+                .map_or(egui::Vec2::ZERO, |p| p - viewport.center());
             match self.view.mode {
                 Mode::Fit if view::fit_zoom(image, vp, ppp) < view::actual_size_zoom(ppp) => {
-                    self.view.set_zoom(view::actual_size_zoom(ppp), anchor, image, vp, ppp);
+                    self.view
+                        .set_zoom(view::actual_size_zoom(ppp), anchor, image, vp, ppp);
                 }
                 _ => self.view.mode = Mode::Fit,
             }
@@ -403,13 +433,20 @@ impl ImageDoc {
                 self.view.mode = Mode::Fit;
             }
             if i.consume_key(none, Key::Num1) {
-                self.view.set_zoom(view::actual_size_zoom(ppp), egui::Vec2::ZERO, image, vp, ppp);
+                self.view.set_zoom(
+                    view::actual_size_zoom(ppp),
+                    egui::Vec2::ZERO,
+                    image,
+                    vp,
+                    ppp,
+                );
             }
             let zoom_in = i.consume_key(none, Key::Plus)
                 || i.consume_key(none, Key::Equals)
                 || i.consume_key(Modifiers::CTRL, Key::Plus)
                 || i.consume_key(Modifiers::CTRL, Key::Equals);
-            let zoom_out = i.consume_key(none, Key::Minus) || i.consume_key(Modifiers::CTRL, Key::Minus);
+            let zoom_out =
+                i.consume_key(none, Key::Minus) || i.consume_key(Modifiers::CTRL, Key::Minus);
             if zoom_in {
                 self.view.zoom_by(1.25, egui::Vec2::ZERO, image, vp, ppp);
             }
@@ -438,7 +475,8 @@ impl ImageDoc {
         let painter = ui.painter().with_clip_rect(viewport);
 
         // Need more pixels than the fit level holds? Fetch full resolution.
-        let screen_px_per_level_px = self.view.zoom(image, viewport.size(), ppp) * ppp / shown.fit.scale();
+        let screen_px_per_level_px =
+            self.view.zoom(image, viewport.size(), ppp) * ppp / shown.fit.scale();
         let wants_full = screen_px_per_level_px > 1.05;
 
         if shown.best().has_alpha {
@@ -475,7 +513,9 @@ impl ImageDoc {
     }
 
     fn paint_toast(&mut self, ui: &egui::Ui, viewport: Rect, theme: &Theme) {
-        let Some((text, until)) = &self.toast else { return };
+        let Some((text, until)) = &self.toast else {
+            return;
+        };
         let now = ui.input(|i| i.time);
         if now >= *until {
             self.toast = None;
@@ -496,7 +536,9 @@ impl ImageDoc {
         );
         painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
         painter.galley(rect.min + pad, galley, theme.text);
-        ui.ctx().request_repaint_after(Duration::from_millis(30).min(Duration::from_secs_f64(until - now)));
+        ui.ctx().request_repaint_after(
+            Duration::from_millis(30).min(Duration::from_secs_f64(until - now)),
+        );
     }
 }
 
@@ -525,7 +567,11 @@ impl Document for ImageDoc {
 
     fn on_visibility(&mut self, visible: bool) {
         self.visible = visible;
-        let priority = if visible { Priority::Visible } else { Priority::Background };
+        let priority = if visible {
+            Priority::Visible
+        } else {
+            Priority::Background
+        };
         if let Some(j) = &self.fit_job {
             j.set_priority(priority);
         }
@@ -568,7 +614,12 @@ impl Document for ImageDoc {
                 });
             }
         } else if let Some(err) = &self.error {
-            whir_core::message_doc::show_message(ui, "Can't show this image", err, Some(&self.path));
+            whir_core::message_doc::show_message(
+                ui,
+                "Can't show this image",
+                err,
+                Some(&self.path),
+            );
             // Still allow ←/→ past a broken file.
             let (mut nav, time) = (0isize, ui.input(|i| i.time));
             ui.input_mut(|i| {

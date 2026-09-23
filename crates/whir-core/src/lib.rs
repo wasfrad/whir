@@ -6,6 +6,7 @@
 pub mod document;
 pub mod file;
 pub mod message_doc;
+pub mod scroll;
 pub mod texture;
 pub mod theme;
 pub mod trace;

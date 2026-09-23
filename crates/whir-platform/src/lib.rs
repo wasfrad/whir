@@ -10,6 +10,5 @@ pub mod os;
 mod window;
 
 pub use window::{
-    FrameInfo, FrameOutput, Handler, HitMap, RectPx, WakeSlot, Window, WindowCommand,
-    WindowOptions,
+    FrameInfo, FrameOutput, Handler, HitMap, RectPx, WakeSlot, Window, WindowCommand, WindowOptions,
 };

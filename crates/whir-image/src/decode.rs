@@ -88,9 +88,19 @@ fn orientation_transform(o: u16) -> (WICBitmapTransformOptions, bool) {
         2 => (WICBitmapTransformFlipHorizontal, false),
         3 => (WICBitmapTransformRotate180, false),
         4 => (WICBitmapTransformFlipVertical, false),
-        5 => (WICBitmapTransformOptions(WICBitmapTransformRotate90.0 | WICBitmapTransformFlipHorizontal.0), true),
+        5 => (
+            WICBitmapTransformOptions(
+                WICBitmapTransformRotate90.0 | WICBitmapTransformFlipHorizontal.0,
+            ),
+            true,
+        ),
         6 => (WICBitmapTransformRotate90, true),
-        7 => (WICBitmapTransformOptions(WICBitmapTransformRotate270.0 | WICBitmapTransformFlipHorizontal.0), true),
+        7 => (
+            WICBitmapTransformOptions(
+                WICBitmapTransformRotate270.0 | WICBitmapTransformFlipHorizontal.0,
+            ),
+            true,
+        ),
         8 => (WICBitmapTransformRotate270, true),
         _ => (WICBitmapTransformRotate0, false),
     }
@@ -155,18 +165,31 @@ pub fn decode(path: &Path, max_long_side: Option<u32>) -> Result<Decoded, Decode
             // 1) Native (DCT) scaling for JPEG and friends.
             if let Ok(t) = frame.cast::<IWICBitmapSourceTransform>() {
                 let (mut cw, mut ch) = (tw, th);
-                if t.GetClosestSize(&mut cw, &mut ch).is_ok() && cw < w && ch < h && cw >= tw && ch >= th {
+                if t.GetClosestSize(&mut cw, &mut ch).is_ok()
+                    && cw < w
+                    && ch < h
+                    && cw >= tw
+                    && ch >= th
+                {
                     let mut fmt: GUID = GUID_WICPixelFormat32bppPBGRA;
                     let _ = t.GetClosestPixelFormat(&mut fmt);
                     let bpp = bits_per_pixel(&factory, &fmt).unwrap_or(32);
                     let stride = (cw as usize * bpp as usize).div_ceil(8).next_multiple_of(4);
                     let mut buf = vec![0u8; stride * ch as usize];
-                    if t
-                        .CopyPixels(std::ptr::null(), cw, ch, &fmt, WICBitmapTransformRotate0, stride as u32, &mut buf)
-                        .is_ok()
+                    if t.CopyPixels(
+                        std::ptr::null(),
+                        cw,
+                        ch,
+                        &fmt,
+                        WICBitmapTransformRotate0,
+                        stride as u32,
+                        &mut buf,
+                    )
+                    .is_ok()
                     {
                         // Copies `buf`, which is freed at the end of this block.
-                        let bmp = factory.CreateBitmapFromMemory(cw, ch, &fmt, stride as u32, &buf)?;
+                        let bmp =
+                            factory.CreateBitmapFromMemory(cw, ch, &fmt, stride as u32, &buf)?;
                         source = bmp.cast()?;
                         (cur_w, cur_h) = (cw, ch);
                     }
@@ -175,8 +198,11 @@ pub fn decode(path: &Path, max_long_side: Option<u32>) -> Result<Decoded, Decode
             // 2) Otherwise a high-quality resample (reads the full image once).
             if cur_w.max(cur_h) > max.saturating_mul(2) || (cur_w, cur_h) == (w, h) {
                 let scaler = factory.CreateBitmapScaler()?;
-                scaler.Initialize(&source, tw, th, WICBitmapInterpolationModeHighQualityCubic)
-                    .or_else(|_| scaler.Initialize(&source, tw, th, WICBitmapInterpolationModeFant))?;
+                scaler
+                    .Initialize(&source, tw, th, WICBitmapInterpolationModeHighQualityCubic)
+                    .or_else(|_| {
+                        scaler.Initialize(&source, tw, th, WICBitmapInterpolationModeFant)
+                    })?;
                 source = scaler.cast()?;
                 (cur_w, cur_h) = (tw, th);
             }

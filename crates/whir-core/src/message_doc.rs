@@ -12,7 +12,11 @@ pub struct MessageDoc {
 }
 
 impl MessageDoc {
-    pub fn new(path: Option<PathBuf>, heading: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub fn new(
+        path: Option<PathBuf>,
+        heading: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
         let title = path
             .as_deref()
             .and_then(Path::file_name)
@@ -52,7 +56,8 @@ impl Document for MessageDoc {
 /// Centered heading + detail, used by error states across pillars.
 pub fn show_message(ui: &mut egui::Ui, heading: &str, detail: &str, path: Option<&Path>) {
     let theme = Theme::current();
-    ui.painter().rect_filled(ui.max_rect(), 0.0, theme.content_bg);
+    ui.painter()
+        .rect_filled(ui.max_rect(), 0.0, theme.content_bg);
     ui.scope_builder(egui::UiBuilder::new().max_rect(ui.max_rect()), |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.38 - 40.0).max(12.0));

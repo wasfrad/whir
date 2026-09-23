@@ -62,7 +62,9 @@ pub fn flush() {
     if marks.is_empty() {
         return;
     }
-    let Some(dir) = std::env::var_os("LOCALAPPDATA") else { return };
+    let Some(dir) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
     let dir = std::path::Path::new(&dir).join("whir");
     let _ = std::fs::create_dir_all(&dir);
     let Ok(mut f) = std::fs::OpenOptions::new()

@@ -1,6 +1,8 @@
 //! The shell: tabs, shortcuts, first-frame logic, and rendering.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,10 +39,19 @@ pub struct App {
     window_title: String,
     fallback_fonts_loaded: bool,
     pending: Vec<WindowCommand>,
+    /// Set when the GPU device is lost: `main` relaunches whir with these tabs.
+    restart: Rc<RefCell<Option<Vec<PathBuf>>>>,
+    /// A close was queued because the last tab closed (not by the user's ✕).
+    closing_because_empty: bool,
 }
 
 impl App {
-    pub fn new(textures: Arc<GpuTextures>, waker: whir_core::Waker, dark: bool) -> Self {
+    pub fn new(
+        textures: Arc<GpuTextures>,
+        waker: whir_core::Waker,
+        dark: bool,
+        restart: Rc<RefCell<Option<Vec<PathBuf>>>>,
+    ) -> Self {
         let ctx = egui::Context::default();
         let theme = if dark { Theme::dark() } else { Theme::light() };
         ctx.set_fonts(whir_platform::fonts::definitions(theme::FONTS));
@@ -69,6 +80,8 @@ impl App {
             window_title: String::new(),
             fallback_fonts_loaded: false,
             pending: Vec::new(),
+            restart,
+            closing_because_empty: false,
         }
     }
 
@@ -114,6 +127,7 @@ impl App {
         }
         drop(tab);
         if self.tabs.is_empty() {
+            self.closing_because_empty = true;
             self.pending.push(WindowCommand::Close);
             return;
         }
@@ -218,7 +232,9 @@ impl App {
             .resizable(false)
             .show_separator_line(false)
             .frame(Frame::NONE.fill(theme.strip_bg))
-            .show(ui, |ui| tab_bar::show(ui, &infos, self.active, info.maximized, &theme));
+            .show(ui, |ui| {
+                tab_bar::show(ui, &infos, self.active, info.maximized, &theme)
+            });
         let bar = strip.inner;
         drop(infos);
 
@@ -301,7 +317,11 @@ fn empty_state(ui: &mut egui::Ui, theme: &Theme) -> bool {
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.4 - 40.0).max(16.0));
-        ui.label(egui::RichText::new("Drop a file here").size(18.0).color(theme.text));
+        ui.label(
+            egui::RichText::new("Drop a file here")
+                .size(18.0)
+                .color(theme.text),
+        );
         ui.add_space(6.0);
         ui.label(egui::RichText::new("Images, PDFs and CSV files").color(theme.text_dim));
         ui.add_space(14.0);
@@ -347,6 +367,10 @@ impl Handler for App {
         if delay < Duration::from_secs(60 * 60) {
             out.repaint_after = Some(delay);
         }
+        // Text needing CJK/emoji glyphs appeared this frame: load fallbacks now.
+        if !self.fallback_fonts_loaded && theme::fallback_fonts_requested() {
+            out.repaint_after = Some(Duration::ZERO);
+        }
 
         if let Some(renderer) = &mut self.renderer {
             if info.minimized {
@@ -361,20 +385,35 @@ impl Handler for App {
                     !info.in_size_move,
                 );
                 if result == PresentResult::DeviceLost {
-                    // TODO(M6): full device-lost recovery (re-create device, re-upload textures).
-                    out.repaint_after = Some(Duration::from_millis(250));
+                    // Driver update / TDR / remoting change: every GPU object is gone.
+                    // Relaunch with the same tabs (see main) rather than rebuild in place.
+                    // Refreshed every frame until we close, so late-arriving files are kept.
+                    let paths = self
+                        .tabs
+                        .iter()
+                        .filter_map(|t| t.doc.path().map(PathBuf::from))
+                        .collect();
+                    *self.restart.borrow_mut() = Some(paths);
+                    self.pending.push(WindowCommand::Close);
                 }
             }
         }
 
         // Reveal the window once the first document has content (or we stop waiting).
         if !self.shown {
-            let loading = self.tabs.get(self.active).is_some_and(|t| t.doc.is_loading());
+            let loading = self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.doc.is_loading());
             let waited = now.duration_since(first_frame_at);
             if !loading || waited >= FIRST_FRAME_CONTENT_WAIT {
                 self.shown = true;
                 out.commands.push(WindowCommand::Show);
-                trace::mark(if loading { "shown (content pending)" } else { "shown with content" });
+                trace::mark(if loading {
+                    "shown (content pending)"
+                } else {
+                    "shown with content"
+                });
                 trace::flush();
             } else {
                 let remaining = FIRST_FRAME_CONTENT_WAIT - waited;
@@ -396,6 +435,14 @@ impl Handler for App {
         self.open_paths(paths);
     }
 
+    fn close_requested(&mut self) -> bool {
+        // "Close because empty" is void if files arrived in the meantime.
+        let cancel =
+            self.closing_because_empty && !self.tabs.is_empty() && self.restart.borrow().is_none();
+        self.closing_because_empty = false;
+        !cancel
+    }
+
     fn activated(&mut self, active: bool) {
         if !active {
             // Let other apps save/replace files we have open.
@@ -404,7 +451,7 @@ impl Handler for App {
     }
 
     fn system_theme_changed(&mut self) {
-        let dark = whir_platform::os::system_uses_dark_theme();
+        let dark = whir_platform::os::prefers_dark();
         if dark != self.theme.dark {
             self.theme = if dark { Theme::dark() } else { Theme::light() };
             self.theme.apply(&self.ctx);

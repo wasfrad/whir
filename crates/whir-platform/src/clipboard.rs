@@ -1,5 +1,7 @@
 //! Plain-text clipboard (CF_UNICODETEXT).
 
+use std::sync::atomic::{AtomicIsize, Ordering};
+
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
@@ -7,10 +9,18 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
+static OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// The window that owns clipboard data we set (the main window).
+pub fn set_owner(hwnd: HWND) {
+    OWNER.store(hwnd.0 as isize, Ordering::Relaxed);
+}
+
 /// OpenClipboard fails while another process holds it; retry briefly.
 fn open() -> bool {
+    let owner = HWND(OWNER.load(Ordering::Relaxed) as *mut _);
     for _ in 0..10 {
-        if unsafe { OpenClipboard(Some(HWND::default())) }.is_ok() {
+        if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));

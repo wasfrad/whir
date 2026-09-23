@@ -100,7 +100,9 @@ fn worker() {
                 let best = q
                     .iter()
                     .enumerate()
-                    .min_by_key(|(_, j)| (j.handle.priority.load(Ordering::Relaxed), u64::MAX - j.seq))
+                    .min_by_key(|(_, j)| {
+                        (j.handle.priority.load(Ordering::Relaxed), u64::MAX - j.seq)
+                    })
                     .map(|(i, _)| i);
                 if let Some(i) = best {
                     break q.swap_remove(i);

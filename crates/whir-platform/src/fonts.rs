@@ -8,12 +8,12 @@ use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use egui::{FontData, FontDefinitions, FontFamily};
+use whir_core::theme::{FontRole, FontSpec};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
 };
 use windows::core::PCWSTR;
-use whir_core::theme::{FontRole, FontSpec};
 
 pub fn fonts_dir() -> PathBuf {
     let windir = std::env::var_os("WINDIR")
@@ -61,10 +61,14 @@ pub fn definitions(specs: &[FontSpec]) -> FontDefinitions {
     let mut defs = FontDefinitions::empty();
     let mut fallbacks = Vec::new();
     for spec in specs {
-        let Some(data) = load_font(spec) else { continue };
+        let Some(data) = load_font(spec) else {
+            continue;
+        };
         defs.font_data.insert(spec.name.to_owned(), data.into());
         match spec.role {
-            FontRole::Proportional => fam(&mut defs, FontFamily::Proportional).push(spec.name.to_owned()),
+            FontRole::Proportional => {
+                fam(&mut defs, FontFamily::Proportional).push(spec.name.to_owned())
+            }
             FontRole::Monospace => fam(&mut defs, FontFamily::Monospace).push(spec.name.to_owned()),
             FontRole::Fallback => fallbacks.push(spec.name.to_owned()),
         }
@@ -84,7 +88,9 @@ pub fn definitions(specs: &[FontSpec]) -> FontDefinitions {
 pub fn add_fallbacks(ctx: &egui::Context, specs: &[FontSpec]) {
     use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
     for spec in specs {
-        let Some(data) = load_font(spec) else { continue };
+        let Some(data) = load_font(spec) else {
+            continue;
+        };
         ctx.add_font(FontInsert::new(
             spec.name,
             data,

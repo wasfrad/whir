@@ -81,6 +81,11 @@ impl Device {
     pub fn max_texture_side(&self) -> u32 {
         max_texture_side(self.feature_level)
     }
+
+    /// Feature levels 9.x only allow mip chains on power-of-two textures.
+    pub fn npot_mipmaps(&self) -> bool {
+        self.feature_level.0 >= D3D_FEATURE_LEVEL_10_0.0
+    }
 }
 
 pub fn max_texture_side(level: D3D_FEATURE_LEVEL) -> u32 {

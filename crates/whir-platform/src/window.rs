@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use egui::{CursorIcon, PointerButton};
+use whir_core::Waker;
 use windows::Win32::Foundation::{
     FALSE, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM,
 };
@@ -22,8 +23,7 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-    ScreenToClient,
-    PAINTSTRUCT,
+    PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -31,16 +31,17 @@ use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
     TIMER_ALL_ACCESS,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::HiDpi::{
+    GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_CONTROL, VK_F4, VK_F10, VK_MENU, VK_SHIFT, VK_SPACE,
 };
-use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR};
-use whir_core::Waker;
 
 use crate::input::InputCollector;
 use crate::ipc::{COPYDATA_OPEN, WINDOW_CLASS, decode_paths};
@@ -161,9 +162,8 @@ impl WakeSlot {
             if h == 0 || slot.pending.swap(true, Ordering::AcqRel) {
                 return;
             }
-            let posted = unsafe {
-                PostMessageW(Some(HWND(h as *mut _)), WM_APP_WAKE, WPARAM(0), LPARAM(0))
-            };
+            let posted =
+                unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_WAKE, WPARAM(0), LPARAM(0)) };
             if posted.is_err() {
                 slot.pending.store(false, Ordering::Release);
             }
@@ -233,6 +233,7 @@ impl Window {
                 ..Default::default()
             };
             RegisterClassExW(&wc);
+            whir_core::trace::mark("window: class registered");
 
             let (x, y, w, h) = initial_placement();
             let raw = Rc::into_raw(state.clone());
@@ -250,6 +251,7 @@ impl Window {
                 Some(instance),
                 Some(raw as *const _),
             );
+            whir_core::trace::mark("window: CreateWindowExW returned");
             let hwnd = match hwnd {
                 Ok(h) => h,
                 Err(e) => {
@@ -258,6 +260,7 @@ impl Window {
                 }
             };
             state.wake.hwnd.store(hwnd.0 as isize, Ordering::Release);
+            crate::clipboard::set_owner(hwnd);
 
             set_bool_attribute(hwnd, DWMWA_CLOAK, true);
             set_bool_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, opts.dark);
@@ -273,7 +276,9 @@ impl Window {
                 0,
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            whir_core::trace::mark("window: frame changed");
             DragAcceptFiles(hwnd, true);
+            whir_core::trace::mark("window: drag-drop registered");
             // Shown while cloaked: DXGI can present to it and it can take the
             // foreground, but nothing is visible until WindowCommand::Show.
             let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -299,6 +304,43 @@ impl Window {
         self.state.input.borrow().pixels_per_point
     }
 
+    /// Reveal the window right away with a flat placeholder in the app's
+    /// colours. Used when the GPU driver is slow to initialize, so the window
+    /// still appears immediately; the first real frame replaces it.
+    pub fn show_placeholder(
+        &self,
+        strip: egui::Color32,
+        content: egui::Color32,
+        strip_height_px: i32,
+    ) {
+        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::Graphics::Gdi::{
+            CreateSolidBrush, DeleteObject, FillRect, GetDC, ReleaseDC,
+        };
+        let hwnd = self.hwnd();
+        let rgb =
+            |c: egui::Color32| COLORREF(c.r() as u32 | (c.g() as u32) << 8 | (c.b() as u32) << 16);
+        unsafe {
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let hdc = GetDC(Some(hwnd));
+            let top = RECT {
+                bottom: rc.top + strip_height_px,
+                ..rc
+            };
+            let rest = RECT {
+                top: rc.top + strip_height_px,
+                ..rc
+            };
+            for (r, c) in [(top, strip), (rest, content)] {
+                let brush = CreateSolidBrush(rgb(c));
+                FillRect(hdc, &r, brush);
+                let _ = DeleteObject(brush.into());
+            }
+            ReleaseDC(Some(hwnd), hdc);
+        }
+        set_bool_attribute(hwnd, DWMWA_CLOAK, false);
+    }
 
     /// Run the event loop until the window closes. Returns the exit code.
     pub fn run(self, handler: Box<dyn Handler>) -> i32 {
@@ -308,9 +350,14 @@ impl Window {
         state.request_repaint();
 
         let timer = unsafe {
-            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
-                .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
-                .ok()
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+            .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
+            .ok()
         };
 
         let mut msg = MSG::default();
@@ -392,8 +439,12 @@ fn initial_placement() -> (i32, i32, i32, i32) {
         let scale = dpi_x as f32 / 96.0;
         let wa = mi.rcWork;
         let (ww, wh) = (wa.right - wa.left, wa.bottom - wa.top);
-        let w = ((ww as f32 * 0.72) as i32).max((900.0 * scale) as i32).min(ww);
-        let h = ((wh as f32 * 0.82) as i32).max((620.0 * scale) as i32).min(wh);
+        let w = ((ww as f32 * 0.72) as i32)
+            .max((900.0 * scale) as i32)
+            .min(ww);
+        let h = ((wh as f32 * 0.82) as i32)
+            .max((620.0 * scale) as i32)
+            .min(wh);
         (wa.left + (ww - w) / 2, wa.top + (wh - h) / 2, w, h)
     }
 }
@@ -457,7 +508,9 @@ impl State {
             self.request_repaint();
             return;
         };
-        let Some(handler) = guard.as_mut() else { return };
+        let Some(handler) = guard.as_mut() else {
+            return;
+        };
         self.repaint_at.set(None);
         if self.delivered_size.get() != size {
             self.delivered_size.set(size);
@@ -513,15 +566,21 @@ impl State {
                     let _ = ShowWindow(hwnd, SW_MINIMIZE);
                 }
                 WindowCommand::ToggleMaximize => {
-                    let cmd = if self.is_maximized() { SW_RESTORE } else { SW_MAXIMIZE };
+                    let cmd = if self.is_maximized() {
+                        SW_RESTORE
+                    } else {
+                        SW_MAXIMIZE
+                    };
                     let _ = ShowWindow(hwnd, cmd);
                 }
                 WindowCommand::Close => {
                     let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 WindowCommand::OpenFileDialog { title, filters } => {
-                    let filters: Vec<(&str, &str)> =
-                        filters.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                    let filters: Vec<(&str, &str)> = filters
+                        .iter()
+                        .map(|(a, b)| (a.as_str(), b.as_str()))
+                        .collect();
                     let paths = crate::dialogs::open_files(hwnd, &title, &filters);
                     self.queue_files(paths);
                 }
@@ -593,7 +652,8 @@ impl State {
             let _ = ScreenToClient(self.hwnd(), &mut pt);
             let [w, h] = self.size_px.get();
             let inside = pt.x >= 0 && pt.y >= 0 && pt.x < w as i32 && pt.y < h as i32;
-            (inside && WindowFromPoint(POINT { x: sx, y: sy }) == self.hwnd()).then_some((pt.x, pt.y))
+            (inside && WindowFromPoint(POINT { x: sx, y: sy }) == self.hwnd())
+                .then_some((pt.x, pt.y))
         }
     }
 
@@ -1006,7 +1066,11 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_SETTINGCHANGE => {
                 let area = lparam.0 as *const u16;
-                if !area.is_null() && PCWSTR(area).to_string().is_ok_and(|a| a == "ImmersiveColorSet") {
+                if !area.is_null()
+                    && PCWSTR(area)
+                        .to_string()
+                        .is_ok_and(|a| a == "ImmersiveColorSet")
+                {
                     s.with_handler(|h| h.system_theme_changed());
                     s.request_repaint();
                 }
@@ -1021,8 +1085,10 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 // Copy out and return quickly so the sender isn't held up.
                 if !cds.lpData.is_null() && cds.cbData >= 2 {
-                    let units =
-                        std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
+                    let units = std::slice::from_raw_parts(
+                        cds.lpData as *const u16,
+                        cds.cbData as usize / 2,
+                    );
                     s.queue_files(decode_paths(units));
                 }
                 // The sender granted us foreground rights (AllowSetForegroundWindow).
@@ -1059,6 +1125,13 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 
             // --- lifetime ---
             WM_CLOSE => {
+                // Files handed over by another whir.exe after the close was queued
+                // (e.g. the last tab was closed as a new file was double-clicked):
+                // open them instead of closing, or they'd be lost.
+                if !s.pending_files.borrow().is_empty() {
+                    s.deliver_pending_files();
+                    return LRESULT(0);
+                }
                 if s.with_handler(|h| h.close_requested()).unwrap_or(true) {
                     let _ = DestroyWindow(hwnd);
                 }

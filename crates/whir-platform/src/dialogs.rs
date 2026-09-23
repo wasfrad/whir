@@ -25,9 +25,11 @@ unsafe fn open_files_impl(
     filters: Filters<'_>,
 ) -> windows::core::Result<Vec<PathBuf>> {
     unsafe {
-        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
         let options = dialog.GetOptions()?;
-        dialog.SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)?;
+        dialog
+            .SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)?;
         dialog.SetTitle(&HSTRING::from(title))?;
 
         // Keep the wide strings alive for the duration of SetFileTypes.

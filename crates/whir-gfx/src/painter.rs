@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, Vertex};
 use egui::{TextureFilter, TextureId, TextureOptions, TextureWrapMode};
+use whir_core::texture::Filter;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -14,7 +15,6 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32_FLOAT, DXGI_SAMPLE_DESC,
 };
 use windows::core::{PCSTR, s};
-use whir_core::texture::Filter;
 
 use crate::textures::GpuTextures;
 
@@ -250,7 +250,14 @@ impl Painter {
                     back: 1,
                 };
                 unsafe {
-                    context.UpdateSubresource(&t.texture, 0, Some(&bx), bytes.as_ptr().cast(), pitch, 0);
+                    context.UpdateSubresource(
+                        &t.texture,
+                        0,
+                        Some(&bx),
+                        bytes.as_ptr().cast(),
+                        pitch,
+                        0,
+                    );
                 }
                 t.sampler = sampler;
             }
@@ -470,7 +477,10 @@ impl Painter {
         };
         if self.vb.is_none() || vtx > self.vb_capacity {
             let cap = vtx.next_power_of_two().max(4096);
-            self.vb = Some(make(cap * std::mem::size_of::<Vertex>(), D3D11_BIND_VERTEX_BUFFER)?);
+            self.vb = Some(make(
+                cap * std::mem::size_of::<Vertex>(),
+                D3D11_BIND_VERTEX_BUFFER,
+            )?);
             self.vb_capacity = cap;
         }
         if self.ib.is_none() || idx > self.ib_capacity {
