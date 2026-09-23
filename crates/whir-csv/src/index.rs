@@ -35,7 +35,7 @@ pub type SharedIndex = Arc<RwLock<IndexState>>;
 pub fn spawn(
     source: Arc<dyn ByteSource>,
     start: u64,
-    mut dialect: Dialect,
+    dialect: Dialect,
     shared: SharedIndex,
     waker: Waker,
     cancel: Arc<AtomicBool>,
@@ -43,24 +43,50 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("csv-index".into())
         .spawn(move || {
-            loop {
-                match run(&*source, start, dialect, &shared, &waker, &cancel) {
-                    Err(ScanError::Unbalanced) if dialect.quoting => {
-                        // Start over, treating quotes as plain text.
-                        dialect.quoting = false;
-                        if let Ok(mut s) = shared.write() {
-                            *s = IndexState {
-                                quoting_disabled: true,
-                                ..IndexState::default()
-                            };
-                        }
-                    }
-                    _ => break,
-                }
-            }
+            index_all(&*source, start, dialect, &shared, &waker, &cancel);
             waker.wake();
         })
         .expect("spawn csv indexer");
+}
+
+/// Index a small source (a new blank table) on the calling thread.
+pub fn build_sync(src: &dyn ByteSource, start: u64, dialect: Dialect) -> IndexState {
+    let shared: SharedIndex = Default::default();
+    index_all(
+        src,
+        start,
+        dialect,
+        &shared,
+        &Waker::noop(),
+        &AtomicBool::new(false),
+    );
+    let state = shared.read().map(|s| s.clone()).unwrap_or_default();
+    state
+}
+
+fn index_all(
+    src: &dyn ByteSource,
+    start: u64,
+    mut dialect: Dialect,
+    shared: &SharedIndex,
+    waker: &Waker,
+    cancel: &AtomicBool,
+) {
+    loop {
+        match run(src, start, dialect, shared, waker, cancel) {
+            Err(ScanError::Unbalanced) if dialect.quoting => {
+                // Start over, treating quotes as plain text.
+                dialect.quoting = false;
+                if let Ok(mut s) = shared.write() {
+                    *s = IndexState {
+                        quoting_disabled: true,
+                        ..IndexState::default()
+                    };
+                }
+            }
+            _ => break,
+        }
+    }
 }
 
 fn run(
@@ -139,23 +165,11 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Mem(Vec<u8>);
-    impl ByteSource for Mem {
-        fn len(&self) -> u64 {
-            self.0.len() as u64
-        }
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-            let o = (offset as usize).min(self.0.len());
-            let n = buf.len().min(self.0.len() - o);
-            buf[..n].copy_from_slice(&self.0[o..o + n]);
-            Ok(n)
-        }
-    }
+    use crate::source::MemSource;
 
     fn index(data: Vec<u8>) -> IndexState {
         let shared: SharedIndex = Default::default();
-        let src: Arc<dyn ByteSource> = Arc::new(Mem(data));
+        let src: Arc<dyn ByteSource> = Arc::new(MemSource::new(data));
         spawn(
             src,
             0,
@@ -188,6 +202,19 @@ mod tests {
         let off = s.checkpoints[1] as usize;
         assert!(data[off..].starts_with(b"63,"));
         assert!(!s.quoting_disabled);
+    }
+
+    #[test]
+    fn sync_build_matches_background() {
+        let mut data = b"\xEF\xBB\xBFh\r\n".to_vec();
+        for i in 0..200 {
+            data.extend(format!("{i}\r\n").as_bytes());
+        }
+        let a = build_sync(&MemSource::new(data.clone()), 3, Dialect::default());
+        assert!(a.done);
+        assert_eq!(a.rows, 201);
+        assert_eq!(a.checkpoints[0], 3);
+        assert_eq!(a.checkpoints.len(), 4);
     }
 
     #[test]

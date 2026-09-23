@@ -33,6 +33,44 @@ impl ByteSource for FileSource {
     }
 }
 
+/// Bytes held in memory: a new blank table (a header line) and tests.
+pub struct MemSource {
+    data: Vec<u8>,
+    /// Largest single read: tests use tiny reads to stress the refill paths.
+    max_read: usize,
+}
+
+impl MemSource {
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            data: data.into(),
+            max_read: usize::MAX,
+        }
+    }
+
+    /// Every `read_at` returns at most `max_read` bytes.
+    #[cfg(test)]
+    pub fn with_max_read(data: impl Into<Vec<u8>>, max_read: usize) -> Self {
+        Self {
+            data: data.into(),
+            max_read: max_read.max(1),
+        }
+    }
+}
+
+impl ByteSource for MemSource {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let o = (offset as usize).min(self.data.len());
+        let n = buf.len().min(self.data.len() - o).min(self.max_read);
+        buf[..n].copy_from_slice(&self.data[o..o + n]);
+        Ok(n)
+    }
+}
+
 /// A temp file deleted automatically when closed (or when whir exits).
 pub struct TempSource {
     file: File,

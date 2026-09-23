@@ -248,23 +248,10 @@ mod tests {
         );
     }
 
-    struct Mem(Vec<u8>);
-    impl ByteSource for Mem {
-        fn len(&self) -> u64 {
-            self.0.len() as u64
-        }
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-            let o = (offset as usize).min(self.0.len());
-            let n = buf.len().min(self.0.len() - o);
-            buf[..n].copy_from_slice(&self.0[o..o + n]);
-            Ok(n)
-        }
-    }
-
     #[test]
     fn sorts_numeric_and_text_columns() {
         let data = b"name,qty\nb,10\na,9\nc,\nd,100\n".to_vec();
-        let src = Mem(data);
+        let src = crate::source::MemSource::new(data);
         let spec = SortSpec {
             column: 1,
             direction: Direction::Ascending,

@@ -127,24 +127,12 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::MemSource;
     use std::sync::mpsc::channel;
-
-    struct Mem(Vec<u8>);
-    impl ByteSource for Mem {
-        fn len(&self) -> u64 {
-            self.0.len() as u64
-        }
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-            let o = (offset as usize).min(self.0.len());
-            let n = buf.len().min(self.0.len() - o);
-            buf[..n].copy_from_slice(&self.0[o..o + n]);
-            Ok(n)
-        }
-    }
 
     fn find(data: &[u8], q: &str) -> Vec<(u32, u32)> {
         let (tx, rx) = channel();
-        let src = Mem(data.to_vec());
+        let src = MemSource::new(data.to_vec());
         run(
             &src,
             Dialect::default(),

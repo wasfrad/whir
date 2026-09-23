@@ -86,6 +86,72 @@ pub fn sniff(sample: &[u8], extension: Option<&str>) -> Sniffed {
     }
 }
 
+/// How rows are written, so rewritten rows match the rest of the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    /// `\r\n`, `\n` or `\r`.
+    pub line_ending: &'static [u8],
+    /// The file ends with a line ending.
+    pub final_newline: bool,
+    /// (Nearly) every field is quoted: new values are quoted too.
+    pub quote_all: bool,
+}
+
+impl Default for Style {
+    /// Excel's CSV style: CRLF, final newline, quotes only where needed.
+    fn default() -> Self {
+        Self {
+            line_ending: b"\r\n",
+            final_newline: true,
+            quote_all: false,
+        }
+    }
+}
+
+/// Detect the writing style from `sample` (the first bytes after the BOM;
+/// `whole` if it is the entire file) and the file's last byte.
+pub fn sniff_style(sample: &[u8], whole: bool, last_byte: Option<u8>, d: &Dialect) -> Style {
+    let line_ending: &'static [u8] = if d.terminator == b'\r' {
+        b"\r"
+    } else {
+        let lf = memchr::memchr_iter(b'\n', sample).count();
+        let crlf = memchr::memmem::find_iter(sample, b"\r\n").count();
+        // No line ending at all (a single row): Windows default.
+        if crlf >= lf - crlf { b"\r\n" } else { b"\n" }
+    };
+    let final_newline = match last_byte {
+        None => true,
+        Some(b) => b == d.terminator,
+    };
+    // Quote style from the complete rows of the sample.
+    let mut quote_all = false;
+    if d.quoting {
+        let mut fields = crate::parse::FieldBuf::default();
+        let (mut quoted, mut non_empty) = (0usize, 0usize);
+        let mut rest = sample;
+        while let Some(n) = crate::parse::parse_row(rest, d, whole, &mut fields) {
+            for i in 0..fields.len() {
+                if fields.quoted(i) {
+                    quoted += 1;
+                    non_empty += 1;
+                } else if !fields.get(i).unwrap_or_default().is_empty() {
+                    non_empty += 1;
+                }
+            }
+            rest = &rest[n..];
+            if non_empty > 20_000 {
+                break;
+            }
+        }
+        quote_all = non_empty > 0 && quoted * 10 >= non_empty * 9;
+    }
+    Style {
+        line_ending,
+        final_newline,
+        quote_all,
+    }
+}
+
 fn detect_encoding(s: &[u8]) -> (Encoding, u64) {
     if s.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return (Encoding::Utf8, 3);
@@ -239,5 +305,29 @@ mod tests {
     fn terminators() {
         assert_eq!(sniff(b"a,b\r\n1,2\r\n", None).dialect.terminator, b'\n');
         assert_eq!(sniff(b"a,b\r1,2\r", None).dialect.terminator, b'\r');
+    }
+
+    fn style(s: &[u8]) -> Style {
+        let d = sniff(s, None).dialect;
+        sniff_style(s, true, s.last().copied(), &d)
+    }
+
+    #[test]
+    fn styles() {
+        let s = style(b"a,b\r\n1,2\r\n");
+        assert_eq!(s.line_ending, b"\r\n");
+        assert!(s.final_newline);
+        assert!(!s.quote_all);
+        let s = style(b"a,b\n1,2");
+        assert_eq!(s.line_ending, b"\n");
+        assert!(!s.final_newline);
+        assert_eq!(style(b"a,b\r1,2\r").line_ending, b"\r");
+        assert_eq!(style(b"a,b").line_ending, b"\r\n");
+        assert!(style(b"").final_newline);
+        // Mixed: the majority wins.
+        assert_eq!(style(b"a\r\nb\r\nc\nd\r\n").line_ending, b"\r\n");
+        assert_eq!(style(b"a\nb\nc\r\nd\n").line_ending, b"\n");
+        assert!(style(b"\"a\",\"b\"\n\"1\",\"\"\n").quote_all);
+        assert!(!style(b"\"a\",b\n1,\"x\"\n").quote_all);
     }
 }
