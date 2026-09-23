@@ -196,6 +196,7 @@ pub fn for_each(
 
     let Some(order) = snap.rows.as_deref() else {
         // The file's own order: read straight through.
+        let has_cells = !cells.is_empty();
         let mut r = 0u64;
         while reader.next_row(&mut fields)?.is_some() {
             if r % CANCEL_EVERY == 0 && cancel.load(Ordering::Relaxed) {
@@ -209,7 +210,7 @@ pub fn for_each(
                 key,
                 fields: Some(&fields),
                 raw: Some(reader.last_raw()),
-                cells: cursor.get(key),
+                cells: if has_cells { cursor.get(key) } else { None },
                 cols,
             };
             if f(&row, reader.position()).is_break() {

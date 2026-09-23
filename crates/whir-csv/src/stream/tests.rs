@@ -230,3 +230,63 @@ fn cancel_stops_the_pass() {
     let done = for_each(&input, &cancel, |_, _| ControlFlow::Continue(())).unwrap();
     assert!(!done);
 }
+
+#[test]
+#[ignore]
+fn bench_stream_overhead() {
+    let mut data = b"id,name,city,amount,note\n".to_vec();
+    for i in 0..1_500_000u64 {
+        data.extend(
+            format!(
+                "{i},Name {},\"City, {}\",{}.{:02},\"some note text {i}\"\n",
+                i * 7919 % 100_003,
+                i % 977,
+                i * 31 % 100_000,
+                i % 100
+            )
+            .as_bytes(),
+        );
+    }
+    let input = input_for(&data, Default::default());
+    let finder = memchr::memmem::Finder::new(b"city, 5");
+    for _ in 0..3 {
+        // (a) the bare reader
+        let t = std::time::Instant::now();
+        let mut reader = RowReader::new(&*input.source, input.dialect, 0);
+        let mut f = FieldBuf::default();
+        let mut n = 0usize;
+        while reader.next_row(&mut f).unwrap().is_some() {
+            for field in f.iter() {
+                let lowered;
+                let hay = if field.iter().any(u8::is_ascii_uppercase) {
+                    lowered = field.to_ascii_lowercase();
+                    &lowered[..]
+                } else {
+                    field
+                };
+                n += finder.find(hay).is_some() as usize;
+            }
+        }
+        let a = t.elapsed();
+        // (b) through the stream
+        let t = std::time::Instant::now();
+        let mut m = 0usize;
+        for_each(&input, &AtomicBool::new(false), |row, _| {
+            if let Some(f) = row.plain_fields() {
+                for field in f.iter() {
+                    let lowered;
+                    let hay = if field.iter().any(u8::is_ascii_uppercase) {
+                        lowered = field.to_ascii_lowercase();
+                        &lowered[..]
+                    } else {
+                        field
+                    };
+                    m += finder.find(hay).is_some() as usize;
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        println!("reader {:?} ({n})  stream {:?} ({m})", a, t.elapsed());
+    }
+}

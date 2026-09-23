@@ -11,9 +11,11 @@ use crate::source::ByteSource;
 pub struct FieldBuf {
     pub data: Vec<u8>,
     ends: Vec<usize>,
-    /// Per field: it started with a quote. A save keeps the original quoting
-    /// style of fields it rewrites.
-    quoted: Vec<bool>,
+    /// Fields that started with a quote (a save keeps the original quoting
+    /// style of fields it rewrites): bits for the first 64, then indices.
+    /// A bitmask keeps the parser's hot loop free of per-field pushes.
+    quoted_mask: u64,
+    quoted_more: Vec<u32>,
     /// The row ended inside a quoted field (an unclosed quote at the end of the
     /// file): its raw bytes can't be followed by more rows.
     pub open_quote: bool,
@@ -23,13 +25,22 @@ impl FieldBuf {
     pub fn clear(&mut self) {
         self.data.clear();
         self.ends.clear();
-        self.quoted.clear();
+        self.quoted_mask = 0;
+        self.quoted_more.clear();
         self.open_quote = false;
     }
 
+    #[inline]
     fn end_field(&mut self, quoted: bool) {
+        if quoted {
+            let i = self.ends.len();
+            if i < 64 {
+                self.quoted_mask |= 1 << i;
+            } else {
+                self.quoted_more.push(i as u32);
+            }
+        }
         self.ends.push(self.data.len());
-        self.quoted.push(quoted);
     }
 
     pub fn len(&self) -> usize {
@@ -44,7 +55,11 @@ impl FieldBuf {
 
     /// Field `i` was written in quotes.
     pub fn quoted(&self, i: usize) -> bool {
-        self.quoted.get(i).copied().unwrap_or(false)
+        if i < 64 {
+            self.quoted_mask >> i & 1 == 1
+        } else {
+            self.quoted_more.binary_search(&(i as u32)).is_ok()
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
@@ -377,5 +392,33 @@ mod tests {
             quoted,
             [vec![false, true], vec![true, false], vec![true], vec![true]]
         );
+    }
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_bits_past_64_fields() {
+        let mut line = String::new();
+        for i in 0..100 {
+            if i > 0 {
+                line.push(',');
+            }
+            if i % 3 == 0 {
+                line.push_str(&format!("\"{i}\""));
+            } else {
+                line.push_str(&i.to_string());
+            }
+        }
+        line.push('\n');
+        let mut f = FieldBuf::default();
+        parse_row(line.as_bytes(), &Dialect::default(), true, &mut f).unwrap();
+        assert_eq!(f.len(), 100);
+        for i in 0..100 {
+            assert_eq!(f.quoted(i), i % 3 == 0, "field {i}");
+        }
+        assert!(!f.quoted(100));
     }
 }
