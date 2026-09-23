@@ -69,10 +69,18 @@ and are saved with Ctrl+S.
 
 | PDFs | |
 |---|---|
-| Wheel / drag | Scroll |
+| Wheel · drag on the background or a scanned page · middle-drag | Scroll |
+| Drag on text · double-/triple-click · Shift+click | Select text · word · line · extend |
+| Shift+← → (Ctrl: by word) · Shift+Home End | Extend the selection |
+| Ctrl+A · Ctrl+C · right-click | Select all · copy · Copy / Select all menu |
+| Ctrl+F · Enter / F3 · Shift+Enter / Shift+F3 · Esc | Find · next · previous · close (the match stays selected) |
 | Ctrl+wheel, pinch, Ctrl+= / Ctrl+− | Zoom at the cursor |
 | Ctrl+0 or 0 | Fit width |
 | PgUp PgDn · Space / Shift+Space · Home End · arrows | Page / scroll |
+
+Search ignores case and line breaks (a hyphenated word split across lines still matches),
+and results stream in while PDFium reads the pages; short documents are read in the
+background as soon as they open, so Ctrl+F is instant.
 
 | CSVs | |
 |---|---|
