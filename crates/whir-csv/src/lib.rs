@@ -23,6 +23,7 @@ mod show;
 mod sort;
 mod source;
 mod stream;
+mod structure;
 mod table;
 #[cfg(test)]
 mod testutil;

@@ -169,6 +169,22 @@ impl Harness {
         self.l().grid.cell_rect(r, c).center()
     }
 
+    /// Apply a grid action (as a menu would) in a frame of this context.
+    pub fn act(&mut self, action: crate::grid::Action) {
+        self.time += 0.05;
+        let raw = RawInput {
+            time: Some(self.time),
+            ..Default::default()
+        };
+        let ctx = self.ctx.clone();
+        let waker = Waker::noop();
+        let out = ctx.run_ui(raw, |ui| {
+            self.doc.loaded().unwrap().apply(action.clone(), ui, &waker)
+        });
+        out.drop_without_applying_deltas();
+        self.frame(vec![]);
+    }
+
     pub fn focused(&self) -> Option<egui::Id> {
         self.ctx.memory(|m| m.focused())
     }
@@ -459,4 +475,209 @@ fn find_results_follow_edits() {
     h.type_text("no");
     h.key(Key::Enter, NONE);
     assert!(h.l().find.display.is_empty());
+}
+
+fn column(h: &mut Harness, c: usize) -> Vec<String> {
+    let rows = h.l().rows();
+    (0..rows).map(|r| h.cell(r, c)).collect()
+}
+
+fn header(h: &mut Harness) -> Vec<String> {
+    let cols = h.l().grid.cols();
+    let mut v = h.l().view();
+    let head = v.header();
+    (0..cols).map(|c| head.cell(c).text.to_owned()).collect()
+}
+
+fn sort_by(h: &mut Harness, col: usize, dir: crate::sort::Direction) {
+    let waker = Waker::noop();
+    h.l().sort(col, Some(dir), &waker, 0.0);
+    wait_for(|| {
+        h.doc.poll();
+        h.l().sorting.is_none()
+    });
+    h.frame(vec![]);
+}
+
+const SHIFT_CTRL: Modifiers = Modifiers {
+    ctrl: true,
+    shift: true,
+    ..Modifiers::NONE
+};
+
+#[test]
+fn insert_and_delete_rows() {
+    let mut h = Harness::open("ui-rows", DATA);
+    range(&mut h, 1, 0, 2, 0);
+    h.key(Key::Equals, SHIFT_CTRL); // two rows above row 1
+    assert_eq!(column(&mut h, 0), ["Ann", "", "", "Bob", "Cy"]);
+    assert_eq!(h.l().grid.sel.unwrap().rows(), (1, 2));
+    h.key(Key::Minus, Modifiers::CTRL); // and away again
+    assert_eq!(column(&mut h, 0), ["Ann", "Bob", "Cy"]);
+    assert!(!h.doc.is_dirty(), "insert then delete of the same rows");
+    h.select(0, 1);
+    h.key(Key::Minus, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Bob", "Cy"]);
+    assert!(h.doc.is_dirty());
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Ann", "Bob", "Cy"]);
+    // Rows below; the gutter numbers follow the file order.
+    h.select(0, 0);
+    h.act(crate::grid::Action::InsertRows { above: false });
+    assert_eq!(column(&mut h, 0), ["Ann", "", "Bob", "Cy"]);
+}
+
+#[test]
+fn rows_in_a_sorted_view() {
+    use crate::sort::Direction;
+    let mut h = Harness::open("ui-sorted-rows", DATA);
+    sort_by(&mut h, 0, Direction::Descending); // Cy, Bob, Ann
+    assert_eq!(column(&mut h, 0), ["Cy", "Bob", "Ann"]);
+    // Insert above display row 1 (Bob): shown there, placed before Bob in the file.
+    h.select(1, 0);
+    h.act(crate::grid::Action::InsertRows { above: true });
+    assert_eq!(column(&mut h, 0), ["Cy", "", "Bob", "Ann"]);
+    h.select(1, 0);
+    h.type_text("Dee");
+    h.key(Key::Enter, NONE);
+    assert_eq!(
+        column(&mut h, 0),
+        ["Cy", "Dee", "Bob", "Ann"],
+        "edits don't re-sort"
+    );
+    assert!(h.l().order.as_ref().unwrap().stale);
+    // Delete Bob, then undo: back at the same place.
+    h.select(2, 0);
+    h.key(Key::Minus, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Cy", "Dee", "Ann"]);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(column(&mut h, 0), ["Cy", "Dee", "Bob", "Ann"]);
+    // Save: the file gets the new row before Bob; the view keeps its order.
+    h.doc.save();
+    wait_for(|| {
+        h.doc.poll();
+        !h.doc.is_saving()
+    });
+    assert_eq!(h.doc.save_error(), None);
+    h.frame(vec![]);
+    let path = h.doc.path().unwrap().to_path_buf();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"name,city,n\r\nAnn,Oslo,1\r\nDee,,\r\nBob,Rome,2\r\nCy,Lima,3\r\n"
+    );
+    assert!(!h.doc.is_dirty());
+    assert_eq!(column(&mut h, 0), ["Cy", "Dee", "Bob", "Ann"]);
+    // Original order is the new file's order.
+    h.act(crate::grid::Action::OriginalOrder);
+    assert_eq!(column(&mut h, 0), ["Ann", "Dee", "Bob", "Cy"]);
+}
+
+#[test]
+fn columns_insert_delete_rename() {
+    use crate::sort::Direction;
+    let mut h = Harness::open("ui-cols", DATA);
+    h.select(0, 1);
+    h.act(crate::grid::Action::InsertCols { left: true });
+    assert_eq!(header(&mut h), ["name", "Column 2", "city", "n"]);
+    assert_eq!(h.cell(0, 2), "Oslo");
+    // Rename it from the header menu.
+    h.act(crate::grid::Action::Rename(1));
+    assert!(h.editing());
+    h.type_text("zip"); // the old name is selected: typing replaces it
+    h.key(Key::Enter, NONE);
+    assert_eq!(header(&mut h), ["name", "zip", "city", "n"]);
+    // Sort by city, then delete that column: the order stays, as a custom one.
+    sort_by(&mut h, 2, Direction::Ascending);
+    assert_eq!(column(&mut h, 0), ["Cy", "Ann", "Bob"]);
+    h.select(0, 2);
+    h.act(crate::grid::Action::DeleteCols);
+    assert_eq!(header(&mut h), ["name", "zip", "n"]);
+    assert_eq!(column(&mut h, 0), ["Cy", "Ann", "Bob"]);
+    assert!(h.l().order.as_ref().unwrap().spec.is_none());
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(header(&mut h), ["name", "zip", "city", "n"]);
+    // Deleting every column is refused.
+    range(&mut h, 0, 0, 0, 3);
+    h.act(crate::grid::Action::DeleteCols);
+    assert_eq!(h.l().grid.cols(), 4);
+}
+
+#[test]
+fn append_column_and_type_into_the_plus_column() {
+    let mut h = Harness::open("ui-append", DATA);
+    h.act(crate::grid::Action::AppendColumn);
+    assert!(h.editing(), "renaming the new column right away");
+    assert_eq!(h.editor_text(), "Column 4");
+    h.type_text("Notes");
+    h.key(Key::Enter, NONE);
+    assert_eq!(header(&mut h), ["name", "city", "n", "Notes"]);
+    // Typing into the "+" column adds another.
+    let cols = h.l().grid.cols();
+    h.select(0, cols);
+    h.type_text("x");
+    h.key(Key::Enter, NONE);
+    assert_eq!(header(&mut h), ["name", "city", "n", "Notes", "Column 5"]);
+    assert_eq!(h.cell(0, 4), "x");
+    // Three steps (add, rename, add by typing): undo them all, back to the file.
+    for _ in 0..3 {
+        h.key(Key::Z, Modifiers::CTRL);
+    }
+    assert!(!h.doc.is_dirty());
+    assert_eq!(header(&mut h), ["name", "city", "n"]);
+}
+
+#[test]
+fn nothing_changes_while_saving() {
+    let mut h = Harness::open("ui-gates", DATA);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    h.l().saving = Some(crate::loaded::SaveState {
+        rx,
+        cancel: Default::default(),
+        progress: Default::default(),
+        total: 1,
+        kind: SaveKind::Own,
+    });
+    h.select(0, 0);
+    h.type_text("x");
+    assert!(!h.editing());
+    h.key(Key::Minus, Modifiers::CTRL);
+    assert_eq!(h.l().rows(), 3);
+    assert!(h.l().status.as_ref().unwrap().0.starts_with("Saving"));
+    // Navigation still works.
+    h.key(Key::ArrowDown, NONE);
+    assert_eq!(h.cursor(), (1, 0));
+    h.l().saving = None;
+}
+
+#[test]
+fn right_click_selects_like_excel() {
+    let mut h = Harness::open("ui-context", DATA);
+    range(&mut h, 0, 0, 2, 1);
+    // Inside the selection: kept.
+    let p = h.cell_center(1, 1);
+    h.frame(vec![Event::PointerMoved(p)]);
+    let press = |pressed| Event::PointerButton {
+        pos: p,
+        button: PointerButton::Secondary,
+        pressed,
+        modifiers: NONE,
+    };
+    h.frame(vec![press(true)]);
+    h.frame(vec![press(false)]);
+    assert_eq!(h.l().grid.sel.unwrap().rows(), (0, 2));
+    assert!(egui::Popup::is_any_open(&h.ctx), "the menu opened");
+    h.key(Key::Escape, NONE);
+    // Outside it: the clicked cell is selected.
+    let p = h.cell_center(2, 2);
+    h.frame(vec![Event::PointerMoved(p)]);
+    let press = |pressed| Event::PointerButton {
+        pos: p,
+        button: PointerButton::Secondary,
+        pressed,
+        modifiers: NONE,
+    };
+    h.frame(vec![press(true)]);
+    h.frame(vec![press(false)]);
+    assert_eq!(h.cursor(), (2, 2));
+    assert_eq!(h.l().grid.sel.unwrap().cell_count(), 1);
 }

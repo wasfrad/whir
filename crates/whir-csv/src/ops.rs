@@ -189,7 +189,13 @@ impl Loaded {
             Action::Clear => self.clear("Clear"),
             Action::FillDown => self.fill(true),
             Action::FillRight => self.fill(false),
-            _ => {}
+            Action::InsertAuto => self.insert_auto(),
+            Action::DeleteAuto => self.delete_auto(),
+            Action::InsertRows { above } => self.insert_rows(above),
+            Action::DeleteRows => self.delete_rows(),
+            Action::InsertCols { left } => self.insert_cols(left),
+            Action::DeleteCols => self.delete_cols(),
+            Action::AppendColumn => self.append_column(ui.ctx()),
         }
     }
 
