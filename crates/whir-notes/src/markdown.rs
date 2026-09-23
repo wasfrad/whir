@@ -493,9 +493,12 @@ fn inline(
             let n = s[i..].bytes().take_while(|&b| b == b'`').count();
             if let Some(close) = find_backtick_run(s, i + n, n) {
                 flush(out, run_start, i);
+                // Its own (smaller) line height keeps the glyphs and their
+                // background on the text's baseline instead of floating.
                 let code = TextFormat {
                     font_id: FontId::new(st.code_size, FontFamily::Monospace),
                     background: st.code_bg,
+                    line_height: None,
                     ..base.clone()
                 };
                 out.push(off + i..off + i + n, dim(&code, st.syntax));

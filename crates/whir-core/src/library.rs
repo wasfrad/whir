@@ -655,7 +655,14 @@ fn clip(s: &str, max_chars: usize) -> String {
 pub fn entry_text(stem: &str, kind: EntryKind, head: &str, tsv: bool) -> (String, String) {
     match kind {
         EntryKind::Note => {
-            let mut lines = head.lines().map(str::trim).filter(|l| !l.is_empty());
+            // Code fences and rules say nothing about a note.
+            let noise = |l: &&str| {
+                l.is_empty()
+                    || l.starts_with("```")
+                    || l.starts_with("~~~")
+                    || l.chars().all(|c| matches!(c, '-' | '*' | '_' | ' '))
+            };
+            let mut lines = head.lines().map(str::trim).filter(|l| !noise(l));
             let first = lines.next();
             let h1 = head.lines().next().and_then(parse_h1);
             let (title, rest): (String, Vec<&str>) = match (h1, first) {
@@ -788,6 +795,13 @@ mod tests {
         assert_eq!((t.as_str(), p.as_str()), ("Ideas", "first line"));
         let (t, _) = entry_text("Untitled 2026-09-03 0705", EntryKind::Note, "", false);
         assert_eq!(t, "New note");
+        let (t, p) = entry_text(
+            "Untitled 2026-09-03 0705",
+            EntryKind::Note,
+            "Code sample\n```rust\nfn main() {}\n```\n",
+            false,
+        );
+        assert_eq!((t.as_str(), p.as_str()), ("Code sample", "fn main() {}"));
         let (t, p) = entry_text(
             "Untitled table 2026-09-03 0705",
             EntryKind::Table,

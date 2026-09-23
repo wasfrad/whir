@@ -1,6 +1,6 @@
 [package]
 name = "whir"
-description = "Fast, lean viewer for images, PDFs and CSVs on Windows."
+description = "Fast, lean viewer and notepad for images, PDFs, CSVs and notes on Windows."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

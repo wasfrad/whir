@@ -18,7 +18,7 @@ struct Group {
     extensions: &'static [&'static str],
 }
 
-fn groups() -> [Group; 3] {
+fn groups() -> [Group; 5] {
     [
         Group {
             prog_id: "whir.image",
@@ -34,6 +34,16 @@ fn groups() -> [Group; 3] {
             prog_id: "whir.csv",
             description: "CSV file (whir)",
             extensions: whir_csv::EXTENSIONS,
+        },
+        Group {
+            prog_id: "whir.markdown",
+            description: "Markdown note (whir)",
+            extensions: &["md", "markdown"],
+        },
+        Group {
+            prog_id: "whir.text",
+            description: "Text document (whir)",
+            extensions: &["txt"],
         },
     ]
 }
@@ -86,7 +96,7 @@ pub fn register() -> Result<usize, String> {
     set_string(
         CAPABILITIES,
         Some("ApplicationDescription"),
-        "Fast viewer for images, PDFs and CSV files.",
+        "Fast viewer and notepad for images, PDFs, CSV files and notes.",
     )?;
     let app = r"Software\Classes\Applications\whir.exe";
     set_string(app, Some("FriendlyAppName"), "whir")?;
