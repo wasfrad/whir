@@ -108,13 +108,14 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
             }
         }
         // Unquoted part (or the remainder after a closing quote).
+        let unquoted_from = out.data.len();
         match memchr::memchr2(delim, term, &s[i..]) {
             None => {
                 if !eof {
                     return None;
                 }
                 out.data.extend_from_slice(&s[i..]);
-                strip_cr(out, term);
+                strip_cr(out, term, unquoted_from);
                 out.end_field(quoted);
                 return Some(s.len());
             }
@@ -125,7 +126,7 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
                     out.end_field(quoted);
                     i += 1;
                 } else {
-                    strip_cr(out, term);
+                    strip_cr(out, term, unquoted_from);
                     out.end_field(quoted);
                     return Some(i + 1);
                 }
@@ -134,13 +135,12 @@ pub fn parse_row(s: &[u8], d: &Dialect, eof: bool, out: &mut FieldBuf) -> Option
     }
 }
 
-/// CRLF files: the `\r` before `\n` belongs to the terminator, not the last field.
-fn strip_cr(out: &mut FieldBuf, term: u8) {
-    if term == b'\n' && out.data.last() == Some(&b'\r') {
-        let start = out.ends.last().copied().unwrap_or(0);
-        if out.data.len() > start {
-            out.data.pop();
-        }
+/// CRLF files: the `\r` before `\n` belongs to the terminator, not the last
+/// field — unless it was inside quotes (bytes before `from` came from a quoted
+/// section and are data).
+fn strip_cr(out: &mut FieldBuf, term: u8, from: usize) {
+    if term == b'\n' && out.data.len() > from && out.data.last() == Some(&b'\r') {
+        out.data.pop();
     }
 }
 
@@ -327,6 +327,11 @@ mod tests {
         assert_eq!(rows[0].1, ["a", "b", "c"]);
         assert_eq!(rows[1].1, ["1", "x,y", "he said \"hi\""]);
         assert_eq!(rows[2].1, ["2", "multi\nline", ""]);
+        // A \r inside quotes is data; only the terminator's \r goes.
+        let rows = all_rows(b"a,\"x\r\"\r\n\"y\r\"\nz\r");
+        assert_eq!(rows[0].1, ["a", "x\r"]);
+        assert_eq!(rows[1].1, ["y\r"]);
+        assert_eq!(rows[2].1, ["z"]);
     }
 
     #[test]

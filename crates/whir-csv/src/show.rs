@@ -44,6 +44,11 @@ pub fn show_loaded(
     if progress.done && l.edits.rows().is_none() {
         l.edits.set_base_rows(progress.rows.saturating_sub(1));
     }
+    if progress.done
+        && let Some(spec) = l.pending_sort.take()
+    {
+        l.sort(spec.column, Some(spec.direction), waker, now);
+    }
     let base_rows = l.base_rows();
 
     // Column widths from a sample, once the first rows are in (again at 1000 rows).
@@ -145,7 +150,7 @@ pub fn show_loaded(
             l.step_match(false);
         }
     }
-    if l.sorting.is_some() || l.find.running || !progress.done || l.saving.is_some() {
+    if l.sorting.is_some() || l.find.running || !progress.done || l.is_saving() {
         ui.ctx().request_repaint_after(Duration::from_millis(150));
     }
 
@@ -236,9 +241,30 @@ pub fn show_loaded(
         right_x = btn.left() - 8.0;
         let pct = s.progress.load(Ordering::Relaxed) as f64 / s.total.max(1) as f64 * 100.0;
         right = format!("Saving {:.0}%   ·   {right}", pct.min(100.0));
-    } else if let Some(f) = failure {
+    } else if l.pending_save.is_some() {
+        // Waiting for the index: "Saving… (reading the file)  [Cancel]"
+        let btn = Rect::from_min_size(
+            pos2(right_x - 54.0, footer.top() + 3.0),
+            vec2(54.0, footer.height() - 6.0),
+        );
+        let resp = ui.interact(btn, ui.id().with("csv-save-cancel"), Sense::CLICK);
+        if resp.hovered() {
+            p.rect_filled(btn, 4.0, theme.tab_hover_bg);
+        }
+        p.text(
+            btn.center(),
+            egui::Align2::CENTER_CENTER,
+            "Cancel",
+            small.clone(),
+            theme.text,
+        );
+        if resp.clicked() {
+            l.pending_save = None;
+        }
+        right_x = btn.left() - 8.0;
+        right = format!("Saving… (reading the whole file first)   ·   {right}");
+    } else if failure.is_some() {
         right = format!("Not saved   ·   {right}");
-        let _ = f;
     }
     let right_galley = p.layout_no_wrap(right, small.clone(), theme.text_dim);
     let rx = (right_x - right_galley.size().x).max(left_end + 16.0);
@@ -252,7 +278,7 @@ pub fn show_loaded(
     let mut request = None;
     if let Some(f) = failure {
         request = failure_banner(ui, grid_rect, theme, f, cx);
-    } else if l.saving.is_none() && l.table.source.changed() {
+    } else if !l.is_saving() && l.table.source.changed() {
         request = changed_banner(ui, grid_rect, theme, l.is_dirty(), cx);
     }
     request

@@ -21,7 +21,7 @@ use whir_core::{
 
 use crate::dialect::{Encoding, Style, sniff, sniff_style};
 use crate::index::{self, IndexState, SharedIndex};
-use crate::loaded::{Loaded, Opened, SaveFailure, SaveKind, SaveState, ViewCarry};
+use crate::loaded::{Loaded, Opened, PendingSave, SaveFailure, SaveKind, SaveState, ViewCarry};
 use crate::source::{ByteSource, transcode_utf16};
 use crate::write::{self, SaveJob, SaveOutcome, SaveTarget};
 
@@ -105,13 +105,31 @@ impl CsvDoc {
         }
     }
 
-    /// Start writing `target` in the background.
+    /// Start writing `target` in the background. Until the whole file has
+    /// been indexed the save waits (queued): only then is the parse final (the
+    /// indexer may still switch quoting off for an unbalanced quote).
     fn start_save(&mut self, target: SaveTarget, kind: SaveKind, overwrite: bool) -> SaveResult {
         let waker = self.waker.clone();
         let own = matches!(kind, SaveKind::Own);
         let Phase::Ready(l) = &mut self.phase else {
             return SaveResult::Failed("The table is still loading.".into());
         };
+        if l.is_saving() {
+            return SaveResult::Started; // one save at a time
+        }
+        if l.read_only_reason().is_some() {
+            return SaveResult::Failed(
+                "This file has too many rows (over 2,147,483,647) for whir to save.".into(),
+            );
+        }
+        if !l.table.progress().done {
+            l.pending_save = Some(PendingSave {
+                target,
+                kind,
+                overwrite,
+            });
+            return SaveResult::Started;
+        }
         let format = match &target {
             SaveTarget::Path(p) if !own => l.output_format(Some(p)),
             _ => l.output_format(None),
@@ -144,6 +162,17 @@ impl CsvDoc {
             target_name,
         });
         SaveResult::Started
+    }
+
+    /// A save that couldn't even start is reported like one that failed.
+    fn note_failure(&mut self, r: &SaveResult) {
+        if let SaveResult::Failed(message) = r {
+            self.failure = Some(SaveFailure {
+                message: message.clone(),
+                changed_on_disk: false,
+            });
+            self.failure_hidden = false;
+        }
     }
 
     /// Save to the document's own file, or a new table's first save into the
@@ -392,6 +421,19 @@ impl Document for CsvDoc {
         if let Some((kind, name, outcome)) = done {
             self.finish_save(kind, name, outcome);
         }
+        // A save that waited for the index (dropped if a re-parse discarded
+        // the edits it was for).
+        let ready = match &mut self.phase {
+            Phase::Ready(l) if l.pending_save.is_some() && l.table.progress().done => {
+                let p = l.pending_save.take();
+                p.filter(|p| p.kind != SaveKind::Own || l.is_dirty())
+            }
+            _ => None,
+        };
+        if let Some(p) = ready {
+            let r = self.start_save(p.target, p.kind, p.overwrite);
+            self.note_failure(&r);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
@@ -427,7 +469,8 @@ impl Document for CsvDoc {
             Some(crate::show::Request::Reload) => self.reload(None),
             Some(crate::show::Request::Overwrite) => {
                 self.failure = None;
-                self.save_own(true);
+                let r = self.save_own(true);
+                self.note_failure(&r);
             }
             Some(crate::show::Request::DismissFailure) => self.failure_hidden = true,
             None => {}
@@ -454,7 +497,7 @@ impl Document for CsvDoc {
     }
 
     fn is_saving(&self) -> bool {
-        matches!(&self.phase, Phase::Ready(l) if l.saving.is_some())
+        matches!(&self.phase, Phase::Ready(l) if l.is_saving())
     }
 
     fn save_error(&self) -> Option<&str> {
@@ -473,13 +516,15 @@ impl Document for CsvDoc {
             };
         };
         l.commit_pending();
-        if l.saving.is_some() {
+        if l.is_saving() {
             return SaveResult::Started;
         }
         if !l.is_dirty() {
             return SaveResult::Saved;
         }
-        self.save_own(false)
+        let r = self.save_own(false);
+        self.note_failure(&r);
+        r
     }
 
     fn save_as_spec(&self) -> Option<SaveAsSpec> {
@@ -510,7 +555,7 @@ impl Document for CsvDoc {
             return SaveResult::Failed("The table isn't loaded.".into());
         };
         l.commit_pending();
-        if l.saving.is_some() {
+        if l.is_saving() {
             return SaveResult::Failed("A save is already running.".into());
         }
         let own = self.path.as_deref().is_some_and(|p| paths_equal(p, &path));
@@ -526,7 +571,9 @@ impl Document for CsvDoc {
         } else {
             SaveKind::Rebind
         };
-        self.start_save(SaveTarget::Path(path), kind, false)
+        let r = self.start_save(SaveTarget::Path(path), kind, false);
+        self.note_failure(&r);
+        r
     }
 
     fn flush_blocking(&mut self, _deadline: Instant) -> Result<(), String> {
@@ -534,10 +581,11 @@ impl Document for CsvDoc {
     }
 
     fn discard(&mut self) {
-        if let Phase::Ready(l) = &self.phase
-            && let Some(s) = &l.saving
-        {
-            s.cancel.store(true, Ordering::Relaxed);
+        if let Phase::Ready(l) = &mut self.phase {
+            l.pending_save = None;
+            if let Some(s) = &l.saving {
+                s.cancel.store(true, Ordering::Relaxed);
+            }
         }
     }
 }

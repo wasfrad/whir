@@ -434,10 +434,15 @@ fn run(mut fmt: OutputFormat, job: &SaveJob) -> SaveOutcome {
     };
 
     let source = FileSource::open(&path).ok();
-    let reusable = matches!(
-        fmt.out,
-        OutEncoding::Utf8 { .. } | OutEncoding::Cp1252 | OutEncoding::Cp1252ToUtf8Bom
-    ) && source.as_ref().is_some_and(|s| s.len() == written.bytes);
+    // Our checkpoints are the new file's index only if a fresh index would
+    // parse it the same way: not for UTF-16 (re-read via a copy), and not
+    // when quoting was off (a fresh pass may honour quotes again).
+    let reusable = fmt.quoting
+        && matches!(
+            fmt.out,
+            OutEncoding::Utf8 { .. } | OutEncoding::Cp1252 | OutEncoding::Cp1252ToUtf8Bom
+        )
+        && source.as_ref().is_some_and(|s| s.len() == written.bytes);
     let terminator = if fmt.line_ending == b"\r" {
         b'\r'
     } else {
@@ -449,7 +454,7 @@ fn run(mut fmt: OutputFormat, job: &SaveJob) -> SaveOutcome {
         scanned: written.bytes,
         total: written.bytes,
         done: true,
-        quoting_disabled: !fmt.quoting,
+        quoting_disabled: false,
         error: None,
     });
     SaveOutcome::Saved(Box::new(Saved {

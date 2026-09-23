@@ -131,6 +131,9 @@ impl<'a> LogicalRow<'a> {
 /// Rows between cancel checks.
 const CANCEL_EVERY: u64 = 4096;
 
+/// The stream's error for files with more rows than keys can name.
+pub const TOO_MANY_ROWS: &str = "the file has more than 2,147,483,647 rows";
+
 /// Walks the overrides of original rows alongside a file pass (keys ascend).
 struct Cursor<'c>(std::iter::Peekable<std::collections::btree_map::Range<'c, RowKey, RowCells>>);
 
@@ -203,7 +206,9 @@ pub fn for_each(
                 return Ok(false);
             }
             if r >= MAX_EDIT_ROWS {
-                break; // beyond what keys can name (such files are read-only)
+                // Beyond what row keys can name: stopping quietly would let a
+                // save write a truncated copy, so this is an error.
+                return Err(io::Error::other(TOO_MANY_ROWS));
             }
             let key = RowKey::orig(r);
             let row = LogicalRow {

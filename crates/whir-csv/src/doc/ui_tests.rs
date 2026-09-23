@@ -851,3 +851,53 @@ fn copy_reads_edits_and_round_trips_through_paste() {
     assert_eq!(h.cell(1, 1), "a\nb\t\"c\"");
     assert_eq!(h.cell(2, 1), "Rome");
 }
+
+#[test]
+fn header_menu_acts_on_the_clicked_column_without_rows() {
+    let mut h = Harness::blank("ui-blank-header");
+    // Right-click "Column 3" (the cursor starts on column 1).
+    let p = h.l().grid.header_rect(2).center();
+    h.frame(vec![Event::PointerMoved(p)]);
+    let press = |pressed| Event::PointerButton {
+        pos: p,
+        button: PointerButton::Secondary,
+        pressed,
+        modifiers: NONE,
+    };
+    h.frame(vec![press(true)]);
+    h.frame(vec![press(false)]);
+    h.key(Key::Escape, NONE);
+    h.act(crate::grid::Action::DeleteCols);
+    assert_eq!(header(&mut h), ["Column 1", "Column 2"]);
+}
+
+#[test]
+fn a_save_waits_for_the_index() {
+    let mut h = Harness::open("ui-pending", DATA);
+    h.select(0, 0);
+    h.type_text("x");
+    h.key(Key::Enter, NONE);
+    // Pretend indexing isn't finished yet.
+    h.l().table.index.write().unwrap().done = false;
+    assert!(matches!(h.doc.save(), SaveResult::Started));
+    assert!(h.doc.is_saving());
+    assert!(h.l().saving.is_none(), "queued, not writing");
+    h.select(1, 0);
+    h.type_text("y");
+    assert!(!h.editing(), "no edits while a save is pending");
+    h.doc.poll();
+    let path = h.doc.path().unwrap().to_path_buf();
+    assert_eq!(std::fs::read(&path).unwrap(), DATA);
+    // Indexing finishes: the save runs.
+    h.l().table.index.write().unwrap().done = true;
+    wait_for(|| {
+        h.doc.poll();
+        !h.doc.is_saving()
+    });
+    assert_eq!(h.doc.save_error(), None);
+    assert!(
+        std::fs::read(&path)
+            .unwrap()
+            .starts_with(b"name,city,n\r\nx,Oslo")
+    );
+}

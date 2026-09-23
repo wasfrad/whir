@@ -99,7 +99,7 @@ impl Loaded {
         }
         let p = self.table.progress();
         let indexed = p.done && p.error.is_none();
-        let saving = self.saving.is_some();
+        let saving = self.is_saving();
         let sorting = self.sorting.is_some();
         let gate = |ok: bool, why: &'static str| if ok { Gate::Yes } else { Gate::No(why) };
         Editable {

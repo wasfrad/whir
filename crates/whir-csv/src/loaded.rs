@@ -115,6 +115,14 @@ pub struct SaveState {
     pub target_name: String,
 }
 
+/// A save asked for before the file was fully indexed: it starts once the
+/// index is final.
+pub struct PendingSave {
+    pub target: crate::write::SaveTarget,
+    pub kind: SaveKind,
+    pub overwrite: bool,
+}
+
 /// A save that failed and how the banner offers to recover.
 #[derive(Clone, Debug)]
 pub struct SaveFailure {
@@ -132,6 +140,8 @@ pub struct ViewCarry {
     pub find_open: bool,
     /// Rows expected once indexed (keeps the scroll position meanwhile).
     pub expected_rows: u64,
+    /// A sort that was still computing: it runs again on the new file.
+    pub resort: Option<SortSpec>,
 }
 
 pub struct Loaded {
@@ -160,6 +170,10 @@ pub struct Loaded {
     pub sorting: Option<Sorting>,
     pub find: FindState,
     pub saving: Option<SaveState>,
+    pub pending_save: Option<PendingSave>,
+    /// A sort to start once indexing is done (it was running when a save
+    /// made the file reload).
+    pub pending_sort: Option<SortSpec>,
     /// Transient footer message and when it expires.
     pub status: Option<(String, f64)>,
     /// Rows a reload after saving will have (until indexing catches up).
@@ -208,6 +222,8 @@ impl Loaded {
             sorting: None,
             find: FindState::default(),
             saving: None,
+            pending_save: None,
+            pending_sort: None,
             status: None,
             expected_rows: None,
             index_cancel: o.index_cancel,
@@ -227,6 +243,7 @@ impl Loaded {
         if carry.find_open {
             self.find.bar.open = true;
         }
+        self.pending_sort = carry.resort;
         if !carry.find_query.is_empty() {
             self.find.bar.query = carry.find_query.clone();
             self.start_find(carry.find_query, waker);
@@ -267,6 +284,11 @@ impl Loaded {
             index: self.table.index.clone(),
             edits: self.edits.snapshot(),
         }
+    }
+
+    /// A save is running or waiting for the index.
+    pub fn is_saving(&self) -> bool {
+        self.saving.is_some() || self.pending_save.is_some()
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, now: f64) {
@@ -642,6 +664,7 @@ impl Loaded {
                 find_query: self.find.searched.clone(),
                 find_open: self.find.bar.open,
                 expected_rows,
+                resort,
             });
         };
         self.file_identity = Some(source.identity());

@@ -568,7 +568,11 @@ impl Grid {
                     start_w,
                     start_x,
                 } => {
-                    self.widths[col] = (start_w + p.x - start_x).max(MIN_COL_W);
+                    // (The column may be gone: an undo mid-drag.)
+                    match self.widths.get_mut(col) {
+                        Some(w) => *w = (start_w + p.x - start_x).max(MIN_COL_W),
+                        None => self.drag = Drag::None,
+                    }
                 }
                 Drag::Cells | Drag::Rows => {
                     // Auto-scroll while dragging past the edges.
@@ -1018,15 +1022,19 @@ impl Grid {
                 }
                 Some(MenuHit::Rows)
             }
-            Hit::Header { col, border: None } => {
+            Hit::Header { col, .. } => {
                 let inside = self.sel.is_some_and(|s| {
                     let (a, b) = s.cols();
                     col >= a && col <= b && s.rows() == (0, rows.saturating_sub(1))
                 });
-                if !inside && rows > 0 {
+                if !inside {
+                    // No data rows: the column's "+" row cell stands for it.
                     self.sel = Some(Selection {
                         anchor: CellPos { row: 0, col },
-                        cursor: CellPos { row: rows - 1, col },
+                        cursor: CellPos {
+                            row: rows.saturating_sub(1),
+                            col,
+                        },
                     });
                 }
                 Some(MenuHit::Header(col))

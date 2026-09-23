@@ -317,6 +317,7 @@ fn random_edits_round_trip() {
         " sp ",
         "\"",
         "\r\n",
+        "cr\r",
     ];
     let bases: &[&[u8]] = &[
         b"id,name,note\r\n1,a,\"q,1\"\r\n2,b,\"multi\r\nline\"\r\n3\r\n4,d,e,f\r\n",
@@ -619,5 +620,26 @@ fn bench_save() {
         drop(saved);
         let _ = std::fs::remove_file(&out);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn quoting_off_saves_are_indexed_again() {
+    let dir = test_dir("quoting-off");
+    let path = dir.join("t.csv");
+    std::fs::write(&path, b"a,b\n\"x,1\n2,3\n").unwrap();
+    let (mut input, fmt, id) = file_input(&path, Default::default());
+    input.dialect.quoting = false;
+    let fmt = OutputFormat {
+        quoting: false,
+        ..fmt
+    };
+    let j = job(input, fmt, SaveTarget::Path(path.clone()), Some(id));
+    let SaveOutcome::Saved(saved) = run(fmt, &j) else {
+        panic!("save failed")
+    };
+    // A fresh index may honour quotes again: ours isn't reused.
+    assert!(saved.index.is_none());
+    drop(saved);
     let _ = std::fs::remove_dir_all(&dir);
 }

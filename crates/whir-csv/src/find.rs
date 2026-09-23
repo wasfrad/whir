@@ -113,7 +113,7 @@ fn run(
     let mut found = 0usize;
     let mut truncated = false;
     let mut last_send = Instant::now();
-    let _ = stream::for_each(input, cancel, |row, _| {
+    let result = stream::for_each(input, cancel, |row, _| {
         if row.key.is_header() {
             return ControlFlow::Continue(()); // the header isn't searched
         }
@@ -153,7 +153,9 @@ fn run(
         let _ = tx.send(FindMsg::Matches(batch));
         waker.wake();
     }
-    truncated
+    // Stopped early (a read error, or more rows than keys can name): the
+    // results are incomplete.
+    truncated || result.is_err()
 }
 
 #[cfg(test)]
