@@ -42,7 +42,6 @@ pub const CTRL_SHIFT: Modifiers = Modifiers {
     ..Modifiers::NONE
 };
 pub const NONE: Modifiers = Modifiers::NONE;
-pub const ALT: Modifiers = Modifiers::ALT;
 
 #[cfg(test)]
 mod tests {
@@ -68,9 +67,9 @@ mod tests {
 
     #[test]
     fn exact_modifiers_only() {
-        let mut i = input_with(vec![key(Key::Enter, ALT)]);
+        let mut i = input_with(vec![key(Key::Enter, Modifiers::ALT)]);
         assert!(!consume_exact(&mut i, NONE, Key::Enter));
-        assert!(consume_exact(&mut i, ALT, Key::Enter));
+        assert!(consume_exact(&mut i, Modifiers::ALT, Key::Enter));
         let mut i = input_with(vec![key(Key::Z, CTRL_SHIFT)]);
         assert!(!consume_exact(&mut i, CTRL, Key::Z));
         assert!(consume_exact(&mut i, CTRL_SHIFT, Key::Z));

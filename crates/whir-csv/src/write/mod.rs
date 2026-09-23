@@ -144,9 +144,7 @@ impl<W: Write> RowWriter<W> {
             return self.sink.text(s);
         }
         let d = self.fmt.delimiter as char;
-        let quote = was_quoted
-            || self.fmt.quote_all
-            || s.contains(|c: char| c == d || c == '"' || c == '\r' || c == '\n');
+        let quote = was_quoted || self.fmt.quote_all || s.contains([d, '"', '\r', '\n']);
         if !quote {
             return self.sink.text(s);
         }
@@ -445,7 +443,7 @@ fn run(mut fmt: OutputFormat, job: &SaveJob) -> SaveOutcome {
     } else {
         b'\n'
     };
-    let index = reusable.then(|| IndexState {
+    let index = reusable.then_some(IndexState {
         checkpoints: written.checkpoints,
         rows: written.rows,
         scanned: written.bytes,

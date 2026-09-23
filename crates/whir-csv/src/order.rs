@@ -109,6 +109,7 @@ impl Order {
     }
 
     /// Remove display positions `d0..=d1`. O(n − d0).
+    #[cfg(test)]
     pub fn remove(&mut self, d0: u64, d1: u64) -> Vec<RowKey> {
         let (d0, d1) = (
             d0 as usize,
@@ -155,6 +156,7 @@ impl Order {
         self.rebuild_inverse();
     }
 
+    #[cfg(test)]
     pub fn keys(&self) -> &[RowKey] {
         &self.keys
     }

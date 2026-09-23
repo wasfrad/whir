@@ -33,6 +33,7 @@ impl CellStore {
     }
 
     /// Number of overridden cells.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.count
     }

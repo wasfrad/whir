@@ -101,7 +101,7 @@ impl Selection {
     }
 }
 
-/// Whether an kind of change is allowed now, and why not.
+/// Whether a kind of change is allowed now, and why not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
     Yes,
@@ -111,13 +111,6 @@ pub enum Gate {
 impl Gate {
     pub fn allowed(self) -> bool {
         self == Gate::Yes
-    }
-
-    pub fn reason(self) -> &'static str {
-        match self {
-            Gate::Yes => "",
-            Gate::No(r) => r,
-        }
     }
 }
 
@@ -130,16 +123,6 @@ pub struct Editable {
     /// Show the "+" row / column (the file can grow at all).
     pub ghost_row: bool,
     pub ghost_col: bool,
-}
-
-impl Editable {
-    pub const READ_ONLY: Editable = Editable {
-        cells: Gate::No("This file is read-only."),
-        rows: Gate::No("This file is read-only."),
-        cols: Gate::No("This file is read-only."),
-        ghost_row: false,
-        ghost_col: false,
-    };
 }
 
 /// Something the user asked for, applied by the document.
@@ -483,6 +466,17 @@ impl Grid {
         }
         if matches!(self.drag, Drag::Resize { .. }) {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+        }
+        // What the "+" row and column are for.
+        match hover_hit {
+            Some(Hit::GhostHeader) => {
+                resp.clone().on_hover_text_at_pointer("Add a column");
+            }
+            Some(Hit::Gutter { row }) if row == rows && self.ghost_row => {
+                resp.clone()
+                    .on_hover_text_at_pointer("Type in this row to add a row");
+            }
+            _ => {}
         }
 
         let pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Primary));

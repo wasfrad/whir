@@ -70,11 +70,6 @@ impl<'a> LogicalRow<'a> {
         self.fields.map_or(0, |f| f.len())
     }
 
-    /// Overrides of this row, if any.
-    pub fn cells(&self) -> Option<&'a RowCells> {
-        self.cells
-    }
-
     fn col_key(&self, c: usize) -> ColKey {
         match self.cols {
             Some(m) => m.key(c),
@@ -112,10 +107,6 @@ impl<'a> LogicalRow<'a> {
         n.max(self.edited_len())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// The value at position `c` (empty past the end).
     pub fn field(&self, c: usize) -> Field<'a> {
         let k = self.col_key(c);
@@ -126,12 +117,6 @@ impl<'a> LogicalRow<'a> {
             Some(b) => Field::File(b),
             None => Field::Text(""),
         }
-    }
-
-    /// Position `c` holds an edited value.
-    pub fn is_edited(&self, c: usize) -> bool {
-        let k = self.col_key(c);
-        self.cells.is_some_and(|cells| lookup(cells, k).is_some())
     }
 
     /// The file field at position `c` was written in quotes.

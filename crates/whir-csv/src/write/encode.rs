@@ -100,10 +100,6 @@ impl<W: Write> Sink<W> {
         self.out
     }
 
-    pub fn get_mut(&mut self) -> &mut W {
-        &mut self.out
-    }
-
     fn put(&mut self, b: &[u8]) -> io::Result<()> {
         self.out.write_all(b)?;
         self.pos += b.len() as u64;

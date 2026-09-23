@@ -56,9 +56,6 @@ impl RowKey {
     pub fn is_added(self) -> bool {
         self.0 & NEW_BIT != 0
     }
-
-    /// The first key after all original rows and the header.
-    pub const FIRST_ADDED: RowKey = RowKey(NEW_BIT);
 }
 
 /// A column: original file column `c` is `c`, user-added columns are

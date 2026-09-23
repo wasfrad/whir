@@ -561,3 +561,63 @@ fn library_save_claims_a_free_name() {
     drop(saved);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `cargo test -p whir-csv --release bench_save -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_save() {
+    let dir = test_dir("bench-save");
+    let path = dir.join("big.csv");
+    let mut data = b"id,name,city,amount,note\r\n".to_vec();
+    for i in 0..1_500_000u64 {
+        data.extend(
+            format!(
+                "{i},Name {},\"City, {}\",{}.{:02},\"some note text {i}\"\r\n",
+                i * 7919 % 100_003,
+                i % 977,
+                i * 31 % 100_000,
+                i % 100
+            )
+            .as_bytes(),
+        );
+    }
+    std::fs::write(&path, &data).unwrap();
+    for (label, rows_too, cols_too) in [
+        ("cells", false, false),
+        ("cells+rows", true, false),
+        ("cells+cols (rewrite)", false, true),
+    ] {
+        let mut e = Edits::default();
+        e.set_base_rows(1_500_000);
+        let mut tx = e.tx("edit");
+        tx.set_cells((0..2000u64).map(|i| {
+            (
+                RowKey::orig(i * 700),
+                ColKey::orig(1),
+                Some(Arc::from("edited")),
+            )
+        }));
+        if rows_too {
+            tx.delete_rows(&[10, 500_000, 1_000_000], None);
+            tx.insert_rows(700_000, 5, None);
+        }
+        if cols_too {
+            tx.insert_cols(2, 1, 5);
+        }
+        let _ = tx.commit(None, None);
+        let (input, fmt, _) = file_input(&path, e.snapshot());
+        let out = dir.join("out.csv");
+        let j = job(input, fmt, SaveTarget::Path(out.clone()), None);
+        let t = std::time::Instant::now();
+        let SaveOutcome::Saved(saved) = run(fmt, &j) else {
+            panic!("save failed")
+        };
+        let dt = t.elapsed();
+        let fresh = index::build_sync(saved.source.as_deref().unwrap(), 0, Dialect::default());
+        assert_eq!(saved.index.as_ref().unwrap().checkpoints, fresh.checkpoints);
+        println!("save {label}: {:?} ({} MB)", dt, data.len() >> 20);
+        drop(saved);
+        let _ = std::fs::remove_file(&out);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -81,8 +81,11 @@ pub struct Editor {
     pub original: String,
     pub mode: Mode,
     pub id: egui::Id,
-    /// Screen rect last frame (a press outside it commits).
+    /// Screen rect last frame, clipped to the view (a press outside it
+    /// commits — also when the cell has scrolled out of view).
     pub rect: Rect,
+    /// Drawn at least once (a press in the frame that started it doesn't count).
+    pub shown: bool,
     /// Selection when editing started (restored by undo).
     pub sel_before: Option<Selection>,
 }
@@ -187,6 +190,7 @@ impl Editor {
         let h = (wrapped.size().y.max(row_h) + 2.0 * vpad).max(cell.height());
         let rect = Rect::from_min_size(cell.min, vec2(w, h));
         self.rect = rect.intersect(clip);
+        self.shown = true;
 
         if !ui.memory(|m| m.has_focus(self.id)) {
             ui.memory_mut(|m| m.request_focus(self.id));

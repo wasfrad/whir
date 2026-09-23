@@ -292,6 +292,7 @@ impl Loaded {
             mode,
             id: self.editor_id,
             rect: egui::Rect::NOTHING,
+            shown: false,
             sel_before: Some(sel),
         };
         ed.prime(ctx, false);
@@ -314,6 +315,7 @@ impl Loaded {
             mode: Mode::Edit,
             id: self.editor_id,
             rect: egui::Rect::NOTHING,
+            shown: false,
             sel_before: self.grid.sel,
         };
         ed.prime(ctx, true);
@@ -482,7 +484,7 @@ impl Loaded {
             return;
         };
         // A press anywhere else commits (the grid already moved the selection).
-        let outside = ed.rect.is_positive()
+        let outside = ed.shown
             && ui.input(|i| {
                 i.pointer.any_pressed()
                     && i.pointer

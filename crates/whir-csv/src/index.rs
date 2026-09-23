@@ -60,8 +60,7 @@ pub fn build_sync(src: &dyn ByteSource, start: u64, dialect: Dialect) -> IndexSt
         &Waker::noop(),
         &AtomicBool::new(false),
     );
-    let state = shared.read().map(|s| s.clone()).unwrap_or_default();
-    state
+    shared.read().map(|s| s.clone()).unwrap_or_default()
 }
 
 fn index_all(

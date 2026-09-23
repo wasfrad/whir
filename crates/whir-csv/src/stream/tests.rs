@@ -95,12 +95,12 @@ fn random_edits_match_the_overlay() {
                         let r = if rng.below(8) == 0 || n == 0 {
                             RowKey::HEADER
                         } else {
-                            tx_key(&tx_e(&tx), rng.below(n), base.len() as u64 - 1)
+                            tx_key(tx_e(&tx), rng.below(n), base.len() as u64 - 1)
                         };
                         let c = rng.below(width as u64 + 1) as usize;
                         ch.push((
                             r,
-                            col_key(&tx_e(&tx), c),
+                            col_key(tx_e(&tx), c),
                             Some(Arc::from(format!("v{step}"))),
                         ));
                     }

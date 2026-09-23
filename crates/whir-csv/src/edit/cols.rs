@@ -36,10 +36,6 @@ impl ColMap {
         self.cols.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.cols.is_empty()
-    }
-
     /// The column at position `c`.
     pub fn key(&self, c: usize) -> ColKey {
         match self.cols.get(c) {

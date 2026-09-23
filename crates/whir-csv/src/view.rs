@@ -34,24 +34,9 @@ impl<'a> SheetView<'a> {
         }
     }
 
-    pub fn display_of(&self, k: RowKey) -> Option<u64> {
-        match self.order {
-            Some(o) => o.display_of(k),
-            None => self.edits.index_of(k, self.base_rows),
-        }
-    }
-
     /// Position in the file that a save would write (the row number shown).
     pub fn logical_of(&self, k: RowKey) -> Option<u64> {
         self.edits.index_of(k, self.base_rows)
-    }
-
-    pub fn col_key(&self, c: usize) -> ColKey {
-        self.edits.col_key(c)
-    }
-
-    pub fn col_of(&self, k: ColKey) -> Option<usize> {
-        self.edits.col_of(k)
     }
 
     pub fn row(&mut self, display: u64) -> Option<RowRead<'a>> {
@@ -137,10 +122,6 @@ impl RowRead<'_> {
             }
         }
         n
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub fn cell(&self, c: usize) -> Cell<'_> {

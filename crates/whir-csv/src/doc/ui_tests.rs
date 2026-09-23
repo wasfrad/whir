@@ -757,3 +757,42 @@ fn an_empty_file_grows_a_header() {
     let path = h.doc.path().unwrap().to_path_buf();
     assert_eq!(std::fs::read(&path).unwrap(), b"Name\r\nAnn\r\n");
 }
+
+#[test]
+fn clicking_elsewhere_commits_even_when_scrolled_away() {
+    let mut data = b"a,b\r\n".to_vec();
+    for i in 0..500 {
+        data.extend(format!("{i},x\r\n").as_bytes());
+    }
+    let mut h = Harness::open("ui-scrolled", &data);
+    h.select(0, 0);
+    h.type_text("edited");
+    // Scroll far away, then click a cell there.
+    h.l().grid.sy.scroll_to(300.0 * crate::grid::ROW_H as f64);
+    h.frame(vec![]);
+    let p = h.cell_center(305, 1);
+    h.click(p);
+    assert!(!h.editing());
+    assert_eq!(h.cell(0, 0), "edited");
+    assert_eq!(h.cursor(), (305, 1));
+}
+
+#[test]
+fn a_reparse_drops_edits_with_a_message() {
+    let mut h = Harness::open("ui-reparse", DATA);
+    h.select(0, 0);
+    h.type_text("x");
+    h.key(Key::Enter, NONE);
+    assert!(h.doc.is_dirty());
+    // The indexer found an unbalanced quote and started over without quoting.
+    {
+        let l = h.l();
+        let mut s = l.table.index.write().unwrap();
+        s.quoting_disabled = true;
+    }
+    h.frame(vec![]);
+    assert!(!h.doc.is_dirty());
+    assert!(!h.l().edits.can_undo());
+    let msg = h.l().status.as_ref().unwrap().0.clone();
+    assert!(msg.contains("unsaved edits were dropped"), "{msg}");
+}

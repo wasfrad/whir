@@ -137,7 +137,7 @@ fn random_edits_match_a_plain_model() {
                         changes.push(change(&base, r, tx.e.col_key(c), v));
                     }
                     tx.set_cells(changes);
-                    changed = tx.commit(None, None).effects.len() > 0;
+                    changed = !tx.commit(None, None).effects.is_empty();
                 }
                 3 => {
                     let at = rng.below(n + 1);
@@ -406,5 +406,5 @@ fn history_budget_drops_the_oldest_steps() {
     while e.undo().is_some() {
         n += 1;
     }
-    assert!(n < 10 && n >= 1, "{n} steps kept");
+    assert!((1..10).contains(&n), "{n} steps kept");
 }

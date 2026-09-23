@@ -124,10 +124,6 @@ impl RowOrder {
         self.ends.last().copied().unwrap_or(0)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Piece index and offset of logical row `i` (< len).
     fn locate(&self, i: u64) -> (usize, u32) {
         let p = self.ends.partition_point(|&e| e <= i);
@@ -300,7 +296,8 @@ impl RowOrder {
         self.new.sort_unstable();
     }
 
-    /// Every key in logical order (tests, remapping after a save).
+    /// Every key in logical order.
+    #[cfg(test)]
     pub fn keys(&self) -> impl Iterator<Item = RowKey> + '_ {
         self.pieces.iter().flat_map(|p| p.keys())
     }

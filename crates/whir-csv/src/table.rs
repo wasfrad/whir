@@ -123,9 +123,12 @@ impl Table {
         self.evict();
     }
 
+    /// Cheap: reads the shared state without copying the checkpoints.
     pub fn progress(&self) -> Progress {
-        let s = self.index.read().map(|s| s.clone()).unwrap_or_default();
-        Self::progress_of(&s)
+        match self.index.read() {
+            Ok(s) => Self::progress_of(&s),
+            Err(_) => Progress::default(),
+        }
     }
 
     fn progress_of(s: &IndexState) -> Progress {

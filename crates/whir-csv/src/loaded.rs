@@ -353,11 +353,19 @@ impl Loaded {
             .find
             .current
             .and_then(|i| self.find.display.get(i).copied());
+        let base = self.base_rows();
+        let (order, edits) = (&self.order, &self.edits);
         let mut v: Vec<(u64, u32)> = self
             .find
             .raw
             .iter()
-            .filter_map(|&(k, c)| self.display_of(k).map(|d| (d, c)))
+            .filter_map(|&(k, c)| {
+                let d = match order {
+                    Some(o) => o.display_of(k),
+                    None => edits.index_of(k, base),
+                };
+                d.map(|d| (d, c))
+            })
             .collect();
         v.sort_unstable();
         self.find.display = v;

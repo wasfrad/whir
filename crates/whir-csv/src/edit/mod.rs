@@ -111,9 +111,12 @@ enum Op {
     DeleteCols {
         removed: Vec<(usize, ColKey)>,
         meta: Vec<ColMeta>,
-        stash: Vec<(ColKey, Vec<(RowKey, Arc<str>)>)>,
+        stash: ColStash,
     },
 }
+
+/// Overrides of deleted columns, kept by the undo step.
+type ColStash = Vec<(ColKey, Vec<(RowKey, Arc<str>)>)>;
 
 impl Op {
     fn weight(&self) -> usize {
@@ -198,6 +201,7 @@ impl Edits {
         self.cols.as_deref()
     }
 
+    #[cfg(test)]
     pub fn cells(&self) -> &CellStore {
         &self.cells
     }
@@ -245,12 +249,9 @@ impl Edits {
         }
     }
 
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
     }
 
     /// Group changes into one undo step.
@@ -294,13 +295,6 @@ impl Edits {
         };
         self.push_undo(step);
         Some(applied)
-    }
-
-    /// Forget the history (after a save: it is relative to the old file).
-    pub fn clear_history(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
-        self.undo_weight = 0;
     }
 
     fn push_undo(&mut self, step: Step) {
@@ -387,7 +381,7 @@ impl Edits {
         }
     }
 
-    fn stash_cols(&mut self, keys: &[ColKey]) -> Vec<(ColKey, Vec<(RowKey, Arc<str>)>)> {
+    fn stash_cols(&mut self, keys: &[ColKey]) -> ColStash {
         if self.cells.is_empty() {
             return Vec::new();
         }
@@ -398,7 +392,7 @@ impl Edits {
             .collect()
     }
 
-    fn unstash_cols(&mut self, stash: &[(ColKey, Vec<(RowKey, Arc<str>)>)]) {
+    fn unstash_cols(&mut self, stash: &ColStash) {
         if stash.is_empty() {
             return;
         }
@@ -524,6 +518,7 @@ pub struct Tx<'a> {
 
 impl Tx<'_> {
     /// The overlay as changed so far (keys of rows added in this step).
+    #[cfg(test)]
     pub fn edits(&self) -> &Edits {
         self.e
     }
