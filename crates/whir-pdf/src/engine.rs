@@ -59,6 +59,8 @@ pub enum Event {
     /// A page's text (with geometry if it was asked for urgently).
     Text {
         page: u32,
+        /// Per-document sequence number; echo the highest seen in `want_text`.
+        seq: u64,
         text: Box<PageText>,
     },
 }
@@ -79,6 +81,8 @@ enum Cmd {
     WantText {
         doc: u64,
         pages: Vec<u32>,
+        /// The highest `Event::Text::seq` the document had received.
+        seen: u64,
     },
     /// `Some(p)`: extract every page not sent yet, starting at `p`, wrapping.
     /// `None`: stop.
@@ -152,10 +156,13 @@ impl DocHandle {
     }
 
     /// Replace the pages whose text and geometry are needed soon (in order).
-    pub fn want_text(&self, pages: Vec<u32>) {
+    /// `seen` is the highest `Event::Text::seq` received so far: pages sent
+    /// after it are already on their way and aren't extracted twice.
+    pub fn want_text(&self, pages: Vec<u32>, seen: u64) {
         send_quiet(Cmd::WantText {
             doc: self.id,
             pages,
+            seen,
         });
     }
 
@@ -215,19 +222,30 @@ struct TextQueue {
     sweep: Option<(u32, u32)>,
     /// Text already sent to the UI (which keeps it): the sweep skips these.
     sent: Vec<bool>,
+    /// Per page, the `seq` of the last send that carried geometry (0: none).
+    geom_seq: Vec<u64>,
+    /// Text events sent so far.
+    seq: u64,
 }
 
 impl TextQueue {
     fn new(pages: usize) -> Self {
         Self {
             sent: vec![false; pages],
+            geom_seq: vec![0; pages],
             ..Self::default()
         }
     }
 
-    fn set_urgent(&mut self, pages: Vec<u32>) {
+    /// Replace the urgent list. The UI re-sends its list as pages arrive, so
+    /// pages whose geometry went out after the last one it had received
+    /// (`seen`) are in flight: asking again would extract them twice.
+    fn set_urgent(&mut self, pages: Vec<u32>, seen: u64) {
         let n = self.sent.len() as u32;
-        self.urgent = pages.into_iter().filter(|&p| p < n).collect();
+        self.urgent = pages
+            .into_iter()
+            .filter(|&p| p < n && self.geom_seq[p as usize] <= seen)
+            .collect();
     }
 
     fn set_sweep(&mut self, from: Option<u32>) {
@@ -267,10 +285,16 @@ impl TextQueue {
             .or_else(|| self.next_sweep().map(|p| (p, false)))
     }
 
-    fn mark_sent(&mut self, page: u32) {
+    /// Record a send (`geometry`: it carried boxes and lines); returns its `seq`.
+    fn mark_sent(&mut self, page: u32, geometry: bool) -> u64 {
+        self.seq += 1;
         if let Some(s) = self.sent.get_mut(page as usize) {
             *s = true;
         }
+        if geometry && let Some(g) = self.geom_seq.get_mut(page as usize) {
+            *g = self.seq;
+        }
+        self.seq
     }
 }
 
@@ -370,11 +394,11 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
             }
         }
         // Without the text API these stay empty, so nothing is ever extracted.
-        Cmd::WantText { doc, pages } => {
+        Cmd::WantText { doc, pages, seen } => {
             if let Some(d) = docs.get_mut(&doc)
                 && api.is_ok_and(|a| a.text.is_some())
             {
-                d.text.set_urgent(pages);
+                d.text.set_urgent(pages, seen);
             }
         }
         Cmd::Sweep { doc, from } => {
@@ -647,9 +671,10 @@ fn extract_and_send(
         }
         None => PageText::failed(),
     };
-    d.text.mark_sent(index);
+    let seq = d.text.mark_sent(index, text.geom.is_some());
     let _ = d.events.send(Event::Text {
         page: index,
+        seq,
         text: Box::new(text),
     });
     if urgent || d.last_wake.elapsed() >= SWEEP_WAKE {
@@ -722,9 +747,6 @@ fn extract(t: &TextApi, page: ffi::Page, size: [f32; 2], geometry: bool) -> Page
     for i in 0..n {
         let u = unsafe { (t.get_unicode)(tp, i) };
         let mut unit = if u > 0xFFFF { 0xFFFD } else { u as u16 };
-        if unsafe { (t.is_hyphen)(tp, i) } == 1 {
-            hyphens.push(i as u32);
-        }
         let generated = unsafe { (t.is_generated)(tp, i) } == 1;
         let mut b = NO_BOX;
         if let (false, Some(xf)) = (generated, xf)
@@ -738,6 +760,8 @@ fn extract(t: &TextApi, page: ffi::Page, size: [f32; 2], geometry: bool) -> Page
         if !is_empty(&b) && outside {
             unit = 0;
             b = NO_BOX;
+        } else if unsafe { (t.is_hyphen)(tp, i) } == 1 {
+            hyphens.push(i as u32);
         }
         chars.push(unit);
         boxes.push(b);
@@ -752,62 +776,25 @@ fn extract(t: &TextApi, page: ffi::Page, size: [f32; 2], geometry: bool) -> Page
         chars,
         hyphens,
         geom,
+        no_geom: geometry && xf.is_none(),
         failed: false,
     }
 }
 
+/// Shared by the tests that load the real pdfium.dll.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex, MutexGuard};
 
-    #[test]
-    fn text_queue_order() {
-        let mut q = TextQueue::new(5);
-        assert!(!q.has_work());
-        q.set_sweep(Some(3));
-        // Out-of-range pages are dropped.
-        q.set_urgent(vec![1, 9]);
-        assert_eq!(q.next(), Some((1, true)));
-        q.mark_sent(1);
-        // The sweep starts at its page, wraps, and skips what was sent.
-        let mut order = Vec::new();
-        while let Some((p, urgent)) = q.next() {
-            assert!(!urgent);
-            q.mark_sent(p);
-            order.push(p);
-        }
-        assert_eq!(order, vec![3, 4, 0, 2]);
-        assert!(!q.has_work(), "one lap, then the sweep ends");
-        // Urgent pages are extracted again even if sent (geometry was evicted).
-        q.set_urgent(vec![3]);
-        assert_eq!(q.next(), Some((3, true)));
-        // A sweep over sent pages ends without yielding (no busy loop).
-        q.set_sweep(Some(0));
-        assert!(q.has_work());
-        assert_eq!(q.next(), None);
-        assert!(!q.has_work());
+    use whir_core::texture::{TextureDesc, TextureRegistry, UserTexture};
+
+    /// PDFium isn't thread-safe: tests that call it hold this.
+    pub fn pdfium_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    #[test]
-    fn text_queue_urgent_first_and_stop() {
-        let mut q = TextQueue::new(4);
-        q.set_sweep(Some(0));
-        assert_eq!(q.next(), Some((0, false)));
-        // Urgent pages jump ahead of the sweep, and a new list replaces the old.
-        q.set_urgent(vec![3, 2]);
-        q.set_urgent(vec![2]);
-        assert_eq!(q.next(), Some((2, true)));
-        assert_eq!(q.next(), Some((1, false)));
-        q.set_sweep(None);
-        assert_eq!(q.next(), None);
-        assert!(!q.has_work());
-        // Empty documents never sweep.
-        let mut q = TextQueue::new(0);
-        q.set_sweep(Some(0));
-        assert!(!q.has_work());
-    }
-
-    struct NoTextures;
+    pub struct NoTextures;
 
     impl TextureRegistry for NoTextures {
         fn create(
@@ -828,7 +815,7 @@ mod tests {
 
     /// Two pages sharing one content stream: upright 612×792, and one with an
     /// offset MediaBox rotated 90°. "Zq" sits outside both crop boxes.
-    fn test_pdf() -> Vec<u8> {
+    pub fn test_pdf() -> Vec<u8> {
         let content = "BT /F1 24 Tf 72 700 Td (Hello world) Tj 0 -30 Td (second line) Tj ET\n\
                        BT /F1 24 Tf 700 700 Td (Zq) Tj ET\n";
         let res = "/Resources << /Font << /F1 5 0 R >> >>";
@@ -868,12 +855,74 @@ mod tests {
         );
         out
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{NoTextures, pdfium_lock, test_pdf};
+    use super::*;
+
+    #[test]
+    fn text_queue_order() {
+        let mut q = TextQueue::new(5);
+        assert!(!q.has_work());
+        q.set_sweep(Some(3));
+        // Out-of-range pages are dropped.
+        q.set_urgent(vec![1, 9], 0);
+        assert_eq!(q.next(), Some((1, true)));
+        assert_eq!(q.mark_sent(1, true), 1);
+        // The sweep starts at its page, wraps, and skips what was sent.
+        let mut order = Vec::new();
+        while let Some((p, urgent)) = q.next() {
+            assert!(!urgent);
+            q.mark_sent(p, false);
+            order.push(p);
+        }
+        assert_eq!(order, vec![3, 4, 0, 2]);
+        assert!(!q.has_work(), "one lap, then the sweep ends");
+        // Urgent pages are extracted again even if sent without geometry…
+        q.set_urgent(vec![3], 5);
+        assert_eq!(q.next(), Some((3, true)));
+        let seq = q.mark_sent(3, true);
+        // …but not while that geometry is still on its way to the UI…
+        q.set_urgent(vec![3, 1], seq - 1);
+        assert_eq!(q.next(), Some((1, true)));
+        assert_eq!(q.next(), None);
+        // …only once the UI had it (and then evicted it).
+        q.set_urgent(vec![3], seq);
+        assert_eq!(q.next(), Some((3, true)));
+        // A sweep over sent pages ends without yielding (no busy loop).
+        q.set_sweep(Some(0));
+        assert!(q.has_work());
+        assert_eq!(q.next(), None);
+        assert!(!q.has_work());
+    }
+
+    #[test]
+    fn text_queue_urgent_first_and_stop() {
+        let mut q = TextQueue::new(4);
+        q.set_sweep(Some(0));
+        assert_eq!(q.next(), Some((0, false)));
+        // Urgent pages jump ahead of the sweep, and a new list replaces the old.
+        q.set_urgent(vec![3, 2], 0);
+        q.set_urgent(vec![2], 0);
+        assert_eq!(q.next(), Some((2, true)));
+        assert_eq!(q.next(), Some((1, false)));
+        q.set_sweep(None);
+        assert_eq!(q.next(), None);
+        assert!(!q.has_work());
+        // Empty documents never sweep.
+        let mut q = TextQueue::new(0);
+        q.set_sweep(Some(0));
+        assert!(!q.has_work());
+    }
 
     /// The real extraction path through vendor/pdfium/bin/pdfium.dll.
     /// `cargo test -p whir-pdf -- --ignored`
     #[test]
     #[ignore = "loads pdfium.dll"]
     fn extracts_real_text() {
+        let _pdfium = pdfium_lock();
         let api = Api::load().expect("pdfium.dll");
         unsafe { (api.init_library)() };
         let t = api.text.as_ref().expect("text API");

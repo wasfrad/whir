@@ -18,6 +18,9 @@ pub struct PageText {
     pub hyphens: Vec<u32>,
     /// Boxes and lines, only when the UI asked for them (visible pages).
     pub geom: Option<PageGeom>,
+    /// Geometry was asked for but can't exist (degenerate page transform):
+    /// asking again won't help.
+    pub no_geom: bool,
     /// PDFium couldn't load the page or its text: treat it as empty.
     pub failed: bool,
 }
@@ -271,7 +274,7 @@ pub fn push_copy(
             continue;
         }
         if u == CR || u == LF {
-            // \r\n, \n\r, lone \r or \n: one newline per break unit pair.
+            // \r\n, a lone \r or a lone \n: one newline.
             if u == CR && k + 1 < end && chars[k as usize + 1] == LF {
                 k += 1;
             }

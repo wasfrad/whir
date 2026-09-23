@@ -57,7 +57,7 @@ impl View {
     }
 
     /// A page-local box on screen, given the page's screen rect.
-    pub fn to_screen(&self, page: Rect, r: [f32; 4]) -> Rect {
+    pub fn to_screen(self, page: Rect, r: [f32; 4]) -> Rect {
         let z = self.zoom as f32;
         Rect::from_min_max(
             page.min + vec2(r[0] * z, r[1] * z),

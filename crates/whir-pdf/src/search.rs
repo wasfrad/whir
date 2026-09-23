@@ -88,6 +88,9 @@ pub fn compile(q: &str) -> Vec<Tok> {
     out
 }
 
+/// What search reads from a page: its units and the ranges a match may skip.
+pub type PageUnits<'a> = (&'a [u16], &'a [(u32, u32)]);
+
 /// A match on one page: `len` char indices from `start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Match {
@@ -278,7 +281,7 @@ impl Search {
     /// `text(page)` gives the page's units and soft ranges. True if work remains.
     pub fn run<'a>(
         &mut self,
-        text: impl Fn(u32) -> Option<(&'a [u16], &'a [(u32, u32)])>,
+        text: impl Fn(u32) -> Option<PageUnits<'a>>,
         budget: Duration,
     ) -> bool {
         let t0 = Instant::now();

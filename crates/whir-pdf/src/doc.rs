@@ -1,18 +1,30 @@
 //! The PDF tab: continuous scroll, fit-width, zoom at the cursor, tiles at
-//! exact device resolution (stretched while a zoom settles), LRU texture budget.
+//! exact device resolution (stretched while a zoom settles), LRU texture budget;
+//! text selection, copy and find over text streamed from the PDF thread.
 
-use std::collections::HashMap;
+mod find;
+mod selection;
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use egui::{Color32, CursorIcon, Key, Modifiers, Pos2, Rect, Sense, Stroke, pos2, vec2};
+use egui::{Color32, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use whir_core::find_bar::FindBar;
 use whir_core::scroll::{ScrollAxis, scrollbar};
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, UserTexture};
 
 use crate::engine::{DocHandle, Event, Job, TileKey};
 use crate::layout::{self, Layout};
+use crate::search::{Match, Search};
+use crate::select::{ClickCounter, Gesture, Selection};
+use crate::store::TextStore;
+use crate::view::View;
+use selection::consume_sel_key;
 
 /// GPU memory for rendered tiles, per document.
 const TEXTURE_BUDGET: u64 = 96 << 20;
@@ -22,6 +34,14 @@ const ZOOM_SETTLE: f64 = 0.15;
 const ZOOM_100: f64 = 96.0 / 72.0;
 const MIN_ZOOM: f64 = 0.1;
 const MAX_ZOOM: f64 = 12.0 * ZOOM_100;
+/// Scrollbar strip thickness.
+const BAR: f32 = 12.0;
+/// Documents up to this many pages extract all their text in the background
+/// once the first screen is drawn, so Ctrl+F is instant on typical files.
+const WARM_MAX_PAGES: usize = 200;
+/// A match's page geometry normally arrives within a frame or two; if it
+/// hasn't after this long, scroll to its page first and refine later.
+const REVEAL_WAIT: f64 = 0.25;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Zoom {
@@ -31,7 +51,7 @@ enum Zoom {
 
 enum State {
     Loading,
-    Ready(Layout),
+    Ready(Arc<Layout>),
     Failed(String),
 }
 
@@ -40,16 +60,26 @@ struct Cached {
     last_used: u64,
 }
 
+/// A match waiting to be scrolled into view.
+#[derive(Clone, Copy)]
+struct Reveal {
+    page: u32,
+    m: Match,
+    since: f64,
+    /// Its page was scrolled on screen while waiting for geometry.
+    page_shown: bool,
+}
+
 pub struct PdfDoc {
     path: PathBuf,
     title: String,
     handle: DocHandle,
     rx: Receiver<Event>,
-    textures: std::sync::Arc<dyn TextureRegistry>,
+    textures: Arc<dyn TextureRegistry>,
     state: State,
     tiles: HashMap<TileKey, Cached>,
     /// Tiles PDFium couldn't produce: never requested again.
-    failed_tiles: std::collections::HashSet<TileKey>,
+    failed_tiles: HashSet<TileKey>,
     got_first_tile: bool,
     zoom: Zoom,
     sy: ScrollAxis,
@@ -61,6 +91,28 @@ pub struct PdfDoc {
     frame: u64,
     toast: Option<(String, f64)>,
     last_scroll: f64,
+
+    text: TextStore,
+    sel: Option<Selection>,
+    gesture: Gesture,
+    clicks: ClickCounter,
+    find: FindBar,
+    search: Search,
+    pending_reveal: Option<Reveal>,
+    /// Ctrl+C arrived before every selected page's text: copy when it has.
+    pending_copy: bool,
+    /// Pages last asked for urgently (text + geometry).
+    last_text_urgent: Vec<u32>,
+    /// Highest `Event::Text::seq` received (lets the PDF thread skip pages
+    /// already on their way).
+    text_seen: u64,
+    /// The background sweep is running.
+    sweep_on: bool,
+    /// Pages whose geometry is worth keeping when it arrives: last frame's
+    /// visible pages ± 2.
+    near: Range<usize>,
+    /// Small document, first screen drawn: extract everything in the background.
+    warm: bool,
 }
 
 impl PdfDoc {
@@ -78,7 +130,7 @@ impl PdfDoc {
             textures: cx.textures.clone(),
             state: State::Loading,
             tiles: HashMap::new(),
-            failed_tiles: std::collections::HashSet::new(),
+            failed_tiles: HashSet::new(),
             got_first_tile: false,
             zoom: Zoom::FitWidth,
             sy: ScrollAxis::default(),
@@ -89,14 +141,29 @@ impl PdfDoc {
             frame: 0,
             toast: None,
             last_scroll: 0.0,
+            text: TextStore::new(0, false),
+            sel: None,
+            gesture: Gesture::None,
+            clicks: ClickCounter::default(),
+            find: FindBar::new("Find in document", 0.1),
+            search: Search::default(),
+            pending_reveal: None,
+            pending_copy: false,
+            last_text_urgent: Vec::new(),
+            text_seen: 0,
+            sweep_on: false,
+            near: 0..0,
+            warm: false,
         }
     }
 
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Event::Opened { pages, .. } => self.state = State::Ready(Layout::new(pages)),
-                Event::Text { .. } => {}
+                Event::Opened { pages, text } => {
+                    self.text = TextStore::new(pages.len(), text);
+                    self.state = State::Ready(Arc::new(Layout::new(pages)));
+                }
                 Event::Failed(e) => self.state = State::Failed(e),
                 Event::Tile { key, texture } => {
                     self.got_first_tile = true;
@@ -112,6 +179,15 @@ impl PdfDoc {
                     // Leave that area blank rather than retrying forever.
                     self.got_first_tile = true;
                     self.failed_tiles.insert(key);
+                }
+                Event::Text { page, seq, text } => {
+                    self.text_seen = self.text_seen.max(seq);
+                    let keep_geom = self.near.contains(&(page as usize))
+                        || self.last_text_urgent.contains(&page)
+                        || self.pending_reveal.is_some_and(|r| r.page == page);
+                    if self.text.insert(page, *text, keep_geom, self.frame) {
+                        self.search.text_arrived(page);
+                    }
                 }
             }
         }
@@ -146,29 +222,39 @@ impl PdfDoc {
         let State::Ready(layout) = &self.state else {
             return;
         };
+        let layout = layout.clone();
+        let l = &*layout;
         let theme = Theme::current();
-        let ppp = ui.ctx().pixels_per_point() as f64;
+        let ctx = ui.ctx().clone();
+        let ppp = ctx.pixels_per_point() as f64;
         let now = ui.input(|i| i.time);
         self.frame += 1;
+        let frame = self.frame;
+        // Before anything consumes keys: while the find field has focus, its
+        // keys (typing, arrows, Home/End, Ctrl+A, Ctrl+C) are its own. (Its
+        // focus survives Esc, which the field handles itself.)
+        let find_focus = self.find.has_focus(&ctx);
 
         let (vp, resp) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
         let painter = ui.painter().with_clip_rect(vp);
         painter.rect_filled(vp, 0.0, theme.canvas_bg);
-        if layout.is_empty() {
+        if l.is_empty() {
             return;
         }
         let vw = vp.width() as f64;
         let vh = vp.height() as f64;
 
+        self.find_keys(ui, find_focus, now);
+
         // --- zoom & scroll -----------------------------------------------------
         let mut zoom = match self.zoom {
-            Zoom::FitWidth => layout.fit_width_zoom(vw - 14.0),
+            Zoom::FitWidth => l.fit_width_zoom(vw - 14.0),
             Zoom::Manual(z) => z,
         };
         let set_axes = |sy: &mut ScrollAxis, sx: &mut ScrollAxis, zoom: f64| {
-            sy.content = layout.total_height * zoom;
+            sy.content = l.total_height * zoom;
             sy.viewport = vh;
-            sx.content = layout.content_width() * zoom;
+            sx.content = l.content_width() * zoom;
             sx.viewport = vw;
             sy.clamp();
             sx.clamp();
@@ -191,53 +277,52 @@ impl PdfDoc {
                 self.sx.scroll_by(-scroll.x as f64);
             }
         }
-        if resp.dragged() {
-            let d = resp.drag_delta();
-            self.sy.scroll_by(-d.y as f64);
-            self.sx.scroll_by(-d.x as f64);
-            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        } else if resp.hovered() && (self.sy.is_scrollable() || self.sx.is_scrollable()) {
-            ui.ctx().set_cursor_icon(CursorIcon::Grab);
-        }
 
+        // Shift+arrows extend a selection; they go before the plain arrows,
+        // which would otherwise match them too.
+        let sel_key = match self.sel {
+            Some(_) if !find_focus => ui.input_mut(consume_sel_key),
+            _ => None,
+        };
         let page_step = (vh * 0.9).max(40.0);
         let mut fit = false;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
-            // Shift+Space first: consume_key ignores extra Shift, so plain Space would eat it.
-            if i.consume_key(none, Key::PageUp) || i.consume_key(Modifiers::SHIFT, Key::Space) {
-                self.sy.scroll_by(-page_step);
+            let ctrl = Modifiers::CTRL;
+            // Ctrl zoom shortcuts work even while typing in the find field.
+            fit |= i.consume_key(ctrl, Key::Num0);
+            let mut zoom_in = i.consume_key(ctrl, Key::Plus) || i.consume_key(ctrl, Key::Equals);
+            let mut zoom_out = i.consume_key(ctrl, Key::Minus);
+            if !find_focus {
+                // Shift+Space first: consume_key ignores extra Shift, so plain Space would eat it.
+                if i.consume_key(none, Key::PageUp) || i.consume_key(Modifiers::SHIFT, Key::Space) {
+                    self.sy.scroll_by(-page_step);
+                }
+                if i.consume_key(none, Key::PageDown) || i.consume_key(none, Key::Space) {
+                    self.sy.scroll_by(page_step);
+                }
+                if i.consume_key(none, Key::ArrowDown) {
+                    self.sy.scroll_by(48.0);
+                }
+                if i.consume_key(none, Key::ArrowUp) {
+                    self.sy.scroll_by(-48.0);
+                }
+                if i.consume_key(none, Key::ArrowRight) {
+                    self.sx.scroll_by(48.0);
+                }
+                if i.consume_key(none, Key::ArrowLeft) {
+                    self.sx.scroll_by(-48.0);
+                }
+                if i.consume_key(none, Key::Home) || i.consume_key(ctrl, Key::Home) {
+                    self.sy.scroll_to(0.0);
+                }
+                if i.consume_key(none, Key::End) || i.consume_key(ctrl, Key::End) {
+                    self.sy.scroll_to(f64::MAX);
+                }
+                fit |= i.consume_key(none, Key::Num0);
+                zoom_in |= i.consume_key(none, Key::Plus) || i.consume_key(none, Key::Equals);
+                zoom_out |= i.consume_key(none, Key::Minus);
             }
-            if i.consume_key(none, Key::PageDown) || i.consume_key(none, Key::Space) {
-                self.sy.scroll_by(page_step);
-            }
-            if i.consume_key(none, Key::ArrowDown) {
-                self.sy.scroll_by(48.0);
-            }
-            if i.consume_key(none, Key::ArrowUp) {
-                self.sy.scroll_by(-48.0);
-            }
-            if i.consume_key(none, Key::ArrowRight) {
-                self.sx.scroll_by(48.0);
-            }
-            if i.consume_key(none, Key::ArrowLeft) {
-                self.sx.scroll_by(-48.0);
-            }
-            if i.consume_key(none, Key::Home) || i.consume_key(Modifiers::CTRL, Key::Home) {
-                self.sy.scroll_to(0.0);
-            }
-            if i.consume_key(none, Key::End) || i.consume_key(Modifiers::CTRL, Key::End) {
-                self.sy.scroll_to(f64::MAX);
-            }
-            if i.consume_key(Modifiers::CTRL, Key::Num0) || i.consume_key(none, Key::Num0) {
-                fit = true;
-            }
-            let zoom_in = i.consume_key(Modifiers::CTRL, Key::Plus)
-                || i.consume_key(Modifiers::CTRL, Key::Equals)
-                || i.consume_key(none, Key::Plus)
-                || i.consume_key(none, Key::Equals);
-            let zoom_out =
-                i.consume_key(Modifiers::CTRL, Key::Minus) || i.consume_key(none, Key::Minus);
             if zoom_in {
                 new_zoom = Some((zoom * 1.25, None));
             }
@@ -245,8 +330,26 @@ impl PdfDoc {
                 new_zoom = Some((zoom / 1.25, None));
             }
         });
+        if let Some(k) = sel_key {
+            self.sel_key(k, frame);
+        }
+        if !find_focus {
+            let (all, copy) = ui.input_mut(|i| {
+                let all = i.consume_key(Modifiers::CTRL, Key::A);
+                let n = i.events.len();
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Copy | egui::Event::Cut));
+                (all, i.events.len() != n)
+            });
+            if all && self.text.available {
+                self.set_sel(Some(Selection::all(l.len() as u32)));
+            }
+            if copy {
+                self.copy(&ctx, now);
+            }
+        }
         if fit && self.zoom != Zoom::FitWidth {
-            let target = layout.fit_width_zoom(vw - 14.0);
+            let target = l.fit_width_zoom(vw - 14.0);
             new_zoom = Some((target, None));
             self.zoom = Zoom::FitWidth;
         }
@@ -257,7 +360,7 @@ impl PdfDoc {
                 // Keep the document point under the anchor fixed.
                 let anchor = anchor.unwrap_or(vp.center());
                 let (ax, ay) = ((anchor.x - vp.left()) as f64, (anchor.y - vp.top()) as f64);
-                let x_off = |z: f64| ((vw - layout.content_width() * z) / 2.0).max(0.0);
+                let x_off = |z: f64| ((vw - l.content_width() * z) / 2.0).max(0.0);
                 let doc_x = (self.sx.offset + ax - x_off(zoom)) / zoom;
                 let doc_y = (self.sy.offset + ay) / zoom;
                 if !fit {
@@ -272,13 +375,27 @@ impl PdfDoc {
             }
         }
 
+        // --- reveal, pointer ---------------------------------------------------
+        let x_off = ((vw - l.content_width() * zoom) / 2.0).max(0.0);
+        let view = |d: &Self| View {
+            vp,
+            zoom,
+            x_off,
+            sx: d.sx.offset,
+            sy: d.sy.offset,
+            ppp,
+        };
+        self.apply_reveal(l, vp, zoom, x_off, now, frame);
+        self.pointer(ui, &resp, l, view(self), frame);
+        let v = view(self);
+        self.hover_cursor(ui, &resp, l, v, frame);
+
         // --- which tiles, at which scale -------------------------------------------
         let scale = zoom * ppp; // device px per PDF point
         let scale_key = (scale * 1000.0).round().max(1.0) as u32;
         let settled = match self.settled_scale {
             Some(k) if k != scale_key && now - self.zoom_changed_at < ZOOM_SETTLE => {
-                ui.ctx()
-                    .request_repaint_after(Duration::from_secs_f64(ZOOM_SETTLE));
+                ctx.request_repaint_after(Duration::from_secs_f64(ZOOM_SETTLE));
                 k
             }
             _ => {
@@ -289,18 +406,6 @@ impl PdfDoc {
         let settled_scale = settled as f64 / 1000.0;
         let max_side = self.textures.max_texture_side();
 
-        let x_off = ((vw - layout.content_width() * zoom) / 2.0).max(0.0);
-        let snap = |v: f64| (v * ppp).round() / ppp;
-        let page_rect = |i: usize| -> Rect {
-            let [pw, ph] = layout.sizes[i];
-            let doc_x = layout::MARGIN + (layout.max_width - pw as f64) / 2.0;
-            let x = vp.left() as f64 + x_off + doc_x * zoom - self.sx.offset;
-            let y = vp.top() as f64 + layout.top(i) * zoom - self.sy.offset;
-            Rect::from_min_size(
-                pos2(snap(x) as f32, snap(y) as f32),
-                vec2((pw as f64 * zoom) as f32, (ph as f64 * zoom) as f32),
-            )
-        };
         let tile_rect = |page: Rect, r: [u32; 4], tile_scale: f64| -> Rect {
             let k = zoom / tile_scale; // UI points per tile pixel
             Rect::from_min_size(
@@ -311,18 +416,17 @@ impl PdfDoc {
 
         let y0 = self.sy.offset / zoom;
         let y1 = (self.sy.offset + vh) / zoom;
-        let visible = layout.visible(y0, y1);
+        let visible = l.visible(y0, y1);
         let mut wanted: Vec<Job> = Vec::new();
-        let frame = self.frame;
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
 
         for i in visible.clone() {
-            let prect = page_rect(i);
+            let prect = v.page_rect(l, i);
             painter.rect_filled(prect.expand(1.0), 0.0, theme.separator);
             painter.rect_filled(prect, 0.0, Color32::WHITE);
 
             // Which current-scale tiles are on screen, and are they all ready?
-            let page_px = page_px_at(layout.sizes[i], settled_scale);
+            let page_px = page_px_at(l.sizes[i], settled_scale);
             let current: Vec<(TileKey, [u32; 4], Rect)> = layout::tiles(page_px, max_side)
                 .into_iter()
                 .map(|r| {
@@ -354,7 +458,7 @@ impl PdfDoc {
                 stale.sort_by_key(|(k, _)| k.scale);
                 for (k, c) in stale {
                     let s = k.scale as f64 / 1000.0;
-                    let rects = layout::tiles(page_px_at(layout.sizes[i], s), max_side);
+                    let rects = layout::tiles(page_px_at(l.sizes[i], s), max_side);
                     if let Some(r) = rects.into_iter().find(|r| tile_key(i, k.scale, *r) == k) {
                         let tr = tile_rect(prect, r, s);
                         if tr.intersects(vp) {
@@ -387,10 +491,10 @@ impl PdfDoc {
             .into_iter()
             .flatten()
         {
-            if i >= layout.len() {
+            if i >= l.len() {
                 continue;
             }
-            let page_px = page_px_at(layout.sizes[i], settled_scale);
+            let page_px = page_px_at(l.sizes[i], settled_scale);
             let rects = layout::tiles(page_px, max_side);
             if rects.len() == 1 {
                 let key = tile_key(i, settled, rects[0]);
@@ -406,32 +510,128 @@ impl PdfDoc {
             }
         }
 
+        self.paint_highlights(&painter, l, v, visible.clone(), frame, &theme);
+
+        let tiles_pending = !wanted.is_empty();
         let keys: Vec<TileKey> = wanted.iter().map(|j| j.key).collect();
         if keys != self.last_wanted {
             self.handle.want(wanted);
             self.last_wanted = keys;
         }
 
-        // --- overlays ------------------------------------------------------------------
-        let current = layout.page_at((self.sy.offset + vh / 2.0) / zoom) + 1;
-        let pages = layout.len();
+        // --- text requests, copy, search -----------------------------------------
+        let current = l.page_at((self.sy.offset + vh / 2.0) / zoom);
+        self.near = visible.start.saturating_sub(2)..(visible.end + 2).min(l.len());
+        self.request_text(l, visible.clone(), current, tiles_pending, frame);
         self.evict(frame);
+        self.text.evict_geom(frame);
+        if self.pending_copy {
+            self.copy(&ctx, now);
+        }
+        // Closed, the search waits (text arrivals stay queued): the view never
+        // jumps to a match nobody is looking for.
+        if self.find.open {
+            self.run_search(&ctx, now);
+        }
+        self.context_menu(&resp, &ctx, l.len(), now);
+
+        // --- overlays ------------------------------------------------------------------
+        let pages = l.len();
         if (self.sy.offset - self.last_scroll).abs() > 0.5 {
             self.last_scroll = self.sy.offset;
-            self.toast = Some((format!("{current} / {pages}"), now + 1.2));
+            self.toast = Some((format!("{} / {pages}", current + 1), now + 1.2));
         }
         let vbar = Rect::from_min_max(
-            pos2(vp.right() - 12.0, vp.top()),
-            pos2(vp.right(), vp.bottom() - 12.0),
+            pos2(vp.right() - BAR, vp.top()),
+            pos2(vp.right(), vp.bottom() - BAR),
         );
         let hbar = Rect::from_min_max(
-            pos2(vp.left(), vp.bottom() - 12.0),
-            pos2(vp.right() - 12.0, vp.bottom()),
+            pos2(vp.left(), vp.bottom() - BAR),
+            pos2(vp.right() - BAR, vp.bottom()),
         );
         let id = ui.id().with("pdf");
         scrollbar(ui, id.with("v"), vbar, &mut self.sy, true);
         scrollbar(ui, id.with("h"), hbar, &mut self.sx, false);
         paint_toast(ui, vp, &mut self.toast, now, &theme);
+
+        // The find bar goes last: drawn on top, and it sees the keys the
+        // document left alone.
+        let status = self.find_status();
+        let out = self.find.show(ui, vp, 0.0, &status);
+        if let Some(q) = out.search {
+            let anchor = self.search_anchor(l, v, visible, frame);
+            self.start_search(&q, anchor, now, &ctx);
+        }
+        if out.next || out.prev {
+            self.step_match(out.next, now);
+        }
+        if out.closed {
+            self.close_find();
+        }
+        if let Some(r) = self.pending_reveal {
+            if r.since >= now {
+                ctx.request_repaint();
+            } else if !r.page_shown {
+                ctx.request_repaint_after(Duration::from_secs_f64(
+                    (REVEAL_WAIT - (now - r.since)).max(0.01),
+                ));
+            }
+        }
+    }
+
+    // --- text requests -----------------------------------------------------------------
+
+    /// Ask the PDF thread for what the screen needs (text + geometry of the
+    /// visible pages and their neighbours), and run the background sweep while
+    /// find is open, a copy waits, or the document is small.
+    fn request_text(
+        &mut self,
+        l: &Layout,
+        visible: Range<usize>,
+        current: usize,
+        tiles_pending: bool,
+        frame: u64,
+    ) {
+        if !self.text.available {
+            return;
+        }
+        // Geometry near the screen stays fresh in the LRU even when nothing
+        // on it is highlighted.
+        for p in self.near.clone() {
+            self.text.touch_geom(p as u32, frame);
+        }
+        let mut urgent: Vec<u32> = Vec::new();
+        let reveal = self.pending_reveal.map(|r| r.page as usize);
+        let neighbours = [visible.start.checked_sub(1), Some(visible.end)];
+        for p in reveal
+            .into_iter()
+            .chain(visible)
+            .chain(neighbours.into_iter().flatten())
+        {
+            let p = p as u32;
+            if (p as usize) < l.len() && self.text.needs_geom(p) && !urgent.contains(&p) {
+                urgent.push(p);
+            }
+        }
+        if urgent != self.last_text_urgent {
+            self.handle.want_text(urgent.clone(), self.text_seen);
+            self.last_text_urgent = urgent;
+        }
+
+        if !self.warm && l.len() <= WARM_MAX_PAGES && self.got_first_tile && !tiles_pending {
+            self.warm = true;
+        }
+        let want = !self.text.all_known()
+            && !self.text.full()
+            && (self.find.open || self.pending_copy || self.warm);
+        if want != self.sweep_on {
+            let from = match self.sel {
+                Some(s) if self.pending_copy => s.start.page,
+                _ => current as u32,
+            };
+            self.handle.sweep(want.then_some(from));
+            self.sweep_on = want;
+        }
     }
 }
 
@@ -483,7 +683,7 @@ fn paint_toast(
         rect,
         size.y / 2.0,
         Stroke::new(1.0, theme.separator.gamma_multiply(alpha)),
-        egui::StrokeKind::Inside,
+        StrokeKind::Inside,
     );
     painter.galley(rect.min + pad, galley, theme.text);
     ui.ctx().request_repaint_after(Duration::from_millis(30));
@@ -516,12 +716,20 @@ impl Document for PdfDoc {
 
     fn on_visibility(&mut self, visible: bool) {
         if !visible {
-            // Hidden tabs keep only tiles at the current scale.
+            // Hidden tabs keep only tiles at the current scale…
             if let Some(s) = self.settled_scale {
                 self.tiles.retain(|k, _| k.scale == s);
             }
             self.handle.want(Vec::new());
             self.last_wanted.clear();
+            // …and no geometry beyond what was on screen; text stays (it's small).
+            // The next visible frame asks again for whatever it needs.
+            self.handle.want_text(Vec::new(), self.text_seen);
+            self.handle.sweep(None);
+            self.last_text_urgent.clear();
+            self.sweep_on = false;
+            self.text.drop_geom_except(self.frame);
+            self.gesture = Gesture::None;
         }
     }
 
@@ -548,5 +756,260 @@ impl Document for PdfDoc {
             }
             State::Ready(_) => self.show(ui),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use egui::{Event as In, PointerButton};
+    use whir_core::find_bar::FindStatus;
+    use whir_core::{Library, Waker};
+
+    use super::*;
+    use crate::engine::test_support::{NoTextures, pdfium_lock, test_pdf};
+
+    const NONE: Modifiers = Modifiers::NONE;
+
+    /// Drives a `PdfDoc` through egui frames: no window, no GPU (tiles fail,
+    /// which the viewer tolerates), the real PDF thread and pdfium.dll.
+    struct Harness {
+        ctx: egui::Context,
+        doc: PdfDoc,
+        textures: Arc<dyn TextureRegistry>,
+        screen: Rect,
+        time: f64,
+        copied: Vec<String>,
+    }
+
+    impl Harness {
+        fn new(path: PathBuf) -> Self {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::empty();
+            let data = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf").expect("Segoe UI");
+            fonts
+                .font_data
+                .insert("ui".into(), Arc::new(egui::FontData::from_owned(data)));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.insert(family, vec!["ui".into()]);
+            }
+            ctx.set_fonts(fonts);
+            let textures: Arc<dyn TextureRegistry> = Arc::new(NoTextures);
+            let cx = OpenCx {
+                textures: textures.clone(),
+                waker: Waker::noop(),
+                library: Library::at(std::env::temp_dir(), Waker::noop()),
+            };
+            Self {
+                ctx,
+                doc: PdfDoc::open(path, &cx),
+                textures,
+                screen: Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0)),
+                time: 1.0,
+                copied: Vec::new(),
+            }
+        }
+
+        fn frame(&mut self, events: Vec<In>, modifiers: Modifiers) {
+            self.time += 1.0 / 60.0;
+            let mut all = vec![In::ModifiersChanged(modifiers)];
+            all.extend(events);
+            let input = egui::RawInput {
+                screen_rect: Some(self.screen),
+                time: Some(self.time),
+                events: all,
+                ..Default::default()
+            };
+            let (doc, textures) = (&mut self.doc, &self.textures);
+            let waker = Waker::noop();
+            let mut requests = Vec::new();
+            let mut out = self.ctx.run_ui(input, |ui| {
+                let mut cx = DocCx {
+                    textures,
+                    waker: &waker,
+                    just_activated: false,
+                    requests: &mut requests,
+                };
+                doc.ui(ui, &mut cx);
+            });
+            for c in std::mem::take(&mut out.platform_output.commands) {
+                if let egui::OutputCommand::CopyText(s) = c {
+                    self.copied.push(s);
+                }
+            }
+            out.drop_without_applying_deltas();
+        }
+
+        fn idle(&mut self) {
+            self.frame(Vec::new(), NONE);
+        }
+
+        /// Run frames until `done` (the PDF thread works in the background).
+        fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+            let t0 = Instant::now();
+            while !done(self) {
+                assert!(t0.elapsed() < Duration::from_secs(10), "timed out: {what}");
+                std::thread::sleep(Duration::from_millis(5));
+                self.idle();
+            }
+        }
+
+        /// A screen point `fx` of the way across char `k` of `page`.
+        fn at(&mut self, page: u32, k: usize, fx: f32) -> Pos2 {
+            let State::Ready(l) = &self.doc.state else {
+                panic!("not open");
+            };
+            let l = l.clone();
+            let vw = self.screen.width() as f64;
+            let zoom = l.fit_width_zoom(vw - 14.0);
+            let v = View {
+                vp: self.screen,
+                zoom,
+                x_off: ((vw - l.content_width() * zoom) / 2.0).max(0.0),
+                sx: self.doc.sx.offset,
+                sy: self.doc.sy.offset,
+                ppp: self.ctx.pixels_per_point() as f64,
+            };
+            let frame = self.doc.frame;
+            let b = self.doc.text.geom(page, frame).expect("geometry").boxes[k];
+            let r = v.to_screen(v.page_rect(&l, page as usize), b);
+            pos2(r.left() + r.width() * fx, r.center().y)
+        }
+
+        fn button(&mut self, p: Pos2, pressed: bool, modifiers: Modifiers) {
+            let e = In::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            self.frame(vec![e], modifiers);
+        }
+
+        fn click(&mut self, p: Pos2, modifiers: Modifiers) {
+            self.frame(vec![In::PointerMoved(p)], modifiers);
+            self.button(p, true, modifiers);
+            self.button(p, false, modifiers);
+        }
+
+        fn key(&mut self, key: Key, modifiers: Modifiers) {
+            let e = |pressed| In::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            };
+            self.frame(vec![e(true), e(false)], modifiers);
+        }
+
+        /// Ctrl+C, and what reached the clipboard (if anything).
+        fn copy(&mut self) -> Option<String> {
+            self.frame(vec![In::Copy], NONE);
+            self.copied.pop()
+        }
+    }
+
+    /// Selection by drag, click counts, Shift, keyboard and Ctrl+A; copy; find.
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn select_copy_and_find() {
+        let _pdfium = pdfium_lock();
+        let path = std::env::temp_dir().join(format!("whir-pdf-ui-{}.pdf", std::process::id()));
+        std::fs::write(&path, test_pdf()).unwrap();
+        let mut h = Harness::new(path.clone());
+        h.until("page 0's text and geometry", |h| {
+            h.doc.text.has_text(0) == Some(true) && !h.doc.text.needs_geom(0)
+        });
+        let chars = String::from_utf16_lossy(&h.doc.text.page(0).unwrap().chars);
+        assert!(chars.starts_with("Hello world"), "{chars:?}");
+        let second = chars.find("second").unwrap();
+
+        // Drag across "Hello".
+        let (a, b) = (h.at(0, 0, 0.1), h.at(0, 4, 0.9));
+        h.frame(vec![In::PointerMoved(a)], NONE);
+        h.button(a, true, NONE);
+        h.frame(vec![In::PointerMoved(a.lerp(b, 0.5))], NONE);
+        h.frame(vec![In::PointerMoved(b)], NONE);
+        h.button(b, false, NONE);
+        assert_eq!(h.copy().as_deref(), Some("Hello"));
+
+        // A plain click leaves nothing to copy.
+        let p = h.at(0, 2, 0.5);
+        h.click(p, NONE);
+        assert_eq!(h.copy(), None);
+
+        // Double-click: the word; triple-click: the line.
+        let w = h.at(0, 8, 0.5);
+        h.click(w, NONE);
+        h.click(w, NONE);
+        assert_eq!(h.copy().as_deref(), Some("world"));
+        let s = h.at(0, second + 2, 0.5);
+        h.click(s, NONE);
+        h.click(s, NONE);
+        h.click(s, NONE);
+        assert_eq!(h.copy().as_deref().map(str::trim_end), Some("second line"));
+
+        // Shift+click extends from the anchor; Shift(+Ctrl)+Left shrinks it.
+        let (p, q) = (h.at(0, 0, 0.1), h.at(0, 10, 0.9));
+        h.click(p, NONE);
+        h.click(q, Modifiers::SHIFT);
+        assert_eq!(h.copy().as_deref(), Some("Hello world"));
+        h.key(Key::ArrowLeft, Modifiers::SHIFT);
+        assert_eq!(h.copy().as_deref(), Some("Hello worl"));
+        h.key(Key::ArrowLeft, Modifiers::CTRL | Modifiers::SHIFT);
+        assert_eq!(h.copy().as_deref(), Some("Hello "));
+
+        // Ctrl+A copies both pages (waiting for page 1's text if needed).
+        h.key(Key::A, Modifiers::CTRL);
+        h.frame(vec![In::Copy], NONE);
+        h.until("the whole-document copy", |h| !h.copied.is_empty());
+        let all = h.copied.pop().unwrap();
+        assert_eq!(all.matches("second line").count(), 2, "{all:?}");
+        assert!(!all.contains('Z') && !all.contains('\r'), "{all:?}");
+
+        // Find (case-insensitive) from the selection's start: page 0 first.
+        // Typing goes to the field: its Space doesn't page the document down.
+        h.key(Key::F, Modifiers::CTRL);
+        assert!(h.doc.find.open);
+        h.frame(vec![In::Text("SECOND".into())], NONE);
+        h.key(Key::Space, NONE);
+        h.frame(vec![In::Text(" LINE".into())], NONE);
+        h.until("both matches", |h| {
+            h.doc.search.total() == 2 && !h.doc.search.pending() && h.doc.text.all_known()
+        });
+        assert_eq!(h.doc.find.query, "SECOND LINE");
+        assert_eq!(h.doc.sy.offset, 0.0);
+        let (page, m) = h.doc.search.current().expect("a current match");
+        assert_eq!((page, m.start as usize, m.len), (0, second, 11));
+        assert_eq!(
+            h.doc.find_status(),
+            FindStatus::Results {
+                current: Some(0),
+                total: 2,
+                more: false
+            }
+        );
+        // Enter steps to page 1 and scrolls it into view.
+        h.key(Key::Enter, NONE);
+        let (page, m) = h.doc.search.current().expect("a current match");
+        assert_eq!(page, 1);
+        h.until("the match on screen", |h| {
+            h.doc.pending_reveal.is_none() && !h.doc.text.needs_geom(1)
+        });
+        let on_screen = h.at(1, m.start as usize, 0.5);
+        assert!(h.screen.contains(on_screen), "{on_screen:?}");
+        assert!(h.doc.sy.offset > 0.0);
+        // Esc closes the bar and leaves the match selected.
+        h.key(Key::Escape, NONE);
+        assert!(!h.doc.find.open);
+        assert_eq!(h.copy().as_deref(), Some("second line"));
+
+        drop(h);
+        // Let the PDF thread close the document before the lock is released.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::fs::remove_file(&path);
     }
 }

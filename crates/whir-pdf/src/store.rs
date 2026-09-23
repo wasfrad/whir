@@ -3,6 +3,7 @@
 //! only for pages near the viewport, in a small LRU.
 
 use crate::geom::PageGeom;
+use crate::search::PageUnits;
 use crate::text::{self, PageText};
 
 /// Geometry for this many bytes of pages stays cached.
@@ -16,6 +17,8 @@ pub struct PageChars {
     pub hyphens: Vec<u32>,
     /// [`text::soft_ranges`], precomputed for search.
     pub soft: Vec<(u32, u32)>,
+    /// Has something besides whitespace and invisible units: selectable.
+    pub visible: bool,
 }
 
 impl PageChars {
@@ -72,18 +75,15 @@ impl TextStore {
             return false;
         };
         let known_before = slot.text.is_some() || slot.failed;
-        if keep_geom {
-            match t.geom {
-                Some(g) => {
-                    if let Some(old) = slot.geom.take() {
-                        self.geom_bytes -= old.bytes();
-                    }
-                    self.geom_bytes += g.bytes();
-                    slot.geom = Some(g);
-                    slot.geom_used = frame;
-                }
-                None => slot.no_geom = !t.failed,
+        slot.no_geom |= t.no_geom;
+        // (Sweep pages come without geometry; that says nothing about the page.)
+        if keep_geom && let Some(g) = t.geom {
+            if let Some(old) = slot.geom.take() {
+                self.geom_bytes -= old.bytes();
             }
+            self.geom_bytes += g.bytes();
+            slot.geom = Some(g);
+            slot.geom_used = frame;
         }
         if known_before {
             return false;
@@ -100,16 +100,17 @@ impl TextStore {
             let soft = text::soft_ranges(&t.chars, &t.hyphens);
             let mut chars = t.chars;
             chars.shrink_to_fit();
+            let visible = chars
+                .iter()
+                .any(|&u| !text::is_space(u) && !text::is_ignorable(u));
             let pc = PageChars {
                 chars,
                 hyphens: t.hyphens,
                 soft,
+                visible,
             };
             self.text_bytes += pc.bytes();
-            self.any_text |= pc
-                .chars
-                .iter()
-                .any(|&u| !text::is_space(u) && !text::is_ignorable(u));
+            self.any_text |= visible;
             slot.text = Some(pc);
         }
         self.known += 1;
@@ -122,6 +123,7 @@ impl TextStore {
             chars: Vec::new(),
             hyphens: Vec::new(),
             soft: Vec::new(),
+            visible: false,
         };
         let slot = self.slots.get(page as usize)?;
         match &slot.text {
@@ -132,7 +134,7 @@ impl TextStore {
     }
 
     /// Units and soft ranges, as search wants them.
-    pub fn search_text(&self, page: u32) -> Option<(&[u16], &[(u32, u32)])> {
+    pub fn search_text(&self, page: u32) -> Option<PageUnits<'_>> {
         self.page(page).map(|t| (&t.chars[..], &t.soft[..]))
     }
 
@@ -143,6 +145,22 @@ impl TextStore {
         slot.geom.as_ref()
     }
 
+    /// Mark the page's geometry (if any) used this frame.
+    pub fn touch_geom(&mut self, page: u32, frame: u64) {
+        if let Some(s) = self.slots.get_mut(page as usize) {
+            s.geom_used = frame;
+        }
+    }
+
+    /// Geometry and characters together (hit-testing needs both), marking
+    /// the geometry used this frame.
+    pub fn page_geom(&mut self, page: u32, frame: u64) -> Option<(&PageGeom, &[u16])> {
+        let slot = self.slots.get_mut(page as usize)?;
+        slot.geom_used = frame;
+        let slot = &*slot;
+        Some((slot.geom.as_ref()?, &slot.text.as_ref()?.chars))
+    }
+
     /// Worth asking the PDF thread for this page's geometry.
     pub fn needs_geom(&self, page: u32) -> bool {
         self.available
@@ -150,12 +168,12 @@ impl TextStore {
                 s.geom.is_none()
                     && !s.failed
                     && !s.no_geom
-                    && s.text.as_ref().is_none_or(|t| !t.chars.is_empty())
+                    && s.text.as_ref().is_none_or(|t| t.visible)
             })
     }
 
     /// `None`: not known yet; `Some(false)`: nothing selectable (scanned page,
-    /// unreadable page, or no text API).
+    /// only invisible text, unreadable page, or no text API).
     pub fn has_text(&self, page: u32) -> Option<bool> {
         if !self.available {
             return Some(false);
@@ -164,7 +182,7 @@ impl TextStore {
         if slot.failed {
             return Some(false);
         }
-        slot.text.as_ref().map(|t| !t.chars.is_empty())
+        slot.text.as_ref().map(|t| t.visible)
     }
 
     pub fn all_known(&self) -> bool {
@@ -240,6 +258,7 @@ mod tests {
                     dir: 1,
                 }],
             }),
+            no_geom: false,
             failed: false,
         }
     }
@@ -259,6 +278,15 @@ mod tests {
         assert!(s.insert(1, page_text("x", 1), false, 3));
         assert!(s.geom(1, 3).is_none());
         assert!(s.needs_geom(1));
+        // A sweep result (no geometry) for a nearby page doesn't block asking.
+        assert!(!s.insert(1, page_text("x", 0), true, 3));
+        assert!(s.needs_geom(1));
+        // A page whose geometry can't exist isn't asked for again.
+        let mut degenerate = page_text("x", 0);
+        degenerate.no_geom = true;
+        assert!(!s.insert(1, degenerate, true, 3));
+        assert!(!s.needs_geom(1));
+        assert_eq!(s.has_text(1), Some(true));
         // A failed page is known and empty.
         assert!(s.insert(2, PageText::failed(), true, 3));
         assert_eq!(s.has_text(2), Some(false));
