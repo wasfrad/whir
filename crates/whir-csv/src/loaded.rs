@@ -111,6 +111,8 @@ pub struct SaveState {
     pub progress: Arc<AtomicU64>,
     pub total: u64,
     pub kind: SaveKind,
+    /// File name of the target (for messages).
+    pub target_name: String,
 }
 
 /// A save that failed and how the banner offers to recover.
@@ -282,7 +284,7 @@ impl Loaded {
     }
 
     /// Absorb finished sort and find work. Returns a finished save, if any.
-    pub fn poll(&mut self) -> Option<(SaveKind, SaveOutcome)> {
+    pub fn poll(&mut self) -> Option<(SaveKind, String, SaveOutcome)> {
         use std::sync::mpsc::TryRecvError;
         // Sort results (a worker that died without answering counts as failed,
         // so row edits don't stay blocked).
@@ -350,8 +352,10 @@ impl Loaded {
             Err(TryRecvError::Empty) => None,
         });
         done.map(|outcome| {
-            let kind = self.saving.take().map_or(SaveKind::Own, |s| s.kind);
-            (kind, outcome)
+            let s = self.saving.take();
+            let (kind, name) =
+                s.map_or((SaveKind::Own, String::new()), |s| (s.kind, s.target_name));
+            (kind, name, outcome)
         })
     }
 

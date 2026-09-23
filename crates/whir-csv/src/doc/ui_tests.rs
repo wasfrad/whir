@@ -642,6 +642,7 @@ fn nothing_changes_while_saving() {
         progress: Default::default(),
         total: 1,
         kind: SaveKind::Own,
+        target_name: "t.csv".into(),
     });
     h.select(0, 0);
     h.type_text("x");

@@ -118,6 +118,10 @@ impl CsvDoc {
         };
         let input = l.stream_input();
         let total = input.source.len();
+        let target_name = match &target {
+            SaveTarget::Path(p) => title_of(p),
+            SaveTarget::Library { stem, .. } => format!("{stem}.csv"),
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
         let job = SaveJob {
@@ -137,6 +141,7 @@ impl CsvDoc {
             progress,
             total,
             kind,
+            target_name,
         });
         SaveResult::Started
     }
@@ -165,8 +170,7 @@ impl CsvDoc {
     }
 
     /// A finished save: show the new file (or report why it failed).
-    fn finish_save(&mut self, kind: SaveKind, outcome: SaveOutcome) {
-        let name = self.file_name();
+    fn finish_save(&mut self, kind: SaveKind, name: String, outcome: SaveOutcome) {
         let waker = self.waker.clone();
         match outcome {
             SaveOutcome::Saved(saved) => {
@@ -385,8 +389,8 @@ impl Document for CsvDoc {
             Phase::Ready(l) => l.poll(),
             _ => None,
         };
-        if let Some((kind, outcome)) = done {
-            self.finish_save(kind, outcome);
+        if let Some((kind, name, outcome)) = done {
+            self.finish_save(kind, name, outcome);
         }
     }
 
