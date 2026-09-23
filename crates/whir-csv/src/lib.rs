@@ -3,6 +3,7 @@
 //! A background pass indexes every 64th row; the grid parses only the rows on
 //! screen. Find and sort stream through the file on their own threads.
 
+mod bulk;
 mod dialect;
 mod doc;
 mod edit;
@@ -16,6 +17,7 @@ mod menu;
 mod ops;
 mod order;
 mod parse;
+mod paste;
 mod scan;
 mod show;
 mod sort;

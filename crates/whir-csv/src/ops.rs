@@ -49,6 +49,32 @@ fn selection(r: SelRange) -> Selection {
     }
 }
 
+/// The file's value of a cell (untruncated): "" for added rows and columns.
+pub(crate) fn base_value_of(table: &mut crate::table::Table, k: RowKey, c: ColKey) -> String {
+    let Some(f) = c.as_orig() else {
+        return String::new();
+    };
+    let file_row = match k.as_orig() {
+        Some(r) => r + 1,
+        None if k.is_header() => 0,
+        None => return String::new(),
+    };
+    let Some((block, i)) = table.row(file_row) else {
+        return String::new();
+    };
+    let Some(row) = block.row(i) else {
+        return String::new();
+    };
+    if row.is_truncated(f) {
+        table
+            .read_full_row(file_row)
+            .and_then(|mut v| (f < v.len()).then(|| v.swap_remove(f)))
+            .unwrap_or_default()
+    } else {
+        row.cell(f).to_owned()
+    }
+}
+
 impl Loaded {
     pub fn is_dirty(&self) -> bool {
         self.edits.is_dirty()
@@ -96,7 +122,7 @@ impl Loaded {
     }
 
     /// Say why something can't happen; true if it can.
-    fn check(&mut self, gate: Gate) -> bool {
+    pub(crate) fn check(&mut self, gate: Gate) -> bool {
         match gate {
             Gate::Yes => true,
             Gate::No(why) => {
@@ -148,6 +174,21 @@ impl Loaded {
             Action::Rename(col) => self.start_rename(ui.ctx(), col),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
+            Action::Paste(text) => self.paste(&text),
+            Action::RequestPaste => {
+                // The shell answers with an Event::Paste next frame.
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            Action::Cut => {
+                if self.check(self.editable().cells) {
+                    self.copy(ui);
+                    self.clear("Cut");
+                }
+            }
+            Action::Clear => self.clear("Clear"),
+            Action::FillDown => self.fill(true),
+            Action::FillRight => self.fill(false),
             _ => {}
         }
     }
@@ -176,28 +217,7 @@ impl Loaded {
 
     /// The file's value of a cell (untruncated).
     pub(crate) fn base_value(&mut self, k: RowKey, c: ColKey) -> String {
-        let Some(f) = c.as_orig() else {
-            return String::new();
-        };
-        let file_row = match k.as_orig() {
-            Some(r) => r + 1,
-            None if k.is_header() => 0,
-            None => return String::new(),
-        };
-        let Some((block, i)) = self.table.row(file_row) else {
-            return String::new();
-        };
-        let Some(row) = block.row(i) else {
-            return String::new();
-        };
-        if row.is_truncated(f) {
-            self.table
-                .read_full_row(file_row)
-                .and_then(|mut v| (f < v.len()).then(|| v.swap_remove(f)))
-                .unwrap_or_default()
-        } else {
-            row.cell(f).to_owned()
-        }
+        base_value_of(&mut self.table, k, c)
     }
 
     /// A cell's current value (edited or from the file).
@@ -440,7 +460,7 @@ impl Loaded {
                     return;
                 };
                 let value: Arc<str> = Arc::from(ed.text.as_str());
-                self.set_range(r, "Fill", |_, _| Some(value.clone()));
+                self.edit_range(r, "Fill", |_, _, _| Some(value.clone()));
                 self.grid.sel = sel;
             }
             _ => self.commit_editor(Some(ctx), Move::Stay),
@@ -490,44 +510,6 @@ impl Loaded {
         if let Some(ed) = self.editor.as_mut() {
             ed.show(ui, cell, clip, theme);
         }
-    }
-
-    // --- bulk changes ---------------------------------------------------------
-
-    /// Set every cell of `range` (display coordinates, real cells) to what
-    /// `value(row, col)` says (`None`: leave it). One undo step.
-    pub(crate) fn set_range(
-        &mut self,
-        range: Selection,
-        label: &'static str,
-        mut value: impl FnMut(u64, usize) -> Option<Arc<str>>,
-    ) -> usize {
-        let (r0, r1) = range.rows();
-        let (c0, c1) = range.cols();
-        let compare = r1 - r0 < COMPARE_ROWS;
-        let mut changes = Vec::new();
-        for r in r0..=r1 {
-            let Some(k) = self.view().key(r) else {
-                continue;
-            };
-            for c in c0..=c1 {
-                let Some(v) = value(r, c) else { continue };
-                let ck = self.edits.col_key(c);
-                let v = if compare {
-                    self.normalized(k, ck, &v)
-                } else {
-                    Some(v)
-                };
-                changes.push((k, ck, v));
-            }
-        }
-        let n = changes.len();
-        let before = self.grid.sel.map(sel_range);
-        let mut tx = self.edits.tx(label);
-        tx.set_cells(changes);
-        let applied = tx.commit(before, Some(sel_range(range)));
-        self.follow(&applied.effects);
-        n
     }
 
     // --- undo / redo --------------------------------------------------------

@@ -15,6 +15,8 @@ pub(crate) struct Harness {
     pub ctx: egui::Context,
     pub doc: CsvDoc,
     pub requests: Vec<DocRequest>,
+    /// Viewport commands of the last frame (e.g. RequestPaste).
+    pub commands: Vec<egui::ViewportCommand>,
     time: f64,
     textures: Arc<dyn TextureRegistry>,
     _dir: PathBuf,
@@ -35,6 +37,7 @@ impl Harness {
             ctx: egui::Context::default(),
             doc,
             requests: Vec::new(),
+            commands: Vec::new(),
             time: 0.0,
             textures: cx.textures.clone(),
             _dir: dir,
@@ -51,6 +54,7 @@ impl Harness {
             ctx: egui::Context::default(),
             doc: new_blank(&cx),
             requests: Vec::new(),
+            commands: Vec::new(),
             time: 0.0,
             textures: cx.textures.clone(),
             _dir: dir,
@@ -72,6 +76,7 @@ impl Harness {
             doc,
             requests,
             textures,
+            commands,
             ..
         } = self;
         let waker = Waker::noop();
@@ -84,6 +89,11 @@ impl Harness {
             };
             doc.ui(ui, &mut cx);
         });
+        *commands = out
+            .viewport_output
+            .values()
+            .flat_map(|v| v.commands.clone())
+            .collect();
         out.drop_without_applying_deltas();
     }
 
@@ -327,4 +337,126 @@ fn ctrl_enter_fills_the_selection() {
     h.key(Key::Z, Modifiers::CTRL);
     assert_eq!(h.cell(1, 2), "2");
     let _ = pos2(0.0, 0.0);
+}
+
+fn paste(h: &mut Harness, text: &str) {
+    h.frame(vec![Event::Paste(text.into())]);
+}
+
+fn range(h: &mut Harness, r0: u64, c0: usize, r1: u64, c1: usize) {
+    h.l().grid.sel = Some(Selection {
+        anchor: CellPos { row: r0, col: c0 },
+        cursor: CellPos { row: r1, col: c1 },
+    });
+}
+
+#[test]
+fn paste_blocks_grow_the_table() {
+    let mut h = Harness::open("ui-paste", DATA);
+    h.select(0, 1);
+    paste(&mut h, "x\ty\n\"two\nlines\"\tz\n");
+    assert_eq!(h.cell(0, 1), "x");
+    assert_eq!(h.cell(0, 2), "y");
+    assert_eq!(h.cell(1, 1), "two\nlines");
+    assert_eq!(h.cursor(), (1, 2));
+    // Past the last row and column: rows and a "Column 4" are added.
+    let rows = h.l().rows();
+    h.select(rows - 1, 2);
+    paste(&mut h, "a\tb\nc\td\n");
+    assert_eq!(h.l().rows(), rows + 1);
+    assert_eq!(h.l().grid.cols(), 4);
+    assert_eq!(h.cell(rows, 3), "d");
+    let head = h.l().view().header().cell(3).text.to_owned();
+    assert_eq!(head, "Column 4");
+    // One undo step removes both again.
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.l().rows(), rows);
+    assert_eq!(h.l().grid.cols(), 3);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(!h.doc.is_dirty());
+}
+
+#[test]
+fn paste_one_value_fills_and_commas_stay() {
+    let mut h = Harness::open("ui-paste-fill", DATA);
+    range(&mut h, 0, 2, 2, 2);
+    paste(&mut h, "1,234\n");
+    for r in 0..3 {
+        assert_eq!(h.cell(r, 2), "1,234");
+    }
+    // Pasting the file's own values back leaves nothing to save.
+    range(&mut h, 0, 2, 0, 2);
+    paste(&mut h, "1\n2\n3\n");
+    assert!(!h.doc.is_dirty());
+}
+
+#[test]
+fn cut_clear_and_fill() {
+    let mut h = Harness::open("ui-cut", DATA);
+    range(&mut h, 0, 0, 1, 0);
+    h.frame(vec![Event::Cut]);
+    assert_eq!(h.cell(0, 0), "");
+    assert_eq!(h.cell(1, 0), "");
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.cell(0, 0), "Ann");
+    // Delete clears; clearing an empty cell changes nothing.
+    h.select(2, 1);
+    h.key(Key::Delete, NONE);
+    assert_eq!(h.cell(2, 1), "");
+    h.key(Key::Delete, NONE);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(!h.doc.is_dirty(), "one step: the second Delete did nothing");
+    // Ctrl+D: the top row down; one row: from the row above.
+    range(&mut h, 0, 1, 2, 2);
+    h.key(Key::D, Modifiers::CTRL);
+    assert_eq!(h.cell(2, 1), "Oslo");
+    assert_eq!(h.cell(1, 2), "1");
+    h.select(1, 0);
+    h.key(Key::D, Modifiers::CTRL);
+    assert_eq!(h.cell(1, 0), "Ann");
+    // Ctrl+R: the left column right.
+    range(&mut h, 2, 0, 2, 2);
+    h.key(Key::R, Modifiers::CTRL);
+    assert_eq!(h.cell(2, 2), "Cy");
+}
+
+#[test]
+fn menu_paste_asks_the_shell() {
+    let mut h = Harness::open("ui-menu-paste", DATA);
+    h.select(0, 0);
+    let ctx = h.ctx.clone();
+    let out = ctx.run_ui(RawInput::default(), |ui| {
+        h.l()
+            .apply(crate::grid::Action::RequestPaste, ui, &Waker::noop());
+    });
+    let asked = out.viewport_output.values().any(|v| {
+        v.commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::RequestPaste))
+    });
+    out.drop_without_applying_deltas();
+    assert!(asked);
+    // The shell's answer arrives as a paste event.
+    paste(&mut h, "p");
+    assert_eq!(h.cell(0, 0), "p");
+}
+
+#[test]
+fn find_results_follow_edits() {
+    let mut h = Harness::open("ui-find", DATA);
+    let waker = Waker::noop();
+    h.l().start_find("zz".into(), &waker);
+    wait_for(|| {
+        h.doc.poll();
+        !h.l().find.running
+    });
+    assert!(h.l().find.display.is_empty());
+    h.select(1, 1);
+    h.type_text("xzzx");
+    h.key(Key::Enter, NONE);
+    assert_eq!(h.l().find.display, [(1, 1)]);
+    h.select(1, 1);
+    h.type_text("no");
+    h.key(Key::Enter, NONE);
+    assert!(h.l().find.display.is_empty());
 }
