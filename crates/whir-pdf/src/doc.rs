@@ -95,7 +95,8 @@ impl PdfDoc {
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Event::Opened { pages } => self.state = State::Ready(Layout::new(pages)),
+                Event::Opened { pages, .. } => self.state = State::Ready(Layout::new(pages)),
+                Event::Text { .. } => {}
                 Event::Failed(e) => self.state = State::Failed(e),
                 Event::Tile { key, texture } => {
                     self.got_first_tile = true;

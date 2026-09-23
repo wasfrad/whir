@@ -2,6 +2,10 @@
 //! library, every document and every page. Documents send it the set of tiles
 //! they currently want (visible first); a newer request preempts an in-flight
 //! render between page objects via `IFSDK_PAUSE`.
+//!
+//! Text extraction runs on the same thread, strictly after tiles: one page
+//! at a time (it can't be interrupted), urgent pages (visible, need geometry)
+//! before the background sweep that feeds search.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
@@ -9,11 +13,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use whir_core::texture::{Filter, PixelFormat, TextureDesc, TextureRegistry, UserTexture};
 use whir_core::{FileSource, Waker};
 
-use crate::ffi::{self, Api};
+use crate::ffi::{self, Api, TextApi};
+use crate::geom::{Affine, NO_BOX, PageGeom, build_lines, is_empty};
+use crate::text::PageText;
 
 /// One rendered piece of a page at one scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,6 +44,8 @@ pub struct Job {
 pub enum Event {
     Opened {
         pages: Vec<[f32; 2]>,
+        /// pdfium.dll has the text API (selection and search work).
+        text: bool,
     },
     Failed(String),
     Tile {
@@ -46,6 +55,11 @@ pub enum Event {
     /// The page couldn't be loaded/rendered/uploaded; don't ask again.
     TileFailed {
         key: TileKey,
+    },
+    /// A page's text (with geometry if it was asked for urgently).
+    Text {
+        page: u32,
+        text: Box<PageText>,
     },
 }
 
@@ -60,6 +74,17 @@ enum Cmd {
     Want {
         doc: u64,
         jobs: Vec<Job>,
+    },
+    /// Pages whose text and geometry are needed now (replaces the last list).
+    WantText {
+        doc: u64,
+        pages: Vec<u32>,
+    },
+    /// `Some(p)`: extract every page not sent yet, starting at `p`, wrapping.
+    /// `None`: stop.
+    Sweep {
+        doc: u64,
+        from: Option<u32>,
     },
     Close {
         doc: u64,
@@ -92,6 +117,11 @@ fn send(cmd: Cmd) {
     let _ = e.tx.send(cmd);
 }
 
+/// Send without pausing the current render: text requests never preempt tiles.
+fn send_quiet(cmd: Cmd) {
+    let _ = engine().tx.send(cmd);
+}
+
 /// Handle a document holds; closing it releases everything on the PDF thread.
 pub struct DocHandle {
     id: u64,
@@ -120,6 +150,19 @@ impl DocHandle {
     pub fn want(&self, jobs: Vec<Job>) {
         send(Cmd::Want { doc: self.id, jobs });
     }
+
+    /// Replace the pages whose text and geometry are needed soon (in order).
+    pub fn want_text(&self, pages: Vec<u32>) {
+        send_quiet(Cmd::WantText {
+            doc: self.id,
+            pages,
+        });
+    }
+
+    /// Start (from a page) or stop extracting every page's text in the background.
+    pub fn sweep(&self, from: Option<u32>) {
+        send_quiet(Cmd::Sweep { doc: self.id, from });
+    }
 }
 
 impl Drop for DocHandle {
@@ -140,9 +183,96 @@ struct OpenDoc {
     textures: Arc<dyn TextureRegistry>,
     pages: VecDeque<(u32, ffi::Page)>,
     wanted: VecDeque<Job>,
+    /// Page sizes (display points), for the text transform.
+    sizes: Vec<[f32; 2]>,
+    text: TextQueue,
+    /// Sweep results sent without waking the UI yet (wakes are rate-limited).
+    wake_pending: bool,
+    last_wake: Instant,
 }
 
 const OPEN_PAGES: usize = 6;
+/// Sweep results wake the UI at most this often.
+const SWEEP_WAKE: Duration = Duration::from_millis(100);
+/// Characters extracted per page at most (a pathological page is truncated).
+const MAX_PAGE_CHARS: i32 = 500_000;
+
+impl OpenDoc {
+    fn wake(&mut self) {
+        self.waker.wake();
+        self.wake_pending = false;
+        self.last_wake = Instant::now();
+    }
+}
+
+/// Which pages' text to extract next, per document.
+#[derive(Default)]
+struct TextQueue {
+    /// Need geometry now; always first, re-extracted even if sent before
+    /// (the UI evicted the geometry).
+    urgent: VecDeque<u32>,
+    /// Background walk over every page: (next page, pages left to visit).
+    sweep: Option<(u32, u32)>,
+    /// Text already sent to the UI (which keeps it): the sweep skips these.
+    sent: Vec<bool>,
+}
+
+impl TextQueue {
+    fn new(pages: usize) -> Self {
+        Self {
+            sent: vec![false; pages],
+            ..Self::default()
+        }
+    }
+
+    fn set_urgent(&mut self, pages: Vec<u32>) {
+        let n = self.sent.len() as u32;
+        self.urgent = pages.into_iter().filter(|&p| p < n).collect();
+    }
+
+    fn set_sweep(&mut self, from: Option<u32>) {
+        let n = self.sent.len() as u32;
+        self.sweep = from.filter(|_| n > 0).map(|p| (p.min(n - 1), n));
+    }
+
+    fn has_work(&self) -> bool {
+        !self.urgent.is_empty() || self.sweep.is_some()
+    }
+
+    fn next_urgent(&mut self) -> Option<u32> {
+        self.urgent.pop_front()
+    }
+
+    /// The sweep's next unsent page; ends itself after one lap.
+    fn next_sweep(&mut self) -> Option<u32> {
+        let n = self.sent.len() as u32;
+        while let Some((next, left)) = self.sweep {
+            if left == 0 {
+                self.sweep = None;
+                break;
+            }
+            self.sweep = Some(((next + 1) % n, left - 1));
+            if !self.sent[next as usize] {
+                return Some(next);
+            }
+        }
+        None
+    }
+
+    /// `(page, urgent)`.
+    #[cfg(test)]
+    fn next(&mut self) -> Option<(u32, bool)> {
+        self.next_urgent()
+            .map(|p| (p, true))
+            .or_else(|| self.next_sweep().map(|p| (p, false)))
+    }
+
+    fn mark_sent(&mut self, page: u32) {
+        if let Some(s) = self.sent.get_mut(page as usize) {
+            *s = true;
+        }
+    }
+}
 
 unsafe extern "C" fn get_block(param: *mut c_void, position: u32, buf: *mut u8, size: u32) -> i32 {
     let file = unsafe { &*(param as *const FileSource) };
@@ -161,9 +291,15 @@ fn run(rx: Receiver<Cmd>, interrupt: Arc<AtomicBool>) {
     let mut docs: HashMap<u64, OpenDoc> = HashMap::new();
 
     loop {
-        // Block only when there's nothing to render.
-        let idle = docs.values().all(|d| d.wanted.is_empty());
+        // Block only when there's nothing to render or extract.
+        let idle = docs
+            .values()
+            .all(|d| d.wanted.is_empty() && !d.text.has_work());
         if idle {
+            // Rate-limited sweep wakes go out before we sleep.
+            for d in docs.values_mut().filter(|d| d.wake_pending) {
+                d.wake();
+            }
             match rx.recv() {
                 Ok(cmd) => handle(cmd, api, &mut docs),
                 Err(_) => return,
@@ -179,12 +315,24 @@ fn run(rx: Receiver<Cmd>, interrupt: Arc<AtomicBool>) {
         interrupt.store(false, Ordering::Release);
 
         let Ok(api) = api else { continue };
-        let Some((&doc_id, _)) = docs.iter().find(|(_, d)| !d.wanted.is_empty()) else {
+        // Tiles first, always.
+        if let Some((&doc_id, _)) = docs.iter().find(|(_, d)| !d.wanted.is_empty()) {
+            let job = docs.get_mut(&doc_id).and_then(|d| d.wanted.pop_front());
+            if let Some(job) = job {
+                render(api, &rx, &interrupt, &mut docs, doc_id, job);
+            }
             continue;
-        };
-        let job = docs.get_mut(&doc_id).and_then(|d| d.wanted.pop_front());
-        if let Some(job) = job {
-            render(api, &rx, &interrupt, &mut docs, doc_id, job);
+        }
+        // Then one page of text: any document's urgent pages before any sweep.
+        let next = docs
+            .iter_mut()
+            .find_map(|(&id, d)| d.text.next_urgent().map(|p| (id, p, true)))
+            .or_else(|| {
+                docs.iter_mut()
+                    .find_map(|(&id, d)| d.text.next_sweep().map(|p| (id, p, false)))
+            });
+        if let (Some((doc_id, page, urgent)), Some(t)) = (next, api.text.as_ref()) {
+            extract_and_send(api, t, &mut docs, doc_id, page, urgent);
         }
     }
 }
@@ -207,7 +355,8 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
             match result {
                 Ok((d, pages)) => {
                     docs.insert(doc, d);
-                    let _ = events.send(Event::Opened { pages });
+                    let text = api.is_ok_and(|a| a.text.is_some());
+                    let _ = events.send(Event::Opened { pages, text });
                 }
                 Err(e) => {
                     let _ = events.send(Event::Failed(e));
@@ -218,6 +367,21 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
         Cmd::Want { doc, jobs } => {
             if let Some(d) = docs.get_mut(&doc) {
                 d.wanted = jobs.into();
+            }
+        }
+        // Without the text API these stay empty, so nothing is ever extracted.
+        Cmd::WantText { doc, pages } => {
+            if let Some(d) = docs.get_mut(&doc)
+                && api.is_ok_and(|a| a.text.is_some())
+            {
+                d.text.set_urgent(pages);
+            }
+        }
+        Cmd::Sweep { doc, from } => {
+            if let Some(d) = docs.get_mut(&doc)
+                && api.is_ok_and(|a| a.text.is_some())
+            {
+                d.text.set_sweep(from);
             }
         }
         Cmd::Close { doc } => {
@@ -252,7 +416,7 @@ fn open_doc(
         return Err(msg);
     }
     let count = unsafe { (api.get_page_count)(handle) }.max(0);
-    let pages = (0..count)
+    let pages: Vec<[f32; 2]> = (0..count)
         .map(|i| {
             let mut s = ffi::SizeF::default();
             unsafe { (api.get_page_size_by_index_f)(handle, i, &mut s) };
@@ -269,6 +433,10 @@ fn open_doc(
             textures,
             pages: VecDeque::new(),
             wanted: VecDeque::new(),
+            sizes: pages.clone(),
+            text: TextQueue::new(pages.len()),
+            wake_pending: false,
+            last_wake: Instant::now(),
         },
         pages,
     ))
@@ -313,10 +481,10 @@ fn render(
     job: Job,
 ) {
     let [x, y, w, h] = job.rect;
-    let failed = |docs: &HashMap<u64, OpenDoc>| {
-        if let Some(d) = docs.get(&doc_id) {
+    let failed = |docs: &mut HashMap<u64, OpenDoc>| {
+        if let Some(d) = docs.get_mut(&doc_id) {
             let _ = d.events.send(Event::TileFailed { key: job.key });
-            d.waker.wake();
+            d.wake();
         }
     };
     if w == 0 || h == 0 {
@@ -419,7 +587,9 @@ fn render(
         failed(docs);
         return;
     }
-    let Some(d) = docs.get(&doc_id) else { return };
+    let Some(d) = docs.get_mut(&doc_id) else {
+        return;
+    };
     let desc = TextureDesc {
         width: w,
         height: h,
@@ -433,8 +603,327 @@ fn render(
                 key: job.key,
                 texture,
             });
-            d.waker.wake();
+            d.wake();
         }
         Err(_) => failed(docs),
+    }
+}
+
+// --- text ----------------------------------------------------------------------
+
+/// Extract one page's text and send it to its document. Urgent pages use the
+/// render page cache (they're on screen, so usually a hit) and carry
+/// geometry; sweep pages borrow a cached page if there is one, else load a
+/// temporary page, so the sweep never evicts pages the renderer needs.
+fn extract_and_send(
+    api: &Api,
+    t: &TextApi,
+    docs: &mut HashMap<u64, OpenDoc>,
+    doc_id: u64,
+    index: u32,
+    urgent: bool,
+) {
+    let Some(d) = docs.get_mut(&doc_id) else {
+        return;
+    };
+    let Some(&size) = d.sizes.get(index as usize) else {
+        return;
+    };
+    let (handle, temporary) = if urgent {
+        (page(api, d, index), false)
+    } else if let Some(&(_, p)) = d.pages.iter().find(|(i, _)| *i == index) {
+        (Some(p), false)
+    } else {
+        let p = unsafe { (api.load_page)(d.handle, index as i32) };
+        ((!p.is_null()).then_some(p), true)
+    };
+    let text = match handle {
+        Some(p) => {
+            let text = extract(t, p, size, urgent);
+            if temporary {
+                unsafe { (api.close_page)(p) };
+            }
+            text
+        }
+        None => PageText::failed(),
+    };
+    d.text.mark_sent(index);
+    let _ = d.events.send(Event::Text {
+        page: index,
+        text: Box::new(text),
+    });
+    if urgent || d.last_wake.elapsed() >= SWEEP_WAKE {
+        d.wake();
+    } else {
+        d.wake_pending = true;
+    }
+}
+
+/// Page space → display space for `page`, whose display size is `size`.
+fn page_affine(t: &TextApi, page: ffi::Page, size: [f32; 2]) -> Option<Affine> {
+    // A virtual device the size of a large square: PDFium maps the page onto
+    // it with its rotation and crop box; three corners pin the transform.
+    const S: i32 = 1 << 16;
+    let d2p = |dx: i32, dy: i32| {
+        let (mut x, mut y) = (0.0, 0.0);
+        let ok = unsafe { (t.device_to_page)(page, 0, 0, S, S, 0, dx, dy, &mut x, &mut y) };
+        (ok != 0).then_some([x, y])
+    };
+    let (p00, p10, p01) = (d2p(0, 0)?, d2p(S, 0)?, d2p(0, S)?);
+    Affine::from_corners(p00, p10, p01, size[0] as f64, size[1] as f64)
+}
+
+/// A glyph's box in page space: the loose (ascent/descent) box for upright
+/// text so lines highlight evenly, the tight box otherwise.
+fn char_box_page(t: &TextApi, tp: ffi::TextPage, i: i32) -> Option<[f64; 4]> {
+    const EPS: f32 = 1e-3;
+    let angle = unsafe { (t.char_angle)(tp, i) };
+    let upright = (0.0..EPS).contains(&angle)
+        || (std::f32::consts::TAU - EPS..=std::f32::consts::TAU).contains(&angle);
+    if upright {
+        let mut r = ffi::RectF::default();
+        if unsafe { (t.loose_box)(tp, i, &mut r) } != 0 {
+            let (w, h) = (r.right - r.left, r.top - r.bottom);
+            if [r.left, r.top, r.right, r.bottom]
+                .iter()
+                .all(|v| v.is_finite())
+                && w > 0.01
+                && h > 0.01
+            {
+                return Some([r.left as f64, r.bottom as f64, r.right as f64, r.top as f64]);
+            }
+        }
+    }
+    let (mut l, mut r, mut b, mut top) = (0.0, 0.0, 0.0, 0.0);
+    if unsafe { (t.char_box)(tp, i, &mut l, &mut r, &mut b, &mut top) } == 0 {
+        return None;
+    }
+    let ok = [l, r, b, top].iter().all(|v| v.is_finite()) && r > l && top > b;
+    ok.then_some([l, b, r, top])
+}
+
+/// Read a page's characters (and, if `geometry`, their boxes and lines).
+fn extract(t: &TextApi, page: ffi::Page, size: [f32; 2], geometry: bool) -> PageText {
+    let tp = unsafe { (t.load_page)(page) };
+    if tp.is_null() {
+        return PageText::failed();
+    }
+    let count = unsafe { (t.count_chars)(tp) };
+    if count < 0 {
+        unsafe { (t.close_page)(tp) };
+        return PageText::failed();
+    }
+    let n = count.min(MAX_PAGE_CHARS);
+    let xf = page_affine(t, page, size);
+    let (w, h) = (size[0], size[1]);
+    let mut chars = Vec::with_capacity(n as usize);
+    let mut boxes = Vec::with_capacity(n as usize);
+    let mut hyphens = Vec::new();
+    for i in 0..n {
+        let u = unsafe { (t.get_unicode)(tp, i) };
+        let mut unit = if u > 0xFFFF { 0xFFFD } else { u as u16 };
+        if unsafe { (t.is_hyphen)(tp, i) } == 1 {
+            hyphens.push(i as u32);
+        }
+        let generated = unsafe { (t.is_generated)(tp, i) } == 1;
+        let mut b = NO_BOX;
+        if let (false, Some(xf)) = (generated, xf)
+            && let Some([l, bottom, r, top]) = char_box_page(t, tp, i)
+        {
+            b = xf.map_rect(l, bottom, r, top);
+        }
+        // Text entirely outside the crop box is invisible: don't let search
+        // find it or selection land on it.
+        let outside = b[2] < -1.0 || b[0] > w + 1.0 || b[3] < -1.0 || b[1] > h + 1.0;
+        if !is_empty(&b) && outside {
+            unit = 0;
+            b = NO_BOX;
+        }
+        chars.push(unit);
+        boxes.push(b);
+    }
+    // Boxes are needed for the crop-box filter either way; lines only when asked.
+    let geom = (geometry && xf.is_some()).then(|| PageGeom {
+        lines: build_lines(&chars, &boxes),
+        boxes,
+    });
+    unsafe { (t.close_page)(tp) };
+    PageText {
+        chars,
+        hyphens,
+        geom,
+        failed: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_queue_order() {
+        let mut q = TextQueue::new(5);
+        assert!(!q.has_work());
+        q.set_sweep(Some(3));
+        // Out-of-range pages are dropped.
+        q.set_urgent(vec![1, 9]);
+        assert_eq!(q.next(), Some((1, true)));
+        q.mark_sent(1);
+        // The sweep starts at its page, wraps, and skips what was sent.
+        let mut order = Vec::new();
+        while let Some((p, urgent)) = q.next() {
+            assert!(!urgent);
+            q.mark_sent(p);
+            order.push(p);
+        }
+        assert_eq!(order, vec![3, 4, 0, 2]);
+        assert!(!q.has_work(), "one lap, then the sweep ends");
+        // Urgent pages are extracted again even if sent (geometry was evicted).
+        q.set_urgent(vec![3]);
+        assert_eq!(q.next(), Some((3, true)));
+        // A sweep over sent pages ends without yielding (no busy loop).
+        q.set_sweep(Some(0));
+        assert!(q.has_work());
+        assert_eq!(q.next(), None);
+        assert!(!q.has_work());
+    }
+
+    #[test]
+    fn text_queue_urgent_first_and_stop() {
+        let mut q = TextQueue::new(4);
+        q.set_sweep(Some(0));
+        assert_eq!(q.next(), Some((0, false)));
+        // Urgent pages jump ahead of the sweep, and a new list replaces the old.
+        q.set_urgent(vec![3, 2]);
+        q.set_urgent(vec![2]);
+        assert_eq!(q.next(), Some((2, true)));
+        assert_eq!(q.next(), Some((1, false)));
+        q.set_sweep(None);
+        assert_eq!(q.next(), None);
+        assert!(!q.has_work());
+        // Empty documents never sweep.
+        let mut q = TextQueue::new(0);
+        q.set_sweep(Some(0));
+        assert!(!q.has_work());
+    }
+
+    struct NoTextures;
+
+    impl TextureRegistry for NoTextures {
+        fn create(
+            self: Arc<Self>,
+            _: &TextureDesc,
+            _: &[u8],
+            _: usize,
+        ) -> Result<UserTexture, String> {
+            Err("no GPU in tests".into())
+        }
+
+        fn max_texture_side(&self) -> u32 {
+            4096
+        }
+
+        fn release(&self, _: u64) {}
+    }
+
+    /// Two pages sharing one content stream: upright 612×792, and one with an
+    /// offset MediaBox rotated 90°. "Zq" sits outside both crop boxes.
+    fn test_pdf() -> Vec<u8> {
+        let content = "BT /F1 24 Tf 72 700 Td (Hello world) Tj 0 -30 Td (second line) Tj ET\n\
+                       BT /F1 24 Tf 700 700 Td (Zq) Tj ET\n";
+        let res = "/Resources << /Font << /F1 5 0 R >> >>";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R {res} >>"
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 622 812] /Rotate 90 \
+                 /Contents 4 0 R {res} >>"
+            ),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).bytes());
+        for o in offsets {
+            out.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .bytes(),
+        );
+        out
+    }
+
+    /// The real extraction path through vendor/pdfium/bin/pdfium.dll.
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn extracts_real_text() {
+        let api = Api::load().expect("pdfium.dll");
+        unsafe { (api.init_library)() };
+        let t = api.text.as_ref().expect("text API");
+        let path = std::env::temp_dir().join(format!("whir-pdf-text-{}.pdf", std::process::id()));
+        std::fs::write(&path, test_pdf()).unwrap();
+        let (tx, _rx) = channel();
+        let (mut d, sizes) =
+            open_doc(&api, &path, tx, Waker::noop(), Arc::new(NoTextures)).expect("open");
+        assert_eq!(sizes, vec![[612.0, 792.0], [792.0, 612.0]]);
+
+        // Upright page: two lines with a generated break between them.
+        let p = page(&api, &mut d, 0).unwrap();
+        let text = extract(t, p, sizes[0], true);
+        let s = String::from_utf16_lossy(&text.chars);
+        assert!(s.starts_with("Hello world"), "{s:?}");
+        assert!(s.contains("second line"), "{s:?}");
+        assert!(!s.contains('Z'), "off-page text must vanish: {s:?}");
+        let g = text.geom.as_ref().unwrap();
+        let lines: Vec<_> = g.lines.iter().filter(|l| !is_empty(&l.rect)).collect();
+        assert_eq!(lines.len(), 2, "{:?}", g.lines);
+        let h = g.boxes[0];
+        // 'H' at x=72, baseline y=700 → display y 92.
+        assert!(
+            (h[0] - 72.0).abs() < 2.0 && h[1] < 92.0 && h[3] > 92.0,
+            "{h:?}"
+        );
+        let hit = crate::geom::hit_test(g, &text.chars, [h[2] - 1.0, 88.0]).unwrap();
+        assert_eq!(hit.caret, 1);
+        assert!(hit.inside);
+
+        // Rotated page with an offset MediaBox: the same text runs down the screen.
+        let p = page(&api, &mut d, 1).unwrap();
+        let text = extract(t, p, sizes[1], true);
+        let g = text.geom.as_ref().unwrap();
+        // (PDFium may order the two lines either way here.)
+        let k = text.chars.iter().position(|&c| c == b'H' as u16).unwrap();
+        let h = g.boxes[k];
+        // u = y − B = 680 (baseline), v = x − L = 62.
+        assert!(
+            h[0] < 680.0 && h[2] > 680.0 && (h[1] - 62.0).abs() < 2.0,
+            "{h:?}"
+        );
+        let line = g.lines[g.line_of(k as u32).unwrap()];
+        assert!(line.vertical && line.dir == 1, "{line:?}");
+
+        // Sweep extraction without geometry.
+        let text = extract(t, p, sizes[1], false);
+        assert!(text.geom.is_none() && !text.chars.is_empty());
+
+        close_doc(&api, d);
+        let _ = std::fs::remove_file(&path);
     }
 }
