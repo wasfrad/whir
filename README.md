@@ -6,7 +6,7 @@ tab in the same window. Start whir on its own and you get a blank note to type i
 it saves itself, no questions asked.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~3.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
+- One portable folder: `whir.exe` (~4.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
 - No installer, no admin rights, no VC++ redistributable
 
 ## Using it on a work PC
@@ -131,7 +131,7 @@ Diagnostics:
 | | window on screen | content on screen | private memory |
 |---|---|---|---|
 | second double-click (hand-off to the running window) | — | ~14 ms in the new process | — |
-| empty window | ~90 ms | ~150 ms | ~61 MB |
+| bare launch (blank note) | ~90 ms | ~150 ms | ~61 MB |
 | 6000×4000 JPEG | ~90 ms | ~170 ms | ~104 MB |
 | 20 MB / 300k-row CSV | ~90 ms | ~150 ms | ~67 MB |
 | 66-page PDF | ~90 ms | ~160 ms | ~113 MB |
