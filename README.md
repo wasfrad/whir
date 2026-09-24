@@ -66,6 +66,7 @@ and are saved with Ctrl+S.
 | Double-click | Toggle fit / 100% |
 | 0 · 1 · + · − | Fit · 100% · zoom in · zoom out |
 | ← → · Home End · PgUp PgDn | Previous/next image in the folder (Explorer's sort order) · first/last |
+| R · Shift+R · right-click | Rotate right · left (on screen only, for as long as the tab is open; the file isn't changed) |
 
 | PDFs | |
 |---|---|

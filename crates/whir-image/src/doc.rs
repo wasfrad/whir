@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
+use egui::epaint::Vertex;
 use egui::{
-    Color32, ColorImage, CursorIcon, Key, Modifiers, Rect, Sense, TextureOptions, pos2, vec2,
+    Color32, ColorImage, CursorIcon, Key, Mesh, Modifiers, Rect, Sense, TextureOptions, pos2, vec2,
 };
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, Waker};
@@ -78,6 +79,9 @@ pub struct ImageDoc {
     /// Transient "1920 × 1080 · 50%" pill: text and when it hides.
     toast: Option<(String, f64)>,
     checker: Option<egui::TextureHandle>,
+    /// Quarter turns clockwise per image (non-zero only), for as long as the
+    /// tab is open. Only the screen turns: files are never changed.
+    rotations: Vec<(PathBuf, u8)>,
 }
 
 /// Longest side of the fit level: the screen's longer side (physical px).
@@ -113,6 +117,7 @@ impl ImageDoc {
             prefetching: Vec::new(),
             toast: None,
             checker: None,
+            rotations: Vec::new(),
         };
         // Newly opened documents are almost always the active tab: decode now.
         doc.start_fit_decode(Priority::Visible);
@@ -355,6 +360,36 @@ impl ImageDoc {
         }
     }
 
+    // --- rotation ----------------------------------------------------------------
+
+    /// Quarter turns clockwise of the image on screen.
+    fn turns(&self) -> u8 {
+        let Some(shown) = &self.shown else { return 0 };
+        self.rotations
+            .iter()
+            .find(|(p, _)| folder::same_path(p, &shown.path))
+            .map_or(0, |r| r.1)
+    }
+
+    /// `image` is the on-screen size before the turn.
+    fn rotate(&mut self, clockwise: bool, image: egui::Vec2, vp: egui::Vec2, ppp: f32, time: f64) {
+        let Some(path) = self.shown.as_ref().map(|s| s.path.clone()) else {
+            return;
+        };
+        let turns = (self.turns() + if clockwise { 1 } else { 3 }) % 4;
+        self.rotations.retain(|(p, _)| !folder::same_path(p, &path));
+        if turns != 0 {
+            self.rotations.push((path, turns));
+        }
+        self.view.rotate(clockwise, image, vp, ppp);
+        let label = if clockwise {
+            "Rotated right"
+        } else {
+            "Rotated left"
+        };
+        self.toast = Some((label.to_owned(), time + 1.0));
+    }
+
     // --- drawing -----------------------------------------------------------------
 
     fn checker(&mut self, ctx: &egui::Context, theme: &Theme) -> egui::TextureId {
@@ -415,6 +450,7 @@ impl ImageDoc {
 
         // Keyboard (this tab is active whenever ui() runs).
         let mut nav = 0isize;
+        let mut turn = None;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
             if i.consume_key(none, Key::ArrowRight) || i.consume_key(none, Key::PageDown) {
@@ -453,10 +489,32 @@ impl ImageDoc {
             if zoom_out {
                 self.view.zoom_by(0.8, egui::Vec2::ZERO, image, vp, ppp);
             }
+            // Shift+R first: a pattern without Shift also matches with it.
+            if i.consume_key(Modifiers::SHIFT, Key::R) {
+                turn = Some(false);
+            } else if i.consume_key(none, Key::R) {
+                turn = Some(true);
+            }
+        });
+        resp.context_menu(|ui| {
+            let right = egui::Button::new("Rotate right").shortcut_text("R");
+            if ui.add(right).clicked() {
+                turn = Some(true);
+                ui.close();
+            }
+            let left = egui::Button::new("Rotate left").shortcut_text("Shift+R");
+            if ui.add(left).clicked() {
+                turn = Some(false);
+                ui.close();
+            }
         });
         if nav != 0 {
             self.ensure_folder();
             self.navigate(nav, time);
+            return;
+        }
+        if let Some(clockwise) = turn {
+            self.rotate(clockwise, image, vp, ppp, time);
             return;
         }
 
@@ -469,8 +527,9 @@ impl ImageDoc {
 
     fn paint(&mut self, ui: &egui::Ui, viewport: Rect, theme: &Theme) {
         let ppp = ui.ctx().pixels_per_point();
+        let turns = self.turns();
         let Some(shown) = &self.shown else { return };
-        let image = shown.full_size();
+        let image = view::turned(shown.full_size(), turns);
         let rect = self.view.image_rect(viewport, image, ppp);
         let painter = ui.painter().with_clip_rect(viewport);
 
@@ -493,19 +552,40 @@ impl ImageDoc {
 
         let shown = self.shown.as_ref().expect("checked above");
         let level = shown.best();
-        let to_screen = rect.width() / level.size[0] as f32;
+        // A level pixel corner → screen, through the quarter turns.
+        let [lw, lh] = level.size.map(|v| v as f32);
+        let to_screen = |x: u32, y: u32| {
+            let p = view::turn_point(pos2(x as f32 / lw, y as f32 / lh), turns);
+            rect.min + p.to_vec2() * rect.size()
+        };
         for tile in &level.tiles {
-            let min = rect.min + vec2(tile.origin[0] as f32, tile.origin[1] as f32) * to_screen;
-            let size = vec2(tile.size[0] as f32, tile.size[1] as f32) * to_screen;
-            let r = Rect::from_min_size(min, size);
-            if r.intersects(viewport) {
-                painter.image(
-                    tile.texture.id(),
-                    r,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+            let ([x0, y0], [w, h]) = (tile.origin, tile.size);
+            let corners = [
+                to_screen(x0, y0),
+                to_screen(x0 + w, y0),
+                to_screen(x0 + w, y0 + h),
+                to_screen(x0, y0 + h),
+            ];
+            if !Rect::from_points(&corners).intersects(viewport) {
+                continue;
             }
+            let uvs = [
+                pos2(0.0, 0.0),
+                pos2(1.0, 0.0),
+                pos2(1.0, 1.0),
+                pos2(0.0, 1.0),
+            ];
+            let mut mesh = Mesh::with_texture(tile.texture.id());
+            for (pos, uv) in corners.into_iter().zip(uvs) {
+                mesh.vertices.push(Vertex {
+                    pos,
+                    uv,
+                    color: Color32::WHITE,
+                });
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(mesh);
         }
         if wants_full && self.visible {
             self.request_full();
@@ -603,7 +683,8 @@ impl Document for ImageDoc {
             ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
         ui.painter().rect_filled(viewport, 0.0, theme.canvas_bg);
 
-        if let Some(image) = self.shown.as_ref().map(Shown::full_size) {
+        if let Some(size) = self.shown.as_ref().map(Shown::full_size) {
+            let image = view::turned(size, self.turns());
             self.handle_input(ui, &resp, viewport, image);
             self.paint(ui, viewport, &theme);
             let ppp = ui.ctx().pixels_per_point();

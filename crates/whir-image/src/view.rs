@@ -40,7 +40,43 @@ pub fn fit_zoom(image: Vec2, viewport: Vec2, ppp: f32) -> f32 {
         .min(actual_size_zoom(ppp))
 }
 
+/// Size of `image` on screen after `turns` quarter turns.
+pub fn turned(image: Vec2, turns: u8) -> Vec2 {
+    if turns % 2 == 1 {
+        vec2(image.y, image.x)
+    } else {
+        image
+    }
+}
+
+/// Where a point of the unturned image lands after `turns` quarter turns
+/// clockwise, both as fractions of the image's width and height.
+pub fn turn_point(p: Pos2, turns: u8) -> Pos2 {
+    match turns % 4 {
+        1 => pos2(1.0 - p.y, p.x),
+        2 => pos2(1.0 - p.x, 1.0 - p.y),
+        3 => pos2(p.y, 1.0 - p.x),
+        _ => p,
+    }
+}
+
 impl View {
+    /// The image was turned a quarter (clockwise if `clockwise`); `image` is its
+    /// size before. A zoomed-in view keeps its zoom and the point in the middle.
+    pub fn rotate(&mut self, clockwise: bool, image: Vec2, viewport: Vec2, ppp: f32) {
+        let Mode::Manual { zoom, center } = self.mode else {
+            return;
+        };
+        let center = if clockwise {
+            pos2(image.y - center.y, center.x)
+        } else {
+            pos2(center.y, image.x - center.x)
+        };
+        self.mode = Mode::Manual { zoom, center };
+        // Re-clamps, and falls back to Fit if the zoom is now below it.
+        self.set_zoom(zoom, Vec2::ZERO, turned(image, 1), viewport, ppp);
+    }
+
     pub fn zoom(&self, image: Vec2, viewport: Vec2, ppp: f32) -> f32 {
         match self.mode {
             Mode::Fit => fit_zoom(image, viewport, ppp),
@@ -180,6 +216,52 @@ mod tests {
     fn dragging_a_fitted_image_keeps_fit() {
         let mut v = View::default();
         v.pan(vec2(30.0, 10.0), IMG, VP, 1.0);
+        assert_eq!(v.mode, Mode::Fit);
+    }
+
+    #[test]
+    fn quarter_turns_move_corners() {
+        let tl = pos2(0.0, 0.0);
+        assert_eq!(turn_point(tl, 1), pos2(1.0, 0.0)); // clockwise: top-left → top-right
+        assert_eq!(turn_point(tl, 2), pos2(1.0, 1.0));
+        assert_eq!(turn_point(tl, 3), pos2(0.0, 1.0)); // counter-clockwise: → bottom-left
+        let p = pos2(0.25, 0.75);
+        let mut q = p;
+        for _ in 0..4 {
+            q = turn_point(q, 1);
+        }
+        assert_eq!(q, p);
+        assert_eq!(turned(IMG, 1), vec2(3000.0, 4000.0));
+        assert_eq!(turned(IMG, 2), IMG);
+    }
+
+    #[test]
+    fn rotating_keeps_the_middle_point() {
+        let mut v = View::default();
+        v.set_zoom(1.0, Vec2::ZERO, IMG, VP, 1.0);
+        v.mode = Mode::Manual {
+            zoom: 1.0,
+            center: pos2(1000.0, 500.0),
+        };
+        v.rotate(true, IMG, VP, 1.0);
+        let t = turned(IMG, 1);
+        let expected = turn_point(pos2(1000.0 / IMG.x, 500.0 / IMG.y), 1);
+        assert_eq!(v.center(t), pos2(expected.x * t.x, expected.y * t.y));
+        assert_eq!(v.zoom(t, VP, 1.0), 1.0);
+        v.rotate(false, t, VP, 1.0);
+        assert_eq!(v.center(IMG), pos2(1000.0, 500.0));
+    }
+
+    #[test]
+    fn rotating_below_the_new_fit_goes_to_fit() {
+        // Portrait in a landscape window: fit 0.2 before the turn, 0.25 after.
+        let img = vec2(3000.0, 4000.0);
+        let mut v = View::default();
+        v.set_zoom(0.22, Vec2::ZERO, img, VP, 1.0);
+        assert!(matches!(v.mode, Mode::Manual { .. }));
+        v.rotate(true, img, VP, 1.0);
+        assert_eq!(v.mode, Mode::Fit);
+        v.rotate(true, turned(img, 1), VP, 1.0);
         assert_eq!(v.mode, Mode::Fit);
     }
 
