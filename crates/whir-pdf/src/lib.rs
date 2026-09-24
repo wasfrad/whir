@@ -7,6 +7,7 @@ mod engine;
 mod ffi;
 mod geom;
 mod layout;
+mod mini_layout;
 mod search;
 mod select;
 mod store;

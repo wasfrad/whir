@@ -3,9 +3,10 @@
 //! they currently want (visible first); a newer request preempts an in-flight
 //! render between page objects via `IFSDK_PAUSE`.
 //!
-//! Text extraction runs on the same thread, strictly after tiles: one page
-//! at a time (it can't be interrupted), urgent pages (visible, need geometry)
-//! before the background sweep that feeds search.
+//! Text extraction runs on the same thread, after screen tiles: one page at
+//! a time (it can't be interrupted), urgent pages (visible, need geometry)
+//! before the minimap's thumbnails, and those before the background sweep
+//! that feeds search.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
@@ -30,6 +31,8 @@ pub struct TileKey {
     pub scale: u32,
     pub tx: u16,
     pub ty: u16,
+    /// A minimap thumbnail (always a whole page) rather than a screen tile.
+    pub thumb: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -339,24 +342,44 @@ fn run(rx: Receiver<Cmd>, interrupt: Arc<AtomicBool>) {
         interrupt.store(false, Ordering::Release);
 
         let Ok(api) = api else { continue };
-        // Tiles first, always.
-        if let Some((&doc_id, _)) = docs.iter().find(|(_, d)| !d.wanted.is_empty()) {
+        let render_next = |docs: &mut HashMap<u64, OpenDoc>, doc_id: u64| {
             let job = docs.get_mut(&doc_id).and_then(|d| d.wanted.pop_front());
             if let Some(job) = job {
-                render(api, &rx, &interrupt, &mut docs, doc_id, job);
+                render(api, &rx, &interrupt, docs, doc_id, job);
             }
+        };
+        // Screen tiles first, always, in the order asked for (a visible page's
+        // thumbnail may lead as its quick preview).
+        let screen = docs
+            .iter()
+            .find(|(_, d)| d.wanted.iter().any(|j| !j.key.thumb))
+            .map(|(&id, _)| id);
+        if let Some(doc_id) = screen {
+            render_next(&mut docs, doc_id);
             continue;
         }
-        // Then one page of text: any document's urgent pages before any sweep.
-        let next = docs
-            .iter_mut()
-            .find_map(|(&id, d)| d.text.next_urgent().map(|p| (id, p, true)))
-            .or_else(|| {
-                docs.iter_mut()
-                    .find_map(|(&id, d)| d.text.next_sweep().map(|p| (id, p, false)))
-            });
-        if let (Some((doc_id, page, urgent)), Some(t)) = (next, api.text.as_ref()) {
-            extract_and_send(api, t, &mut docs, doc_id, page, urgent);
+        // Then one page of urgent text (what's on screen needs its geometry)…
+        let text = api.text.as_ref();
+        if let Some(t) = text
+            && let Some((doc_id, page)) = docs
+                .iter_mut()
+                .find_map(|(&id, d)| d.text.next_urgent().map(|p| (id, p)))
+        {
+            extract_and_send(api, t, &mut docs, doc_id, page, true);
+            continue;
+        }
+        // …then the minimap's thumbnails…
+        if let Some((&doc_id, _)) = docs.iter().find(|(_, d)| !d.wanted.is_empty()) {
+            render_next(&mut docs, doc_id);
+            continue;
+        }
+        // …then one page of the background sweep.
+        if let Some(t) = text
+            && let Some((doc_id, page)) = docs
+                .iter_mut()
+                .find_map(|(&id, d)| d.text.next_sweep().map(|p| (id, p)))
+        {
+            extract_and_send(api, t, &mut docs, doc_id, page, false);
         }
     }
 }
@@ -518,9 +541,27 @@ fn render(
     let Some(d) = docs.get_mut(&doc_id) else {
         return;
     };
-    let Some(page) = page(api, d, job.key.page) else {
+    // Thumbnails borrow an open page or load a temporary one, so the minimap
+    // never evicts pages the screen needs.
+    let (page, temporary) = if job.key.thumb {
+        match d.pages.iter().find(|(i, _)| *i == job.key.page) {
+            Some(&(_, p)) => (Some(p), false),
+            None => {
+                let p = unsafe { (api.load_page)(d.handle, job.key.page as i32) };
+                ((!p.is_null()).then_some(p), true)
+            }
+        }
+    } else {
+        (page(api, d, job.key.page), false)
+    };
+    let Some(page) = page else {
         failed(docs);
         return;
+    };
+    let release = || {
+        if temporary {
+            unsafe { (api.close_page)(page) };
+        }
     };
 
     let stride = w as usize * 4;
@@ -535,6 +576,7 @@ fn render(
         )
     };
     if bitmap.is_null() {
+        release();
         failed(docs);
         return;
     }
@@ -579,6 +621,7 @@ fn render(
                 (api.render_close)(page);
                 (api.bitmap_destroy)(bitmap);
             }
+            release();
             if let Some(d) = docs.remove(&doc_id) {
                 close_doc(api, d);
             }
@@ -591,11 +634,19 @@ fn render(
         // Only this document's new wish list can make the tile unwanted; commands
         // for other documents (or a spurious wake) just resume the render.
         if rewanted {
-            if let Some(pos) = d.wanted.iter().position(|j| j.key == job.key) {
-                d.wanted.remove(pos); // still wanted: keep going
-            } else {
-                abandoned = true;
-                break;
+            match d.wanted.iter().position(|j| j.key == job.key) {
+                // A screen tile now comes first: the thumbnail stays queued for later.
+                Some(pos) if job.key.thumb && d.wanted.iter().take(pos).any(|j| !j.key.thumb) => {
+                    abandoned = true;
+                    break;
+                }
+                Some(pos) => {
+                    d.wanted.remove(pos); // still wanted: keep going
+                }
+                None => {
+                    abandoned = true;
+                    break;
+                }
             }
         }
         status = unsafe { (api.render_continue)(page, &mut pause) };
@@ -604,6 +655,7 @@ fn render(
         (api.render_close)(page);
         (api.bitmap_destroy)(bitmap);
     }
+    release();
     if abandoned {
         return;
     }
@@ -835,6 +887,34 @@ pub(crate) mod test_support {
                  /Contents 4 0 R {res} >>"
             ),
         ];
+        assemble(&objs)
+    }
+
+    /// `n` upright letter pages, each saying "Page k".
+    pub fn pages_pdf(n: usize) -> Vec<u8> {
+        let kids: Vec<String> = (0..n).map(|k| format!("{} 0 R", 4 + 2 * k)).collect();
+        let mut objs = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+        for k in 0..n {
+            let content = format!("BT /F1 48 Tf 72 700 Td (Page {}) Tj ET\n", k + 1);
+            objs.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R \
+                 /Resources << /Font << /F1 3 0 R >> >> >>",
+                5 + 2 * k
+            ));
+            objs.push(format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ));
+        }
+        assemble(&objs)
+    }
+
+    /// Numbered objects → a PDF file with its cross-reference table.
+    fn assemble(objs: &[String]) -> Vec<u8> {
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, o) in objs.iter().enumerate() {

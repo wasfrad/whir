@@ -1,8 +1,10 @@
 //! The PDF tab: continuous scroll, fit-width, zoom at the cursor, tiles at
 //! exact device resolution (stretched while a zoom settles), LRU texture budget;
-//! text selection, copy and find over text streamed from the PDF thread.
+//! text selection, copy and find over text streamed from the PDF thread; a
+//! minimap of page thumbnails with page controls.
 
 mod find;
+mod minimap;
 mod selection;
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +22,7 @@ use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, UserTexture};
 
 use crate::engine::{DocHandle, Event, Job, TileKey};
 use crate::layout::{self, Layout};
+use crate::mini_layout::MiniLayout;
 use crate::search::{Match, Search};
 use crate::select::{ClickCounter, Gesture, Selection};
 use crate::store::TextStore;
@@ -78,9 +81,15 @@ pub struct PdfDoc {
     textures: Arc<dyn TextureRegistry>,
     state: State,
     tiles: HashMap<TileKey, Cached>,
-    /// Tiles PDFium couldn't produce: never requested again.
+    /// Minimap thumbnails, at most one per page (kept apart from `tiles`,
+    /// whose eviction is tuned for the screen). They also stand in, stretched,
+    /// for pages with no tiles yet.
+    thumbs: HashMap<TileKey, Cached>,
+    /// Tiles and thumbnails PDFium couldn't produce: never requested again.
     failed_tiles: HashSet<TileKey>,
+    /// A screen tile arrived (or failed): the document has shown itself.
     got_first_tile: bool,
+    mini: Option<Arc<MiniLayout>>,
     zoom: Zoom,
     sy: ScrollAxis,
     sx: ScrollAxis,
@@ -91,6 +100,12 @@ pub struct PdfDoc {
     frame: u64,
     toast: Option<(String, f64)>,
     last_scroll: f64,
+    /// The zoom and page area the last frame was drawn with.
+    shown_zoom: Option<f64>,
+    shown_vp: Rect,
+    /// The go-to-page field's text while it's open.
+    goto: Option<String>,
+    goto_focus_pending: bool,
 
     text: TextStore,
     sel: Option<Selection>,
@@ -130,8 +145,10 @@ impl PdfDoc {
             textures: cx.textures.clone(),
             state: State::Loading,
             tiles: HashMap::new(),
+            thumbs: HashMap::new(),
             failed_tiles: HashSet::new(),
             got_first_tile: false,
+            mini: None,
             zoom: Zoom::FitWidth,
             sy: ScrollAxis::default(),
             sx: ScrollAxis::default(),
@@ -141,6 +158,10 @@ impl PdfDoc {
             frame: 0,
             toast: None,
             last_scroll: 0.0,
+            shown_zoom: None,
+            shown_vp: Rect::NOTHING,
+            goto: None,
+            goto_focus_pending: false,
             text: TextStore::new(0, false),
             sel: None,
             gesture: Gesture::None,
@@ -162,22 +183,28 @@ impl PdfDoc {
             match ev {
                 Event::Opened { pages, text } => {
                     self.text = TextStore::new(pages.len(), text);
-                    self.state = State::Ready(Arc::new(Layout::new(pages)));
+                    let layout = Layout::new(pages);
+                    self.mini = Some(Arc::new(MiniLayout::new(&layout, minimap::THUMB_W)));
+                    self.state = State::Ready(Arc::new(layout));
                 }
                 Event::Failed(e) => self.state = State::Failed(e),
                 Event::Tile { key, texture } => {
-                    self.got_first_tile = true;
-                    self.tiles.insert(
-                        key,
-                        Cached {
-                            texture,
-                            last_used: self.frame,
-                        },
-                    );
+                    let cached = Cached {
+                        texture,
+                        last_used: self.frame,
+                    };
+                    if key.thumb {
+                        // One per page: a new scale replaces the old.
+                        self.thumbs.retain(|k, _| k.page != key.page);
+                        self.thumbs.insert(key, cached);
+                    } else {
+                        self.got_first_tile = true;
+                        self.tiles.insert(key, cached);
+                    }
                 }
                 Event::TileFailed { key } => {
                     // Leave that area blank rather than retrying forever.
-                    self.got_first_tile = true;
+                    self.got_first_tile |= !key.thumb;
                     self.failed_tiles.insert(key);
                 }
                 Event::Text { page, seq, text } => {
@@ -190,31 +217,6 @@ impl PdfDoc {
                     }
                 }
             }
-        }
-    }
-
-    fn evict(&mut self, keep_frame: u64) {
-        let bytes = |c: &Cached| {
-            let [w, h] = c.texture.size();
-            w as u64 * h as u64 * 4
-        };
-        let mut total: u64 = self.tiles.values().map(bytes).sum();
-        if total <= TEXTURE_BUDGET {
-            return;
-        }
-        let mut by_age: Vec<(u64, TileKey, u64)> = self
-            .tiles
-            .iter()
-            .filter(|(_, c)| c.last_used < keep_frame)
-            .map(|(k, c)| (c.last_used, *k, bytes(c)))
-            .collect();
-        by_age.sort_unstable_by_key(|e| e.0);
-        for (_, key, b) in by_age {
-            if total <= TEXTURE_BUDGET {
-                break;
-            }
-            self.tiles.remove(&key);
-            total -= b;
         }
     }
 
@@ -234,23 +236,42 @@ impl PdfDoc {
         // keys (typing, arrows, Home/End, Ctrl+A, Ctrl+C) are its own. (Its
         // focus survives Esc, which the field handles itself.)
         let find_focus = self.find.has_focus(&ctx);
+        // Either text field: its keys are its own.
+        let typing = find_focus || self.goto_has_focus(&ctx);
 
-        let (vp, resp) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
-        let painter = ui.painter().with_clip_rect(vp);
-        painter.rect_filled(vp, 0.0, theme.canvas_bg);
+        let (full, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        ui.painter().rect_filled(full, 0.0, theme.canvas_bg);
         if l.is_empty() {
             return;
         }
+        // With room for it, the minimap takes a column at the right, the
+        // scrollbar beside it; the pages get the rest.
+        let split = (minimap::enabled() && full.width() >= minimap::MIN_WINDOW)
+            .then(|| minimap::split(full));
+        let vp = split.map_or(full, |(pages, _)| pages);
+        let panel = split.map(|(_, panel)| panel);
+        let resp = ui.interact(vp, ui.id().with("pdf.pages"), Sense::CLICK | Sense::DRAG);
+        let painter = ui.painter().with_clip_rect(vp);
         let vw = vp.width() as f64;
         let vh = vp.height() as f64;
 
-        self.find_keys(ui, find_focus, now);
+        self.find_keys(ui, typing, now);
 
         // --- zoom & scroll -----------------------------------------------------
         let mut zoom = match self.zoom {
-            Zoom::FitWidth => l.fit_width_zoom(vw - 14.0),
+            Zoom::FitWidth => fit_zoom(l, vw, panel.is_some()),
             Zoom::Manual(z) => z,
         };
+        // At fit width the zoom follows the page area's width (the window was
+        // resized, the minimap toggled): stay at the same place in the document.
+        if let Some(prev) = self.shown_zoom
+            && self.zoom == Zoom::FitWidth
+            && (zoom - prev).abs() > 1e-9
+        {
+            self.sy.offset *= zoom / prev;
+            self.sx.offset *= zoom / prev;
+            self.zoom_changed_at = now;
+        }
         let set_axes = |sy: &mut ScrollAxis, sx: &mut ScrollAxis, zoom: f64| {
             sy.content = l.total_height * zoom;
             sy.viewport = vh;
@@ -281,19 +302,30 @@ impl PdfDoc {
         // Shift+arrows extend a selection; they go before the plain arrows,
         // which would otherwise match them too.
         let sel_key = match self.sel {
-            Some(_) if !find_focus => ui.input_mut(consume_sel_key),
+            Some(_) if !typing => ui.input_mut(consume_sel_key),
             _ => None,
         };
         let page_step = (vh * 0.9).max(40.0);
         let mut fit = false;
+        // Next (true) or previous page.
+        let mut step = None;
+        let (mut toggle_minimap, mut goto) = (false, false);
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
             let ctrl = Modifiers::CTRL;
-            // Ctrl zoom shortcuts work even while typing in the find field.
+            // Ctrl shortcuts work even while typing in the find field.
             fit |= i.consume_key(ctrl, Key::Num0);
             let mut zoom_in = i.consume_key(ctrl, Key::Plus) || i.consume_key(ctrl, Key::Equals);
             let mut zoom_out = i.consume_key(ctrl, Key::Minus);
-            if !find_focus {
+            toggle_minimap = i.consume_key(ctrl, Key::M);
+            goto = i.consume_key(ctrl, Key::G);
+            if !typing {
+                if i.consume_key(ctrl, Key::ArrowUp) {
+                    step = Some(false);
+                }
+                if i.consume_key(ctrl, Key::ArrowDown) {
+                    step = Some(true);
+                }
                 // Shift+Space first: consume_key ignores extra Shift, so plain Space would eat it.
                 if i.consume_key(none, Key::PageUp) || i.consume_key(Modifiers::SHIFT, Key::Space) {
                     self.sy.scroll_by(-page_step);
@@ -307,11 +339,20 @@ impl PdfDoc {
                 if i.consume_key(none, Key::ArrowUp) {
                     self.sy.scroll_by(-48.0);
                 }
+                // Left/right pan when there's something to pan to; else they turn pages.
                 if i.consume_key(none, Key::ArrowRight) {
-                    self.sx.scroll_by(48.0);
+                    if self.sx.is_scrollable() {
+                        self.sx.scroll_by(48.0);
+                    } else {
+                        step = Some(true);
+                    }
                 }
                 if i.consume_key(none, Key::ArrowLeft) {
-                    self.sx.scroll_by(-48.0);
+                    if self.sx.is_scrollable() {
+                        self.sx.scroll_by(-48.0);
+                    } else {
+                        step = Some(false);
+                    }
                 }
                 if i.consume_key(none, Key::Home) || i.consume_key(ctrl, Key::Home) {
                     self.sy.scroll_to(0.0);
@@ -333,7 +374,18 @@ impl PdfDoc {
         if let Some(k) = sel_key {
             self.sel_key(k, frame);
         }
-        if !find_focus {
+        if let Some(forward) = step {
+            self.step_page(l, zoom, forward);
+        }
+        if toggle_minimap {
+            minimap::toggle();
+            ctx.request_repaint();
+        }
+        if goto {
+            let current = l.most_visible(self.sy.offset / zoom, (self.sy.offset + vh) / zoom);
+            self.open_goto(current);
+        }
+        if !typing {
             let (all, copy) = ui.input_mut(|i| {
                 let all = i.consume_key(Modifiers::CTRL, Key::A);
                 let n = i.events.len();
@@ -349,7 +401,7 @@ impl PdfDoc {
             }
         }
         if fit && self.zoom != Zoom::FitWidth {
-            let target = l.fit_width_zoom(vw - 14.0);
+            let target = fit_zoom(l, vw, panel.is_some());
             new_zoom = Some((target, None));
             self.zoom = Zoom::FitWidth;
         }
@@ -374,6 +426,8 @@ impl PdfDoc {
                 self.toast = Some((format!("{:.0}%", zoom / ZOOM_100 * 100.0), now + 1.0));
             }
         }
+        self.shown_zoom = Some(zoom);
+        self.shown_vp = vp;
 
         // --- reveal, pointer ---------------------------------------------------
         let x_off = ((vw - l.content_width() * zoom) / 2.0).max(0.0);
@@ -418,6 +472,10 @@ impl PdfDoc {
         let y1 = (self.sy.offset + vh) / zoom;
         let visible = l.visible(y0, y1);
         let mut wanted: Vec<Job> = Vec::new();
+        // Thumbnails of on-screen pages with nothing else to show yet: a
+        // quick preview while their tiles render.
+        let mut previews: Vec<Job> = Vec::new();
+        let mini = self.mini.clone();
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
 
         for i in visible.clone() {
@@ -448,7 +506,22 @@ impl PdfDoc {
                 self.tiles
                     .retain(|k, _| k.page != page || k.scale == settled);
             } else {
-                // Stale tiles (other scales) stand in, stretched, lowest resolution first.
+                // The page's thumbnail stands in first, stretched…
+                if let Some(m) = &mini {
+                    let job = minimap::thumb_job(m, l, i, ppp);
+                    let preview = self.got_first_tile
+                        && self.needs_thumb(job.key)
+                        && !self.tiles.keys().any(|k| k.page == i as u32);
+                    match self.thumb_of(job.key) {
+                        Some(c) => {
+                            painter.image(c.texture.id(), prect, uv, Color32::WHITE);
+                            c.last_used = frame;
+                        }
+                        None if preview => previews.push(job),
+                        None => {}
+                    }
+                }
+                // …then stale tiles (other scales), lowest resolution first.
                 let mut stale: Vec<(TileKey, &mut Cached)> = self
                     .tiles
                     .iter_mut()
@@ -512,18 +585,29 @@ impl PdfDoc {
 
         self.paint_highlights(&painter, l, v, visible.clone(), frame, &theme);
 
+        // Previews, then the screen's tiles, then the minimap's thumbnails.
+        let current = l.most_visible(y0, y1);
+        let place = match (panel, &mini) {
+            (Some(panel), Some(m)) => Some(minimap::Placement::new(m.clone(), panel, &self.sy)),
+            _ => None,
+        };
         let tiles_pending = !wanted.is_empty();
-        let keys: Vec<TileKey> = wanted.iter().map(|j| j.key).collect();
+        let mut jobs = previews;
+        jobs.append(&mut wanted);
+        if let Some(place) = &place {
+            self.minimap_jobs(place, l, current, ppp, &mut jobs);
+        }
+        let keys: Vec<TileKey> = jobs.iter().map(|j| j.key).collect();
         if keys != self.last_wanted {
-            self.handle.want(wanted);
+            self.handle.want(jobs);
             self.last_wanted = keys;
         }
 
         // --- text requests, copy, search -----------------------------------------
-        let current = l.page_at((self.sy.offset + vh / 2.0) / zoom);
         self.near = visible.start.saturating_sub(2)..(visible.end + 2).min(l.len());
         self.request_text(l, visible.clone(), current, tiles_pending, frame);
-        self.evict(frame);
+        evict(&mut self.tiles, TEXTURE_BUDGET, frame);
+        evict(&mut self.thumbs, minimap::THUMB_BUDGET, frame);
         self.text.evict_geom(frame);
         if self.pending_copy {
             self.copy(&ctx, now);
@@ -539,19 +623,58 @@ impl PdfDoc {
         let pages = l.len();
         if (self.sy.offset - self.last_scroll).abs() > 0.5 {
             self.last_scroll = self.sy.offset;
-            self.toast = Some((format!("{} / {pages}", current + 1), now + 1.2));
+            // The minimap's header shows the page number already.
+            if place.is_none() {
+                self.toast = Some((format!("{} / {pages}", current + 1), now + 1.2));
+            }
         }
-        let vbar = Rect::from_min_max(
-            pos2(vp.right() - BAR, vp.top()),
-            pos2(vp.right(), vp.bottom() - BAR),
-        );
+        let mut moved = false;
+        if let Some(place) = &place {
+            moved |= self.show_minimap(ui, place, l, v, current, frame);
+        } else if self.goto.is_some() {
+            // No minimap to hold the go-to field: it floats at the top.
+            let rect = Rect::from_center_size(
+                pos2(vp.center().x, vp.top() + 8.0 + 16.0),
+                vec2(120.0, 32.0),
+            );
+            ui.interact(
+                rect,
+                ui.id().with("pdf.goto.bg"),
+                Sense::CLICK | Sense::DRAG,
+            );
+            ui.painter().rect_filled(rect, 8.0, theme.overlay_bg);
+            ui.painter().rect_stroke(
+                rect,
+                8.0,
+                Stroke::new(1.0, theme.separator),
+                StrokeKind::Inside,
+            );
+            moved |= self.goto_field(ui, rect.shrink2(vec2(12.0, 5.0)), l, zoom);
+        }
+        let (vbar, hbar_end) = match panel {
+            Some(p) => (
+                Rect::from_min_max(pos2(p.right() - BAR, p.top()), p.max),
+                vp.right(),
+            ),
+            None => (
+                Rect::from_min_max(
+                    pos2(vp.right() - BAR, vp.top()),
+                    pos2(vp.right(), vp.bottom() - BAR),
+                ),
+                vp.right() - BAR,
+            ),
+        };
         let hbar = Rect::from_min_max(
             pos2(vp.left(), vp.bottom() - BAR),
-            pos2(vp.right() - BAR, vp.bottom()),
+            pos2(hbar_end, vp.bottom()),
         );
         let id = ui.id().with("pdf");
-        scrollbar(ui, id.with("v"), vbar, &mut self.sy, true);
-        scrollbar(ui, id.with("h"), hbar, &mut self.sx, false);
+        moved |= scrollbar(ui, id.with("v"), vbar, &mut self.sy, true);
+        moved |= scrollbar(ui, id.with("h"), hbar, &mut self.sx, false);
+        if moved {
+            // Drawn after the pages: show them where the view went.
+            ctx.request_repaint();
+        }
         paint_toast(ui, vp, &mut self.toast, now, &theme);
 
         // The find bar goes last: drawn on top, and it sees the keys the
@@ -635,6 +758,38 @@ impl PdfDoc {
     }
 }
 
+/// Drop the least recently used textures (not used since `keep_frame`) until
+/// `cache` fits in `budget` bytes.
+fn evict(cache: &mut HashMap<TileKey, Cached>, budget: u64, keep_frame: u64) {
+    let bytes = |c: &Cached| {
+        let [w, h] = c.texture.size();
+        w as u64 * h as u64 * 4
+    };
+    let mut total: u64 = cache.values().map(bytes).sum();
+    if total <= budget {
+        return;
+    }
+    let mut by_age: Vec<(u64, TileKey, u64)> = cache
+        .iter()
+        .filter(|(_, c)| c.last_used < keep_frame)
+        .map(|(k, c)| (c.last_used, *k, bytes(c)))
+        .collect();
+    by_age.sort_unstable_by_key(|e| e.0);
+    for (_, key, b) in by_age {
+        if total <= budget {
+            break;
+        }
+        cache.remove(&key);
+        total -= b;
+    }
+}
+
+/// Fit-width zoom for a page area `vw` wide. Without the minimap's column
+/// the scrollbar overlays the page area: leave it room.
+fn fit_zoom(l: &Layout, vw: f64, column: bool) -> f64 {
+    l.fit_width_zoom(if column { vw } else { vw - 14.0 })
+}
+
 /// Size of a page's raster at `scale` device pixels per PDF point.
 fn page_px_at(size: [f32; 2], scale: f64) -> [u32; 2] {
     [
@@ -650,6 +805,7 @@ fn tile_key(page: usize, scale: u32, r: [u32; 4]) -> TileKey {
         scale,
         tx: (r[0] / 1024) as u16,
         ty: (r[1] / 1024) as u16,
+        thumb: false,
     }
 }
 
@@ -720,6 +876,10 @@ impl Document for PdfDoc {
             if let Some(s) = self.settled_scale {
                 self.tiles.retain(|k, _| k.scale == s);
             }
+            // …and the thumbnails the minimap was showing.
+            let frame = self.frame;
+            self.thumbs.retain(|_, c| c.last_used == frame);
+            self.goto = None;
             self.handle.want(Vec::new());
             self.last_wanted.clear();
             // …and no geometry beyond what was on screen; text stays (it's small).
@@ -768,7 +928,7 @@ mod tests {
     use whir_core::{Library, Waker};
 
     use super::*;
-    use crate::engine::test_support::{NoTextures, pdfium_lock, test_pdf};
+    use crate::engine::test_support::{NoTextures, pages_pdf, pdfium_lock, test_pdf};
 
     const NONE: Modifiers = Modifiers::NONE;
 
@@ -796,6 +956,8 @@ mod tests {
             }
             ctx.set_fonts(fonts);
             let textures: Arc<dyn TextureRegistry> = Arc::new(NoTextures);
+            // Defaults (minimap on), and never the user's settings file.
+            whir_core::settings::memory_only();
             let cx = OpenCx {
                 textures: textures.clone(),
                 waker: Waker::noop(),
@@ -861,10 +1023,11 @@ mod tests {
                 panic!("not open");
             };
             let l = l.clone();
-            let vw = self.screen.width() as f64;
-            let zoom = l.fit_width_zoom(vw - 14.0);
+            let vp = self.doc.shown_vp;
+            let vw = vp.width() as f64;
+            let zoom = self.doc.shown_zoom.expect("drawn");
             let v = View {
-                vp: self.screen,
+                vp,
                 zoom,
                 x_off: ((vw - l.content_width() * zoom) / 2.0).max(0.0),
                 sx: self.doc.sx.offset,
@@ -1009,6 +1172,126 @@ mod tests {
 
         drop(h);
         // Let the PDF thread close the document before the lock is released.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Page keys, the minimap's controls, clicks and slider drags, go to
+    /// page, and toggling the minimap.
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn minimap_and_page_nav() {
+        let _pdfium = pdfium_lock();
+        let path = std::env::temp_dir().join(format!("whir-pdf-nav-{}.pdf", std::process::id()));
+        std::fs::write(&path, pages_pdf(6)).unwrap();
+        let mut h = Harness::new(path.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        let State::Ready(l) = &h.doc.state else {
+            panic!("not open");
+        };
+        let l = l.clone();
+        let zoom = h.doc.shown_zoom.unwrap();
+        let (pages, panel) = minimap::split(h.screen);
+        assert_eq!(h.doc.shown_vp, pages, "the minimap takes its column");
+        let at = |h: &Harness, p: usize| {
+            let want = (l.landing(p) * zoom).min(h.doc.sy.max_offset());
+            (h.doc.sy.offset - want).abs() < 1e-6
+        };
+        let ctrl = Modifiers::CTRL;
+
+        // Ctrl+↓/↑ step pages; at fit width, → and ← do too.
+        h.key(Key::ArrowDown, ctrl);
+        assert!(at(&h, 1));
+        h.key(Key::ArrowDown, ctrl);
+        assert!(at(&h, 2));
+        h.key(Key::ArrowUp, ctrl);
+        assert!(at(&h, 1));
+        h.key(Key::ArrowRight, NONE);
+        assert!(at(&h, 2));
+        h.key(Key::ArrowLeft, NONE);
+        assert!(at(&h, 1));
+        // From partway down a page, back goes to its top.
+        h.key(Key::ArrowDown, NONE);
+        h.key(Key::ArrowUp, ctrl);
+        assert!(at(&h, 1));
+        // The minimap shows the page number: no toast.
+        assert!(h.doc.toast.is_none());
+
+        // The header's ˅ and ˄ buttons.
+        let place =
+            |h: &Harness| minimap::Placement::new(h.doc.mini.clone().unwrap(), panel, &h.doc.sy);
+        let (prev, next, _) = minimap::header_rects(place(&h).header);
+        h.click(next.center(), NONE);
+        assert!(at(&h, 2));
+        h.click(prev.center(), NONE);
+        assert!(at(&h, 1));
+
+        // Clicking a thumbnail goes to its page.
+        let ppp = h.ctx.pixels_per_point() as f64;
+        let thumb = place(&h).thumb_rect(&l, 4, ppp);
+        h.click(thumb.center(), NONE);
+        assert!(at(&h, 4), "{}", h.doc.sy.offset);
+
+        // Ctrl+G, a number, Enter.
+        h.key(Key::G, ctrl);
+        assert!(h.doc.goto.is_some());
+        h.idle();
+        h.frame(vec![In::Text("3".into())], NONE);
+        h.key(Key::Enter, NONE);
+        assert!(at(&h, 2), "{}", h.doc.sy.offset);
+        assert!(h.doc.goto.is_none());
+
+        // Ctrl+M: the pages take the whole width (a new fit zoom), still at
+        // the same place in the document; and back.
+        let y = h.doc.sy.offset / zoom;
+        h.key(Key::M, ctrl);
+        h.idle();
+        assert!(!minimap::enabled());
+        assert_eq!(h.doc.shown_vp, h.screen);
+        let wide = h.doc.shown_zoom.unwrap();
+        assert!(wide > zoom);
+        assert!((h.doc.sy.offset / wide - y).abs() < 1e-6);
+        h.key(Key::M, ctrl);
+        h.idle();
+        assert!(minimap::enabled());
+        assert_eq!(h.doc.shown_zoom, Some(zoom));
+        assert!((h.doc.sy.offset / zoom - y).abs() < 1e-6);
+
+        // Dragging the slider to the bottom reaches the end; to the top, the start.
+        let p = place(&h);
+        let slider = p.slider(&h.doc.sy, &h.doc.sx, zoom, 0.0);
+        let (a, b) = (
+            slider.center(),
+            pos2(slider.center().x, p.area.bottom() + 50.0),
+        );
+        h.frame(vec![In::PointerMoved(a)], NONE);
+        h.button(a, true, NONE);
+        for k in 1..=4 {
+            h.frame(vec![In::PointerMoved(a.lerp(b, k as f32 / 4.0))], NONE);
+        }
+        h.button(b, false, NONE);
+        assert_eq!(h.doc.sy.offset, h.doc.sy.max_offset());
+        let p = place(&h);
+        let slider = p.slider(&h.doc.sy, &h.doc.sx, zoom, 0.0);
+        let (a, b) = (
+            slider.center(),
+            pos2(slider.center().x, p.area.top() - 50.0),
+        );
+        h.frame(vec![In::PointerMoved(a)], NONE);
+        h.button(a, true, NONE);
+        for k in 1..=4 {
+            h.frame(vec![In::PointerMoved(a.lerp(b, k as f32 / 4.0))], NONE);
+        }
+        h.button(b, false, NONE);
+        assert_eq!(h.doc.sy.offset, 0.0);
+
+        // Thumbnails were asked for (without a GPU they come back failed).
+        h.until("a thumbnail", |h| {
+            h.doc.failed_tiles.iter().any(|k| k.thumb)
+        });
+
+        drop(h);
         std::thread::sleep(Duration::from_millis(300));
         let _ = std::fs::remove_file(&path);
     }

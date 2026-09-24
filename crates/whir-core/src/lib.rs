@@ -9,6 +9,7 @@ pub mod find_bar;
 pub mod library;
 pub mod message_doc;
 pub mod scroll;
+pub mod settings;
 pub mod texture;
 pub mod theme;
 pub mod time;

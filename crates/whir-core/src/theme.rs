@@ -72,6 +72,13 @@ pub struct Theme {
     pub drawer_item_active: Color32,
     pub drawer_grip: Color32,
 
+    /// The PDF minimap: its column, and the slider over what's on screen
+    /// (tinted, so it shows over white pages).
+    pub minimap_bg: Color32,
+    pub minimap_slider: Color32,
+    pub minimap_slider_active: Color32,
+    pub minimap_slider_stroke: Color32,
+
     pub modal_backdrop: Color32,
     pub danger: Color32,
     /// Tab / drawer glyph for notes.
@@ -187,6 +194,10 @@ impl Theme {
             drawer_item_hover: Color32::from_rgb(0x2a, 0x2a, 0x30),
             drawer_item_active: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x2e),
             drawer_grip: Color32::from_rgb(0x70, 0x70, 0x7a),
+            minimap_bg: Color32::from_rgb(0x21, 0x21, 0x25),
+            minimap_slider: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x2c),
+            minimap_slider_active: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x48),
+            minimap_slider_stroke: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0xb0),
             modal_backdrop: Color32::from_black_alpha(0x80),
             danger: Color32::from_rgb(0xff, 0x6b, 0x6b),
             note_glyph: Color32::from_rgb(0xe8, 0xa3, 0x3d),
@@ -242,6 +253,10 @@ impl Theme {
             drawer_item_hover: Color32::from_rgb(0xe7, 0xe7, 0xeb),
             drawer_item_active: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x1f),
             drawer_grip: Color32::from_rgb(0x9a, 0x9a, 0xa2),
+            minimap_bg: Color32::from_rgb(0xec, 0xec, 0xef),
+            minimap_slider: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x22),
+            minimap_slider_active: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x3a),
+            minimap_slider_stroke: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0xa0),
             modal_backdrop: Color32::from_black_alpha(0x50),
             danger: Color32::from_rgb(0xc0, 0x1c, 0x28),
             note_glyph: Color32::from_rgb(0xd9, 0x8a, 0x1c),

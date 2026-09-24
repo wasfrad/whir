@@ -7,7 +7,7 @@ use egui::{CursorIcon, Key, Modifiers, PointerButton, Stroke, StrokeKind, pos2};
 use whir_core::find_bar::fmt_int;
 use whir_core::theme::Theme;
 
-use super::PdfDoc;
+use super::{PdfDoc, minimap};
 use crate::geom;
 use crate::layout::Layout;
 use crate::select::{Gesture, PendingPress, Selection, TextPos, Unit};
@@ -460,20 +460,33 @@ impl PdfDoc {
         pages: usize,
         now: f64,
     ) {
-        if !self.text.available {
-            return;
-        }
+        let has_text = self.text.available;
         let has_sel = self.sel.is_some_and(|s| !s.is_empty());
         let (mut copy, mut all) = (false, false);
         resp.context_menu(|ui| {
-            let c = egui::Button::new("Copy").shortcut_text("Ctrl+C");
-            if ui.add_enabled(has_sel, c).clicked() {
-                copy = true;
-                ui.close();
+            if has_text {
+                let c = egui::Button::new("Copy").shortcut_text("Ctrl+C");
+                if ui.add_enabled(has_sel, c).clicked() {
+                    copy = true;
+                    ui.close();
+                }
+                let a = egui::Button::new("Select all").shortcut_text("Ctrl+A");
+                if ui.add(a).clicked() {
+                    all = true;
+                    ui.close();
+                }
+                ui.separator();
             }
-            let a = egui::Button::new("Select all").shortcut_text("Ctrl+A");
-            if ui.add(a).clicked() {
-                all = true;
+            let label = if minimap::enabled() {
+                "Hide minimap"
+            } else {
+                "Show minimap"
+            };
+            if ui
+                .add(egui::Button::new(label).shortcut_text("Ctrl+M"))
+                .clicked()
+            {
+                minimap::toggle();
                 ui.close();
             }
         });

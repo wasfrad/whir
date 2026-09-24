@@ -72,15 +72,26 @@ and are saved with Ctrl+S.
 | Wheel · drag on the background or a scanned page · middle-drag | Scroll |
 | Drag on text · double-/triple-click · Shift+click | Select text · word · line · extend |
 | Shift+← → (Ctrl: by word) · Shift+Home End | Extend the selection |
-| Ctrl+A · Ctrl+C · right-click | Select all · copy · Copy / Select all menu |
+| Ctrl+A · Ctrl+C · right-click | Select all · copy · Copy / Select all / minimap menu |
 | Ctrl+F · Enter / F3 · Shift+Enter / Shift+F3 · Esc | Find · next · previous · close (the match stays selected) |
 | Ctrl+wheel, pinch, Ctrl+= / Ctrl+− | Zoom at the cursor |
 | Ctrl+0 or 0 | Fit width |
-| PgUp PgDn · Space / Shift+Space · Home End · arrows | Page / scroll |
+| Ctrl+↑ Ctrl+↓ · ← → (when nothing to pan) · ˄ ˅ in the minimap | Previous / next page |
+| Ctrl+G · click the page number | Go to page |
+| Click / drag in the minimap | Go to that page / scroll |
+| Ctrl+M | Show / hide the minimap |
+| PgUp PgDn · Space / Shift+Space · Home End · arrows | Scroll by a screen / scroll |
+
+The minimap is the document in miniature beside the scrollbar: page thumbnails with a
+slider over what's on screen, the page number and previous/next buttons above them.
+It scrolls along with the document, hides itself in narrow windows, and its on/off
+state is kept in `%LOCALAPPDATA%\whir\settings.ini`. Jumping to a part of a long
+document not seen yet shows each page's thumbnail at once while its sharp tiles render.
 
 Search ignores case and line breaks (a hyphenated word split across lines still matches),
 and results stream in while PDFium reads the pages; short documents are read in the
-background as soon as they open, so Ctrl+F is instant.
+background as soon as they open, so Ctrl+F is instant. Pages with matches are marked
+in the minimap.
 
 | CSVs | |
 |---|---|
