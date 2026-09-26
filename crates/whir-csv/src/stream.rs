@@ -47,6 +47,23 @@ pub struct LogicalRow<'a> {
 }
 
 impl<'a> LogicalRow<'a> {
+    /// A file row read outside [`for_each`], when the table's rows and columns
+    /// are the file's own (find's fast path). `cells`: its edited cells.
+    pub fn file_row(
+        key: RowKey,
+        fields: &'a FieldBuf,
+        raw: &'a [u8],
+        cells: Option<&'a RowCells>,
+    ) -> Self {
+        Self {
+            key,
+            fields: Some(fields),
+            raw: Some(raw),
+            cells,
+            cols: None,
+        }
+    }
+
     /// The row's exact file bytes when nothing about it changed.
     pub fn unchanged_raw(&self) -> Option<&'a [u8]> {
         match (self.cells, self.cols, self.fields) {

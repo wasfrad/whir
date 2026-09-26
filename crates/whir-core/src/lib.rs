@@ -17,10 +17,11 @@ pub mod trace;
 pub mod waker;
 
 pub use document::{
-    DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec, SaveResult,
-    needs_attention,
+    DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec, SaveResult, SearchHit,
+    SearchState, needs_attention,
 };
 pub use file::FileSource;
+pub use find_bar::FindQuery;
 pub use library::Library;
 pub use message_doc::MessageDoc;
 pub use texture::{Filter, PixelFormat, TextureDesc, TextureRegistry, UserTexture};

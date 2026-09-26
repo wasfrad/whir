@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use egui::{CentralPanel, Event, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
 use whir_core::theme::{self, Theme};
 use whir_core::{
-    DocCx, DocRequest, Document, OpenCx, SaveAsSpec, SaveResult, TextureRegistry, needs_attention,
-    trace,
+    DocCx, DocRequest, Document, FindQuery, OpenCx, SaveAsSpec, SaveResult, TextureRegistry,
+    needs_attention, trace,
 };
 use whir_gfx::{GpuTextures, PresentResult, Renderer};
 use whir_platform::{
@@ -22,6 +22,7 @@ use crate::close_flow::{self, CloseFlow, Outcome};
 use crate::dispatch;
 use crate::drawer::{self, Drawer};
 use crate::keys::consume_exact;
+use crate::search_panel::{self, SearchPanel};
 use crate::tab_bar::{self, TabInfo};
 
 /// How long the first frame may wait for the active document's content, so a
@@ -73,6 +74,8 @@ pub struct App {
     dialogs: Vec<(u64, DialogFor)>,
     next_token: u64,
     drawer: Drawer,
+    /// Find in all tabs, along the bottom.
+    search: SearchPanel,
     library_scanned: bool,
     toast: Option<(String, f64)>,
     blink_on: bool,
@@ -142,6 +145,7 @@ impl App {
             dialogs: Vec::new(),
             next_token: 0,
             drawer: Drawer::default(),
+            search: SearchPanel::default(),
             library_scanned: false,
             toast: None,
             blink_on: true,
@@ -293,6 +297,28 @@ impl App {
         }
     }
 
+    /// Search every table for `q` (Find in all tabs).
+    fn find_in_tabs(&mut self, q: FindQuery) {
+        let ids = self
+            .tabs
+            .iter_mut()
+            .filter(|t| t.doc.searchable())
+            .map(|t| {
+                t.doc.search(&q);
+                t.id
+            })
+            .collect();
+        self.search.started(q, ids);
+        self.ctx.request_repaint();
+    }
+
+    /// A result was chosen: show its tab.
+    fn activate_tab(&mut self, id: u64) {
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            self.active = i;
+        }
+    }
+
     fn show_toast(&mut self, text: impl Into<String>) {
         let now = self.ctx.input(|i| i.time);
         self.toast = Some((text.into(), now + 3.0));
@@ -315,6 +341,7 @@ impl App {
         let mut open = false;
         let (mut new_note, mut new_table, mut save, mut save_as, mut drawer) =
             (false, false, false, false, false);
+        let (mut find_in_tabs, mut result_step) = (false, None);
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
             let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
@@ -338,6 +365,13 @@ impl App {
             save_as = consume_exact(i, ctrl_shift, Key::S);
             save = consume_exact(i, ctrl, Key::S);
             drawer = consume_exact(i, ctrl, Key::E);
+            find_in_tabs = consume_exact(i, ctrl_shift, Key::F);
+            if consume_exact(i, Modifiers::SHIFT, Key::F4) {
+                result_step = Some(false);
+            }
+            if consume_exact(i, Modifiers::NONE, Key::F4) {
+                result_step = Some(true);
+            }
             const DIGITS: [Key; 9] = [
                 Key::Num1,
                 Key::Num2,
@@ -378,6 +412,14 @@ impl App {
             if self.drawer.phase() == drawer::Phase::Open {
                 self.open_cx.library.scan();
             }
+        }
+        if find_in_tabs {
+            self.search.focus();
+        }
+        if let Some(forward) = result_step
+            && let Some(id) = self.search.step(&mut self.tabs, forward)
+        {
+            self.activate_tab(id);
         }
         let n = self.tabs.len();
         if n > 0 {
@@ -504,6 +546,10 @@ impl App {
                         self.request_close_tab(i);
                     }
                 }
+                DocRequest::FindInTabs(q) => {
+                    self.search.show_query(&q);
+                    self.find_in_tabs(q);
+                }
             }
         }
     }
@@ -629,6 +675,21 @@ impl App {
         }
         if bar.close_window {
             self.pending.push(WindowCommand::Close);
+        }
+
+        // Find in all tabs, along the bottom (before the document takes the rest).
+        let active_id = self.tabs.get(self.active).map(|t| t.id);
+        let found = self.search.show(ui, &mut self.tabs, active_id, &theme);
+        if let Some(q) = found.search {
+            self.find_in_tabs(q);
+        }
+        if let Some(id) = found.activate {
+            self.activate_tab(id);
+        }
+        // Its field or list has the keyboard: documents get pointer input only
+        // (and Ctrl+F / F3 for their own find).
+        if self.search.has_focus(&self.ctx) {
+            ui.input_mut(|i| i.events.retain(search_panel::keep_for_documents));
         }
 
         // Visibility bookkeeping.

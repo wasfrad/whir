@@ -196,6 +196,8 @@ impl Loaded {
             Action::InsertCols { left } => self.insert_cols(left),
             Action::DeleteCols => self.delete_cols(),
             Action::AppendColumn => self.append_column(ui.ctx()),
+            // The frame hands it to the shell (see `show_loaded`).
+            Action::FindInTabs(_) => {}
         }
     }
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 use egui::{FontId, Frame, Key, Rect, RichText, Sense, Stroke, UiBuilder, pos2, vec2};
 use whir_core::find_bar::{FindBar, fmt_int};
 use whir_core::theme::Theme;
-use whir_core::{DocCx, DocRequest, Waker};
+use whir_core::{DocCx, DocRequest, FindQuery, Waker};
 
 use crate::editor::{Editor, Move};
 use crate::grid::{self, GridIo};
@@ -32,14 +32,6 @@ pub fn show_loaded(
 ) -> Option<Request> {
     let now = ui.input(|i| i.time);
     l.now = now;
-    // Unbalanced quotes restarted indexing without quoting: forget everything
-    // derived from the first parse.
-    if l.table.sync() {
-        l.on_reparse();
-        if !l.find.searched.is_empty() {
-            l.start_find(l.find.searched.clone(), waker);
-        }
-    }
     let progress = l.table.progress();
     if progress.done && l.edits.rows().is_none() {
         l.edits.set_base_rows(progress.rows.saturating_sub(1));
@@ -132,7 +124,13 @@ pub fn show_loaded(
         theme,
     );
     for action in out.actions {
-        l.apply(action, ui, waker);
+        match action {
+            grid::Action::FindInTabs(text) => cx.requests.push(DocRequest::FindInTabs(FindQuery {
+                text: text.trim().to_owned(),
+                whole_cell: true,
+            })),
+            action => l.apply(action, ui, waker),
+        }
     }
     // The editor on top of the grid (a press elsewhere commits it).
     l.show_editor(ui, theme);
@@ -141,6 +139,7 @@ pub fn show_loaded(
         let status = l.find.status();
         let out = l.find.bar.show(ui, grid_rect, grid::HEADER_H, &status);
         if let Some(q) = out.search {
+            l.find.reveal_first = true;
             l.start_find(q, waker);
         }
         if out.next {

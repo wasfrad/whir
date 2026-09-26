@@ -31,6 +31,7 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+O | Open files |
 | Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
 | Ctrl+E · rest the pointer on the right edge | Notes drawer |
+| Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |
 | Ctrl+1 … Ctrl+8, Ctrl+9 | Go to tab n / last tab |
@@ -102,6 +103,7 @@ in the minimap.
 | Click a header | Sort ascending → descending → original order |
 | Drag / double-click a header border | Resize / fit a column |
 | Ctrl+F · Enter / F3 · Shift+Enter / Shift+F3 · Esc | Find in the whole file · next · previous · close |
+| Alt+W (or the "ab" button) in a find field | Whole cell: the cell must equal the text; numbers match by value (`2.45` finds `2.4500`) |
 | Type · Enter / Shift+Enter · Tab / Shift+Tab · Esc | Edit the cell (starts with what you type) · commit and move down/up · right/left (Enter returns to where the Tabs started) · cancel |
 | F2 / double-click · Backspace | Edit the cell's value (arrows move the caret; F2 toggles) · start empty |
 | Alt+Enter · Ctrl+Enter (while editing) | Line break in the cell · put the value in every selected cell |
@@ -111,7 +113,7 @@ in the minimap.
 | Ctrl+Shift+= (Ctrl+numpad +) · Ctrl+− | Insert rows above (columns when whole columns are selected) · delete them |
 | Shift+Space · Ctrl+Space | Select rows · columns |
 | Type in the "+" row · click the "+" header | Add a row · add a column |
-| Right-click row numbers, headers, cells | Insert/delete rows and columns, rename a column, sort / original order, cut/copy/paste/clear |
+| Right-click row numbers, headers, cells | Insert/delete rows and columns, rename a column, sort / original order, cut/copy/paste/clear, find a cell's value in all tabs |
 | Ctrl+S · Ctrl+Shift+S | Save · Save As (`.tsv` saves tab-separated) |
 
 Edits sit on top of the file until you save, so even huge CSVs stay instant to edit.
@@ -119,6 +121,19 @@ Saving streams the file once: untouched rows are copied byte for byte (a one-cel
 changes one line), and quoting, line endings and encoding are kept. Sorting is a view —
 it doesn't reorder the saved file. New tables (Ctrl+Shift+N) save into `Documents\whir`
 and appear in the notes drawer.
+
+Find skims the raw file for the text and only splits the rows it turns up in into cells,
+so it runs at roughly disk speed: an 870 MB file takes about 0.3 s once it's in the OS cache.
+
+### Find in all tabs
+
+Ctrl+Shift+F opens a results panel along the bottom of the window (like Notepad++'s) and
+searches every open table at once — say, a price across a week of rack files. Matches are
+grouped by file, each with its row, column and the rest of the row; click one (or use ↑ ↓
+in the list, or F4 / Shift+F4 from anywhere) to switch to that tab with the cell selected.
+Click a file to fold it; drag the panel's top edge to resize it; Esc closes it. Each tab's
+own find shows the same search, so F3 steps through that file's matches. Right-click a
+cell → **Find "…" in all tabs** searches for its value as a whole cell.
 
 ## Building
 
@@ -160,7 +175,7 @@ Much of the baseline memory is the GPU driver itself. On weak or remote machines
 ```
 crates/
   whir/           exe: startup ordering, single instance, tabs + title bar, shortcuts, save/close
-                  prompts, the notes drawer, --register
+                  prompts, the notes drawer, the Find in all tabs panel, --register
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
                   input → egui, Open/Save dialogs, Recycle Bin, session end
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
@@ -169,7 +184,8 @@ crates/
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures
   whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
-  whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background find/sort,
+  whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background
+                  sort and a find that parses only rows containing the query,
                   an edit overlay (row piece table + cell overrides) and a streaming save
 ```
 

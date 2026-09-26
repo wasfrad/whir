@@ -338,6 +338,7 @@ mod bench {
             Encoding::Utf8,
             "city, 5".into(),
             Default::default(),
+            Default::default(),
             tx,
             Waker::noop(),
         );

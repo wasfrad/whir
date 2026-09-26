@@ -184,3 +184,62 @@ fn utf16_files_save_as_utf16_and_reload() {
     assert!(l.grid.sel.is_some(), "selection survives the reload");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn searched(doc: &mut CsvDoc) -> whir_core::SearchState {
+    wait_for(|| {
+        doc.poll();
+        doc.search_state().is_some_and(|s| !s.running)
+    });
+    doc.search_state().unwrap()
+}
+
+#[test]
+fn find_in_all_tabs_lists_and_reveals_matches() {
+    let dir = test_dir("doc-search");
+    let path = dir.join("rack.csv");
+    std::fs::write(
+        &path,
+        b"Terminal,Supplier,Price\r\nDallas,Citgo,2.4567\r\nTulsa,Shell,3.1\r\nTampa,\"BP\",2.45670\r\n",
+    )
+    .unwrap();
+    let mut doc = opened(&path, &dir);
+    assert!(doc.searchable());
+    let q = FindQuery {
+        text: "2.4567".into(),
+        whole_cell: true,
+    };
+    doc.search(&q);
+    let s = searched(&mut doc);
+    assert_eq!((s.query, s.hits, s.truncated), (q.clone(), 2, false));
+    // Nothing moves until a match is chosen.
+    assert_eq!(s.current, None);
+    assert_eq!(doc.loaded().unwrap().grid.sel, None);
+    // The tab's own find shows the query.
+    assert_eq!(doc.loaded().unwrap().find.bar.searched(), &q);
+
+    let hit = doc.search_hit(1).unwrap();
+    assert_eq!(hit.place, "Row 3");
+    assert_eq!(hit.field, "Price");
+    assert_eq!(hit.text, "2.45670");
+    assert_eq!(hit.context, "Tampa  ·  BP");
+    assert_eq!(doc.search_hit(2), None);
+
+    doc.reveal_hit(1);
+    assert_eq!(doc.search_state().unwrap().current, Some(1));
+    let sel = doc.loaded().unwrap().grid.sel.unwrap();
+    assert_eq!((sel.cursor.row, sel.cursor.col), (2, 2));
+}
+
+#[test]
+fn a_search_while_loading_runs_once_loaded() {
+    let dir = test_dir("doc-search-loading");
+    let path = dir.join("t.csv");
+    std::fs::write(&path, b"a\r\nzebra\r\nyak\r\nzebu\r\n").unwrap();
+    let mut doc = CsvDoc::open(path.clone(), &open_cx(&dir));
+    let q = FindQuery::new("ZE");
+    // Straight after opening the file is still loading on its thread.
+    doc.search(&q);
+    assert_eq!(doc.search_state().map(|s| s.query), Some(q));
+    let s = searched(&mut doc);
+    assert_eq!(s.hits, 2);
+}

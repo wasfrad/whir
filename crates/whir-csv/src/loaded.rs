@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, RwLock};
 
-use whir_core::Waker;
 use whir_core::file::FileIdentity;
-use whir_core::find_bar::{FindBar, FindStatus};
+use whir_core::find_bar::{FindBar, FindStatus, fmt_int};
+use whir_core::{FindQuery, SearchHit, SearchState, Waker};
 
 use crate::dialect::{Encoding, Style};
 use crate::edit::{Edits, MAX_EDIT_ROWS, RowKey};
@@ -31,16 +31,25 @@ const MAX_COPY_BYTES: usize = 64 << 20;
 pub struct FindState {
     pub bar: FindBar,
     /// Query the current results belong to.
-    pub searched: String,
+    pub searched: FindQuery,
     /// Matches by row key (stable across edits and sorting).
     pub raw: Vec<(RowKey, u32)>,
     /// (display row, col), sorted: what the grid highlights.
     pub display: Vec<(u64, u32)>,
     pub current: Option<usize>,
+    /// Jump to the first match when it arrives (the user searched here, not
+    /// Find in all tabs).
+    pub reveal_first: bool,
     pub running: bool,
     pub truncated: bool,
     pub cancel: Option<Arc<AtomicBool>>,
     pub rx: Option<Receiver<FindMsg>>,
+    /// Source bytes searched so far, of `total`.
+    pub progress: Arc<AtomicU64>,
+    pub total: u64,
+    /// Data rows when `display` was last computed: matches beyond the rows
+    /// indexed then appear as indexing catches up.
+    pub mapped_rows: u64,
     /// Cells edited while the search runs: its (stale) hits there are dropped.
     pub ignore: std::collections::HashSet<(RowKey, u32)>,
 }
@@ -48,28 +57,41 @@ pub struct FindState {
 impl Default for FindState {
     fn default() -> Self {
         Self {
-            bar: FindBar::new("Find in file", 0.2),
-            searched: String::new(),
+            bar: FindBar::new("Find in file", 0.2).with_whole_cell(),
+            searched: FindQuery::default(),
             raw: Vec::new(),
             display: Vec::new(),
             current: None,
+            reveal_first: true,
             running: false,
             truncated: false,
             cancel: None,
             rx: None,
+            progress: Default::default(),
+            total: 0,
+            mapped_rows: 0,
             ignore: Default::default(),
         }
     }
 }
 
 impl FindState {
+    /// Share of the file searched, while running.
+    pub fn progress(&self) -> Option<f32> {
+        (self.running && self.total > 0)
+            .then(|| (self.progress.load(Ordering::Relaxed) as f64 / self.total as f64) as f32)
+            .map(|p| p.clamp(0.0, 1.0))
+    }
+
     pub fn status(&self) -> FindStatus {
         let n = self.display.len();
         if self.searched.is_empty() {
             FindStatus::Idle
         } else if n == 0 {
             if self.running {
-                FindStatus::Searching { progress: None }
+                FindStatus::Searching {
+                    progress: self.progress(),
+                }
             } else {
                 FindStatus::NoResults
             }
@@ -136,7 +158,7 @@ pub struct ViewCarry {
     pub grid: Grid,
     pub measured_rows: u64,
     pub order: Option<Order>,
-    pub find_query: String,
+    pub find_query: FindQuery,
     pub find_open: bool,
     /// Rows expected once indexed (keeps the scroll position meanwhile).
     pub expected_rows: u64,
@@ -245,7 +267,7 @@ impl Loaded {
         }
         self.pending_sort = carry.resort;
         if !carry.find_query.is_empty() {
-            self.find.bar.query = carry.find_query.clone();
+            self.find.bar.set_searched(&carry.find_query);
             self.start_find(carry.find_query, waker);
         }
     }
@@ -308,6 +330,16 @@ impl Loaded {
     /// Absorb finished sort and find work. Returns a finished save, if any.
     pub fn poll(&mut self) -> Option<(SaveKind, String, SaveOutcome)> {
         use std::sync::mpsc::TryRecvError;
+        // Unbalanced quotes restarted indexing without quoting: forget everything
+        // derived from the first parse. (Here, not in `ui`, so a background tab
+        // searched by Find in all tabs notices too.)
+        if self.table.sync() {
+            self.on_reparse();
+            if !self.find.searched.is_empty() {
+                let (q, waker) = (self.find.searched.clone(), self.waker.clone());
+                self.start_find(q, &waker);
+            }
+        }
         // Sort results (a worker that died without answering counts as failed,
         // so row edits don't stay blocked).
         let sorted = self.sorting.as_ref().and_then(|s| match s.rx.try_recv() {
@@ -356,12 +388,20 @@ impl Loaded {
                 }
             }
         }
-        if got {
+        // Matches past the rows indexed so far show up as indexing catches up.
+        if got
+            || (self.find.display.len() < self.find.raw.len()
+                && self.base_rows() != self.find.mapped_rows)
+        {
             self.remap_matches();
-            if self.find.current.is_none() && !self.find.display.is_empty() {
-                self.find.current = Some(0);
-                self.reveal_match();
-            }
+        }
+        if got
+            && self.find.reveal_first
+            && self.find.current.is_none()
+            && !self.find.display.is_empty()
+        {
+            self.find.current = Some(0);
+            self.reveal_match();
         }
         // A finished save.
         let done = self.saving.as_ref().and_then(|s| match s.rx.try_recv() {
@@ -400,6 +440,7 @@ impl Loaded {
             .current
             .and_then(|i| self.find.display.get(i).copied());
         let base = self.base_rows();
+        self.find.mapped_rows = base;
         let (order, edits) = (&self.order, &self.edits);
         let mut v: Vec<(u64, u32)> = self
             .find
@@ -426,7 +467,9 @@ impl Loaded {
         }
     }
 
-    pub fn start_find(&mut self, query: String, waker: &Waker) {
+    /// Search for `query`. The first match is selected when it arrives if
+    /// `find.reveal_first` (the user searched in this tab).
+    pub fn start_find(&mut self, query: FindQuery, waker: &Waker) {
         if let Some(c) = self.find.cancel.take() {
             c.store(true, Ordering::Relaxed);
         }
@@ -442,18 +485,98 @@ impl Loaded {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
         let (tx, rx) = channel();
+        let input = self.stream_input();
+        self.find.total = input.source.len();
         find::spawn(
-            self.stream_input(),
+            input,
             self.table.encoding,
             self.find.searched.clone(),
             cancel.clone(),
+            progress.clone(),
             tx,
             waker.clone(),
         );
         self.find.cancel = Some(cancel);
+        self.find.progress = progress;
         self.find.rx = Some(rx);
         self.find.running = true;
+    }
+
+    /// Find in all tabs searched for `query`: this tab's find shows it, but
+    /// nothing moves until the user goes to a match.
+    pub fn search_from_tabs(&mut self, query: &FindQuery, waker: &Waker) {
+        self.commit_pending();
+        self.find.bar.set_searched(query);
+        self.find.reveal_first = false;
+        self.start_find(query.clone(), waker);
+    }
+
+    /// Where Find in all tabs stands here.
+    pub fn search_state(&self) -> SearchState {
+        SearchState {
+            query: self.find.searched.clone(),
+            hits: self.find.display.len(),
+            running: self.find.running,
+            progress: self.find.progress(),
+            truncated: self.find.truncated,
+            current: self.find.current,
+        }
+    }
+
+    /// Match `i` described for the Find in all tabs panel: the row number
+    /// shown in the grid, the column's name, the cell and the rest of the row.
+    pub fn search_hit(&mut self, i: usize) -> Option<SearchHit> {
+        const MAX_TEXT: usize = 200;
+        const MAX_CONTEXT: usize = 400;
+        let &(r, col) = self.find.display.get(i)?;
+        let col = col as usize;
+        let mut view = self.view();
+        let field = {
+            let head = view.header();
+            let name = one_line(head.cell(col).text, MAX_TEXT);
+            if name.is_empty() {
+                format!("Column {}", col + 1)
+            } else {
+                name
+            }
+        };
+        let row = view.row(r)?;
+        let place = match view.logical_of(row.key()) {
+            Some(n) => format!("Row {}", fmt_int(n + 1)),
+            None => "New row".to_owned(),
+        };
+        let text = one_line(row.cell(col).text, MAX_TEXT);
+        let mut context = String::new();
+        for c in (0..row.len()).filter(|&c| c != col) {
+            let v = row.cell(c).text.trim();
+            if v.is_empty() {
+                continue;
+            }
+            if !context.is_empty() {
+                context.push_str("  ·  ");
+            }
+            context.push_str(&one_line(v, MAX_CONTEXT));
+            if context.len() >= MAX_CONTEXT {
+                break;
+            }
+        }
+        Some(SearchHit {
+            place,
+            field,
+            text,
+            context,
+        })
+    }
+
+    /// Make match `i` the current one and bring it into view.
+    pub fn reveal_hit(&mut self, i: usize) {
+        if i < self.find.display.len() {
+            self.commit_pending();
+            self.find.current = Some(i);
+            self.reveal_match();
+        }
     }
 
     pub fn step_match(&mut self, forward: bool) {
@@ -476,7 +599,7 @@ impl Loaded {
                 col: col as usize,
             };
             self.grid.sel = Some(Selection::single(cell));
-            self.grid.reveal(cell);
+            self.grid.reveal_centered(cell);
         }
     }
 
@@ -688,4 +811,21 @@ impl Loaded {
         }
         None
     }
+}
+
+/// `s` on one line (line breaks and tabs as spaces), at most `max` bytes (…).
+fn one_line(s: &str, max: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(max + 4));
+    for c in s.chars() {
+        if out.len() >= max {
+            out.push('…');
+            break;
+        }
+        out.push(if matches!(c, '\r' | '\n' | '\t') {
+            ' '
+        } else {
+            c
+        });
+    }
+    out
 }

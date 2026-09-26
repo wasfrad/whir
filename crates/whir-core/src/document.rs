@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::find_bar::FindQuery;
 use crate::library::Library;
 use crate::{TextureRegistry, Waker};
 
@@ -60,6 +61,38 @@ pub enum DocRequest {
     SaveAs,
     /// Close this document's tab.
     Close,
+    /// Search every open tab for this (Find in all tabs).
+    FindInTabs(FindQuery),
+}
+
+/// Where a document's search stands, for the Find in all tabs panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchState {
+    /// The query the results belong to (the document's own find may have
+    /// moved on to another one since the panel searched).
+    pub query: FindQuery,
+    /// Matches found so far.
+    pub hits: usize,
+    pub running: bool,
+    /// 0..=1 while running, when known.
+    pub progress: Option<f32>,
+    /// The count was capped: there are more matches than `hits`.
+    pub truncated: bool,
+    /// The document's current match (where F3 continues from).
+    pub current: Option<usize>,
+}
+
+/// One match, described for the results panel.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchHit {
+    /// Where it is ("Row 1,234").
+    pub place: String,
+    /// What it's in (a column name).
+    pub field: String,
+    /// The text that matched (a cell's value), on one line.
+    pub text: String,
+    /// What's around it (the rest of the row), on one line.
+    pub context: String,
 }
 
 /// Everything a pillar needs to start loading a document (possibly before the
@@ -162,6 +195,30 @@ pub trait Document {
 
     /// whir became active (`true`) or inactive (`false`).
     fn app_activated(&mut self, _active: bool) {}
+
+    // --- find in all tabs ---------------------------------------------------
+
+    /// Takes part in Find in all tabs.
+    fn searchable(&self) -> bool {
+        false
+    }
+
+    /// Search for `query` in the background, replacing the document's own
+    /// find results: its find bar shows the query and F3 steps through them.
+    fn search(&mut self, _query: &FindQuery) {}
+
+    /// Where the document's search stands (`None`: it has none).
+    fn search_state(&self) -> Option<SearchState> {
+        None
+    }
+
+    /// Describe match `i` (in document order).
+    fn search_hit(&mut self, _i: usize) -> Option<SearchHit> {
+        None
+    }
+
+    /// Make match `i` the current one: select it and scroll it into view.
+    fn reveal_hit(&mut self, _i: usize) {}
 }
 
 /// Whether closing this document needs the user's decision.

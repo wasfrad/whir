@@ -27,6 +27,8 @@ pub struct MenuCx {
     /// A custom order is shown.
     pub sorted: bool,
     pub editable: Editable,
+    /// The active cell's value (a menu on cells).
+    pub cursor_text: Option<String>,
 }
 
 fn count(n: u64, one: &str, many: &str) -> String {
@@ -54,6 +56,20 @@ fn item(
         out.push(action);
         ui.close();
     }
+}
+
+/// "Find “2.4567” in all tabs" for a value worth searching for (one line).
+fn find_label(v: &str) -> Option<String> {
+    const MAX: usize = 24;
+    let v = v.trim();
+    if v.is_empty() || v.contains(['\n', '\r']) {
+        return None;
+    }
+    let shown = match v.char_indices().nth(MAX) {
+        Some((i, _)) => format!("{}…", &v[..i]),
+        None => v.to_owned(),
+    };
+    Some(format!("Find “{shown}” in all tabs"))
 }
 
 pub fn show(ui: &mut Ui, cx: &MenuCx, out: &mut Vec<Action>) {
@@ -194,6 +210,11 @@ pub fn show(ui: &mut Ui, cx: &MenuCx, out: &mut Vec<Action>) {
             );
         }
         MenuHit::Cells => {
+            if let Some(label) = cx.cursor_text.as_deref().and_then(find_label) {
+                let text = cx.cursor_text.clone().unwrap_or_default();
+                item(ui, &label, "", Gate::Yes, Action::FindInTabs(text), out);
+                ui.separator();
+            }
             item(ui, "Cut", "Ctrl+X", e.cells, Action::Cut, out);
             item(ui, "Copy", "Ctrl+C", Gate::Yes, Action::Copy, out);
             item(ui, "Paste", "Ctrl+V", e.cells, Action::RequestPaste, out);

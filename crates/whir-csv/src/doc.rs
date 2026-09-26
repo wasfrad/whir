@@ -15,8 +15,8 @@ use whir_core::file::WriteError;
 use whir_core::library::paths_equal;
 use whir_core::theme::Theme;
 use whir_core::{
-    DocCx, DocKind, Document, FileSource, Library, OpenCx, Persistence, SaveAsSpec, SaveResult,
-    Waker,
+    DocCx, DocKind, Document, FileSource, FindQuery, Library, OpenCx, Persistence, SaveAsSpec,
+    SaveResult, SearchHit, SearchState, Waker,
 };
 
 use crate::dialect::{Encoding, Style, sniff, sniff_style};
@@ -51,6 +51,8 @@ pub struct CsvDoc {
     failure: Option<SaveFailure>,
     /// The user dismissed the failure banner (the error still stands).
     failure_hidden: bool,
+    /// Find in all tabs searched while the file was loading: runs once it's in.
+    pending_search: Option<FindQuery>,
 }
 
 pub(crate) const UNTITLED: &str = "Untitled table";
@@ -89,6 +91,7 @@ impl CsvDoc {
             phase,
             failure: None,
             failure_hidden: false,
+            pending_search: None,
         }
     }
 
@@ -385,6 +388,7 @@ pub fn new_blank(cx: &OpenCx) -> CsvDoc {
         phase: Phase::Ready(Box::new(l)),
         failure: None,
         failure_hidden: false,
+        pending_search: None,
     }
 }
 
@@ -423,9 +427,15 @@ impl Document for CsvDoc {
                     if let Some(c) = carry {
                         l.apply_carry(*c, &self.waker);
                     }
+                    if let Some(q) = self.pending_search.take() {
+                        l.search_from_tabs(&q, &self.waker);
+                    }
                     Phase::Ready(Box::new(l))
                 }
-                LoadMsg::Failed(e) => Phase::Failed(e),
+                LoadMsg::Failed(e) => {
+                    self.pending_search = None;
+                    Phase::Failed(e)
+                }
             };
         }
         let done = match &mut self.phase {
@@ -600,6 +610,46 @@ impl Document for CsvDoc {
             if let Some(s) = &l.saving {
                 s.cancel.store(true, Ordering::Relaxed);
             }
+        }
+    }
+
+    // --- find in all tabs ---------------------------------------------------
+
+    fn searchable(&self) -> bool {
+        !matches!(self.phase, Phase::Failed(_))
+    }
+
+    fn search(&mut self, query: &FindQuery) {
+        let waker = self.waker.clone();
+        match &mut self.phase {
+            Phase::Ready(l) => l.search_from_tabs(query, &waker),
+            Phase::Loading { .. } => self.pending_search = Some(query.clone()),
+            Phase::Failed(_) => {}
+        }
+    }
+
+    fn search_state(&self) -> Option<SearchState> {
+        match &self.phase {
+            Phase::Ready(l) => Some(l.search_state()),
+            Phase::Loading { .. } => self.pending_search.as_ref().map(|q| SearchState {
+                query: q.clone(),
+                hits: 0,
+                running: true,
+                progress: None,
+                truncated: false,
+                current: None,
+            }),
+            Phase::Failed(_) => None,
+        }
+    }
+
+    fn search_hit(&mut self, i: usize) -> Option<SearchHit> {
+        self.loaded()?.search_hit(i)
+    }
+
+    fn reveal_hit(&mut self, i: usize) {
+        if let Some(l) = self.loaded() {
+            l.reveal_hit(i);
         }
     }
 }

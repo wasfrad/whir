@@ -683,7 +683,7 @@ impl PdfDoc {
         let out = self.find.show(ui, vp, 0.0, &status);
         if let Some(q) = out.search {
             let anchor = self.search_anchor(l, v, visible, frame);
-            self.start_search(&q, anchor, now, &ctx);
+            self.start_search(&q.text, anchor, now, &ctx);
         }
         if out.next || out.prev {
             self.step_match(out.next, now);

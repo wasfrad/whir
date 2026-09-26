@@ -160,6 +160,8 @@ pub enum Action {
     Rename(usize),
     /// The "+" column header.
     AppendColumn,
+    /// Search every open tab for this cell value (whole cells).
+    FindInTabs(String),
     /// Header click: ascending → descending → original order.
     ToggleSort(usize),
     Sort(usize, Direction),
@@ -226,6 +228,10 @@ pub struct Grid {
     gutter_w: f32,
     /// Real rows last frame (the ghost row is at this index).
     rows: u64,
+    /// A cell revealed before the grid could (and whether to center it): a
+    /// tab that was never shown, or a row past what it last laid out. It is
+    /// revealed again once the grid knows its size.
+    pending_reveal: Option<(CellPos, bool)>,
     ghost_row: bool,
     ghost_col: bool,
 }
@@ -245,6 +251,7 @@ impl Default for Grid {
             rect: Rect::NOTHING,
             gutter_w: 0.0,
             rows: 0,
+            pending_reveal: None,
             ghost_row: false,
             ghost_col: false,
         }
@@ -321,8 +328,32 @@ impl Grid {
 
     /// Scroll so `cell` is fully visible.
     pub fn reveal(&mut self, cell: CellPos) {
+        self.reveal_with(cell, false);
+    }
+
+    /// Scroll so `cell` is visible, centered vertically if it wasn't (a find
+    /// match: the rows around it are the context).
+    pub fn reveal_centered(&mut self, cell: CellPos) {
+        self.reveal_with(cell, true);
+    }
+
+    fn reveal_with(&mut self, cell: CellPos, center: bool) {
+        let bottom = (cell.row + 1) as f64 * ROW_H as f64;
+        self.pending_reveal =
+            (self.sy.viewport <= 0.0 || bottom > self.sy.content).then_some((cell, center));
+        self.reveal_now(cell, center);
+    }
+
+    fn reveal_now(&mut self, cell: CellPos, center: bool) {
         let top = cell.row as f64 * ROW_H as f64;
-        self.sy.reveal(top, top + ROW_H as f64);
+        let bottom = top + ROW_H as f64;
+        let sy = &mut self.sy;
+        if center && (top < sy.offset || bottom > sy.offset + sy.viewport) {
+            sy.offset = top - (sy.viewport - ROW_H as f64) / 2.0;
+            sy.clamp();
+        } else {
+            sy.reveal(top, bottom);
+        }
         let a = self.col_x(cell.col);
         let b = a + self.col_width(cell.col) as f64;
         self.sx.reveal(a, b);
@@ -443,6 +474,9 @@ impl Grid {
         self.sx.content = content_w + 24.0;
         self.sy.clamp();
         self.sx.clamp();
+        if let Some((cell, center)) = self.pending_reveal.take() {
+            self.reveal_now(cell, center);
+        }
 
         let id = ui.id().with("csv-grid");
         let resp = ui.interact(rect, id, Sense::CLICK | Sense::DRAG);
@@ -966,6 +1000,13 @@ impl Grid {
         scrollbar(ui, id.with("hbar"), hbar, &mut self.sx, false);
 
         // Context menu for what was right-clicked.
+        let cursor_text = match (self.menu_hit, self.sel) {
+            (Some(MenuHit::Cells), Some(s)) if s.cursor.row < rows => io
+                .view
+                .row(s.cursor.row)
+                .map(|r| r.cell(s.cursor.col).text.to_owned()),
+            _ => None,
+        };
         let menu_cx = self.menu_hit.map(|hit| MenuCx {
             hit,
             sel: self.sel.and_then(|s| s.clamped(rows.max(1), cols.max(1))),
@@ -974,6 +1015,7 @@ impl Grid {
             sort: io.sort,
             sorted: io.sorted,
             editable: io.editable,
+            cursor_text,
         });
         resp.context_menu(|ui| {
             if let Some(cx) = &menu_cx {

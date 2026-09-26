@@ -15,6 +15,7 @@ mod drawer;
 mod keys;
 mod register;
 mod reltime;
+mod search_panel;
 mod single_instance;
 mod tab_bar;
 
