@@ -212,10 +212,19 @@ impl App {
     }
 
     /// Close a tab now, letting an in-flight save finish in the background.
+    /// Closing the last one closes whir.
     fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
+        self.remove_tab(index);
+        if self.tabs.is_empty() {
+            self.closing_because_empty = true;
+            self.pending.push(WindowCommand::Close);
+        }
+    }
+
+    fn remove_tab(&mut self, index: usize) {
         let mut tab = self.tabs.remove(index);
         tab.doc.flush();
         if let Some(p) = tab.doc.path() {
@@ -228,11 +237,6 @@ impl App {
             self.zombies.push(tab);
         } else {
             drop(tab);
-        }
-        if self.tabs.is_empty() {
-            self.closing_because_empty = true;
-            self.pending.push(WindowCommand::Close);
-            return;
         }
         if self.active > index || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
@@ -261,11 +265,39 @@ impl App {
         }
     }
 
-    fn close_tabs_by_id(&mut self, ids: &[u64]) {
+    /// The tab menu: close several tabs, asking once about their unsaved work.
+    fn request_close_tabs(&mut self, ids: Vec<u64>, kind: close_flow::Kind) {
+        if self.close_flow.is_some() || ids.is_empty() {
+            return;
+        }
+        let queue: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|t| ids.contains(&t.id) && needs_attention(&*t.doc))
+            .map(|t| t.id)
+            .collect();
+        if queue.is_empty() {
+            self.close_tabs_by_id(&ids, kind);
+        } else {
+            let focus = self.ctx.memory(|m| m.focused());
+            self.close_flow = Some(CloseFlow::new(kind, queue, ids, focus));
+        }
+    }
+
+    fn close_tabs_by_id(&mut self, ids: &[u64], kind: close_flow::Kind) {
         for id in ids {
-            if let Some(i) = self.tabs.iter().position(|t| t.id == *id) {
+            let Some(i) = self.tabs.iter().position(|t| t.id == *id) else {
+                continue;
+            };
+            if kind == close_flow::Kind::AllTabs {
+                self.remove_tab(i);
+            } else {
                 self.close_tab_now(i);
             }
+        }
+        // "Close all" leaves a blank note, as a bare launch does.
+        if self.tabs.is_empty() && kind == close_flow::Kind::AllTabs {
+            self.new_note();
         }
     }
 
@@ -500,7 +532,9 @@ impl App {
                 }
             }
             Outcome::Finished { close } => match flow.kind {
-                close_flow::Kind::Tabs => self.close_tabs_by_id(&close),
+                close_flow::Kind::Tabs | close_flow::Kind::AllTabs => {
+                    self.close_tabs_by_id(&close, flow.kind)
+                }
                 close_flow::Kind::Window => {
                     self.close_confirmed = true;
                     self.pending.push(WindowCommand::Close);
@@ -627,6 +661,7 @@ impl App {
                 id: t.id,
                 title: t.doc.title(),
                 tooltip: t.doc.path().map(|p| p.display().to_string()),
+                has_path: t.doc.path().is_some(),
                 kind: t.doc.kind(),
                 loading: t.doc.is_loading(),
                 dirty: needs_attention(&*t.doc) && t.doc.save_error().is_none(),
@@ -657,6 +692,30 @@ impl App {
         }
         if let Some(i) = bar.close {
             self.request_close_tab(i);
+        }
+        if let Some(i) = bar.close_others {
+            let ids = self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, t)| t.id)
+                .collect();
+            self.request_close_tabs(ids, close_flow::Kind::Tabs);
+        }
+        if let Some(i) = bar.close_to_right {
+            let ids = self.tabs.iter().skip(i + 1).map(|t| t.id).collect();
+            self.request_close_tabs(ids, close_flow::Kind::Tabs);
+        }
+        if bar.close_all {
+            let ids = self.tabs.iter().map(|t| t.id).collect();
+            self.request_close_tabs(ids, close_flow::Kind::AllTabs);
+        }
+        if let Some(p) = bar.copy_path.and_then(|i| self.tabs.get(i)?.doc.path()) {
+            self.ctx.copy_text(p.display().to_string());
+        }
+        if let Some(p) = bar.reveal.and_then(|i| self.tabs.get(i)?.doc.path()) {
+            self.pending.push(WindowCommand::Reveal(p.to_owned()));
         }
         if bar.open_dialog {
             self.pending.push(Self::open_dialog_command());

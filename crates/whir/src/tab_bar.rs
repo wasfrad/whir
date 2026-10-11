@@ -11,6 +11,8 @@ pub struct TabInfo<'a> {
     pub id: u64,
     pub title: &'a str,
     pub tooltip: Option<String>,
+    /// Backed by a file (Copy path, Show in Explorer).
+    pub has_path: bool,
     pub kind: DocKind,
     pub loading: bool,
     /// Unsaved changes the user must save: a dot instead of ✕ until hovered.
@@ -23,6 +25,13 @@ pub struct TabInfo<'a> {
 pub struct TabBarOutput {
     pub activate: Option<usize>,
     pub close: Option<usize>,
+    /// Tab menu: close every tab but this one.
+    pub close_others: Option<usize>,
+    /// Tab menu: close the tabs after this one.
+    pub close_to_right: Option<usize>,
+    pub close_all: bool,
+    pub copy_path: Option<usize>,
+    pub reveal: Option<usize>,
     pub open_dialog: bool,
     pub new_note: bool,
     pub new_table: bool,
@@ -130,6 +139,7 @@ pub fn show(
         if let Some(tip) = &tab.tooltip {
             resp.clone().on_hover_text_at_pointer(tip);
         }
+        tab_menu(&resp, i, tab, tabs.len(), &mut out);
 
         // Paint.
         let r = m.corner_radius as u8;
@@ -290,6 +300,50 @@ pub fn show(
     plus_resp.on_hover_text("New note (Ctrl+N) · right-click for more");
     out.interactive.push(plus);
     out
+}
+
+/// Right-click on a tab. Hidden (overflowed) tabs count as "others" and
+/// "to the right" too.
+fn tab_menu(resp: &egui::Response, i: usize, tab: &TabInfo<'_>, n: usize, out: &mut TabBarOutput) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        if ui
+            .add(egui::Button::new("Close").shortcut_text("Ctrl+W"))
+            .clicked()
+        {
+            out.close = Some(i);
+            ui.close();
+        }
+        if ui
+            .add_enabled(n > 1, egui::Button::new("Close others"))
+            .clicked()
+        {
+            out.close_others = Some(i);
+            ui.close();
+        }
+        if ui
+            .add_enabled(i + 1 < n, egui::Button::new("Close tabs to the right"))
+            .clicked()
+        {
+            out.close_to_right = Some(i);
+            ui.close();
+        }
+        if ui.button("Close all").clicked() {
+            out.close_all = true;
+            ui.close();
+        }
+        if tab.has_path {
+            ui.separator();
+            if ui.button("Copy path").clicked() {
+                out.copy_path = Some(i);
+                ui.close();
+            }
+            if ui.button("Show in Explorer").clicked() {
+                out.reveal = Some(i);
+                ui.close();
+            }
+        }
+    });
 }
 
 #[derive(Clone, Copy)]

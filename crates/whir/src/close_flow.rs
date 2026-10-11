@@ -16,6 +16,8 @@ use crate::app::Tab;
 pub enum Kind {
     /// Closing specific tabs.
     Tabs,
+    /// Closing every tab ("Close all"): whir stays open.
+    AllTabs,
     /// Closing whir.
     Window,
 }

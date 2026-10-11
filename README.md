@@ -33,6 +33,7 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+E · rest the pointer on the right edge | Notes drawer |
 | Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
+| Right-click a tab | Close others · close tabs to the right · close all (leaves a blank note) · copy path · show in Explorer |
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |
 | Ctrl+1 … Ctrl+8, Ctrl+9 | Go to tab n / last tab |
 | Ctrl+Shift+T | Reopen closed tab |
