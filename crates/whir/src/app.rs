@@ -122,6 +122,7 @@ impl App {
             open_cx: OpenCx {
                 textures: registry,
                 library: whir_core::Library::new(waker.clone()),
+                captures: whir_core::Captures::new(waker.clone()),
                 waker,
             },
             tabs: Vec::new(),
@@ -351,6 +352,13 @@ impl App {
         }
     }
 
+    /// Show the capture dock (a process of its own), starting it if needed.
+    fn open_dock(&mut self) {
+        if let Err(e) = whir_capture::launch(whir_capture::Command::Reveal) {
+            self.show_toast(format!("The capture dock couldn't be started: {e}"));
+        }
+    }
+
     fn show_toast(&mut self, text: impl Into<String>) {
         let now = self.ctx.input(|i| i.time);
         self.toast = Some((text.into(), now + 3.0));
@@ -443,6 +451,9 @@ impl App {
             self.drawer.toggle();
             if self.drawer.phase() == drawer::Phase::Open {
                 self.open_cx.library.scan();
+                if self.drawer.view() == drawer::View::Library {
+                    self.open_cx.captures.scan();
+                }
             }
         }
         if find_in_tabs {
@@ -584,6 +595,9 @@ impl App {
                     self.search.show_query(&q);
                     self.find_in_tabs(q);
                 }
+                DocRequest::CopyImage(image) => {
+                    self.pending.push(WindowCommand::CopyImage(image.0));
+                }
             }
         }
     }
@@ -599,6 +613,20 @@ impl App {
             if stale {
                 self.open_cx.library.scan();
             }
+        }
+        if out.rescan_library {
+            let stale = self
+                .open_cx
+                .captures
+                .snapshot()
+                .scanned_at
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(2));
+            if stale {
+                self.open_cx.captures.scan();
+            }
+        }
+        if out.capture {
+            self.open_dock();
         }
         if let Some(path) = out.open {
             self.open_paths(vec![path]);
@@ -645,8 +673,18 @@ impl App {
         }
         let mut drawer_out = drawer::Out::default();
         if self.close_flow.is_none() {
-            let snapshot = self.open_cx.library.snapshot();
-            self.drawer.keys(ui, &snapshot.entries, &mut drawer_out);
+            match self.drawer.view() {
+                drawer::View::Notes => {
+                    let notes = self.open_cx.library.snapshot().entries;
+                    let path_at = |i: usize| notes.get(i).map(|e| e.path.clone());
+                    self.drawer.keys(ui, notes.len(), path_at, &mut drawer_out);
+                }
+                drawer::View::Library => {
+                    let shots = self.open_cx.captures.snapshot().entries;
+                    let path_at = |i: usize| shots.get(i).map(|e| e.path.clone());
+                    self.drawer.keys(ui, shots.len(), path_at, &mut drawer_out);
+                }
+            }
             self.handle_shortcuts(ui);
         }
         let theme = self.theme.clone();
@@ -766,11 +804,59 @@ impl App {
             self.visible_tab = active_id;
         }
 
-        // Content.
         let open_cx = self.open_cx.clone();
         let active = self.active;
-        let mut open_requested = false;
         let mut requests = Vec::new();
+
+        // The toolbar: one surface with the active tab, which pours into it.
+        let mut dock = false;
+        Panel::top("toolbar")
+            .exact_size(m.toolbar_height)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(theme.content_bg))
+            .show(ui, |ui| {
+                let strip = ui.max_rect();
+                // A hairline against the document below.
+                let y = ui.painter().round_to_pixel_center(strip.bottom() - 0.5);
+                ui.painter().line_segment(
+                    [egui::pos2(strip.left(), y), egui::pos2(strip.right(), y)],
+                    egui::Stroke::new(1.0, theme.separator),
+                );
+                let mut tools = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(strip.shrink2(egui::vec2(8.0, 0.0)))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                if let Some(tab) = self.tabs.get_mut(active) {
+                    let mut cx = DocCx {
+                        textures: &open_cx.textures,
+                        waker: &open_cx.waker,
+                        just_activated,
+                        requests: &mut requests,
+                    };
+                    tab.doc.toolbar(&mut tools, &mut cx);
+                }
+                // whir's own, at the far end: the capture dock.
+                let mut ours = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(strip.shrink2(egui::vec2(8.0, 0.0)))
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                let camera = whir_core::toolbar::Glyph::Camera;
+                let capture =
+                    whir_core::toolbar::tool_button(&mut ours, camera, false, None, false, &theme);
+                dock = capture.clicked;
+                capture
+                    .response
+                    .on_hover_text("Screenshots: open the capture dock");
+            });
+        if dock {
+            self.open_dock();
+        }
+
+        // Content.
+        let mut open_requested = false;
         let content = CentralPanel::no_frame()
             .frame(Frame::NONE.fill(theme.content_bg))
             .show(ui, |ui| match self.tabs.get_mut(active) {
@@ -809,11 +895,16 @@ impl App {
             content.response.rect,
             &snapshot,
             self.open_cx.library.dir(),
+            &self.open_cx.captures.snapshot(),
+            self.open_cx.captures.dir(),
+            &self.open_cx,
             active_path.as_deref(),
             blocked,
             &theme,
         );
         drawer_out.open = drawer_out.open.or(out.open);
+        drawer_out.capture |= out.capture;
+        drawer_out.rescan_library |= out.rescan_library;
         drawer_out.new_note |= out.new_note;
         drawer_out.reveal = drawer_out.reveal.or(out.reveal);
         drawer_out.delete = drawer_out.delete.or(out.delete);
@@ -1215,9 +1306,14 @@ impl Handler for App {
 
     fn recycled(&mut self, path: PathBuf, result: Result<(), String>) {
         match result {
-            Ok(()) => self.show_toast("Moved to the Recycle Bin"),
+            Ok(()) => {
+                self.show_toast("Moved to the Recycle Bin");
+                // A capture's highlights go with it.
+                self.open_cx.captures.forget(path.clone());
+            }
             Err(e) => self.show_toast(e),
         }
+        self.open_cx.captures.refresh(vec![path.clone()]);
         self.open_cx.library.refresh(vec![path]);
     }
 

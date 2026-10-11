@@ -2,7 +2,8 @@
 //! `key = value` lines (`#` starts a comment). Loaded on first use; a change
 //! is written back atomically on a background thread. Keys this build doesn't
 //! know survive the round trip, so an older whir never drops a newer one's
-//! settings. (One whir process per session, so there is only one writer.)
+//! settings. (One whir window per session, so `settings.ini` has one writer;
+//! the capture dock is a separate process and keeps its own [`IniFile`].)
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -10,14 +11,16 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::file::{WriteError, write_atomic};
 
-struct Store {
+/// One `key = value` file, held in memory.
+pub struct IniFile {
     /// `None`: in memory only (tests, or no `%LOCALAPPDATA%`).
     path: Option<PathBuf>,
     entries: Vec<(String, String)>,
 }
 
-impl Store {
-    fn load(path: Option<PathBuf>) -> Self {
+impl IniFile {
+    /// A missing or unreadable file is just empty.
+    pub fn load(path: Option<PathBuf>) -> Self {
         let entries = path
             .as_deref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -26,15 +29,23 @@ impl Store {
         Self { path, entries }
     }
 
-    fn get(&self, key: &str) -> Option<&str> {
+    pub fn get(&self, key: &str) -> Option<&str> {
         self.entries
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
 
+    /// Write it back now (atomically), creating the folder if needed.
+    pub fn save(&self) -> Result<(), WriteError> {
+        match &self.path {
+            Some(path) => save_to(path, &serialize(&self.entries)),
+            None => Ok(()),
+        }
+    }
+
     /// Returns true if the value changed.
-    fn set(&mut self, key: &str, value: &str) -> bool {
+    pub fn set(&mut self, key: &str, value: &str) -> bool {
         match self.entries.iter_mut().find(|(k, _)| k == key) {
             Some((_, v)) if v == value => false,
             Some((_, v)) => {
@@ -49,24 +60,25 @@ impl Store {
     }
 }
 
-static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
+static STORE: OnceLock<Mutex<IniFile>> = OnceLock::new();
 
-fn store() -> MutexGuard<'static, Store> {
+fn store() -> MutexGuard<'static, IniFile> {
     STORE
-        .get_or_init(|| Mutex::new(Store::load(default_path())))
+        .get_or_init(|| Mutex::new(IniFile::load(app_data_file("settings.ini"))))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn default_path() -> Option<PathBuf> {
+/// `%LOCALAPPDATA%\whir\<name>`.
+pub fn app_data_file(name: &str) -> Option<PathBuf> {
     let dir = std::env::var_os("LOCALAPPDATA")?;
-    Some(Path::new(&dir).join("whir").join("settings.ini"))
+    Some(Path::new(&dir).join("whir").join(name))
 }
 
 /// Forget the settings file: start from defaults and never write (tests).
 pub fn memory_only() {
     let mut s = STORE
-        .get_or_init(|| Mutex::new(Store::load(None)))
+        .get_or_init(|| Mutex::new(IniFile::load(None)))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     s.path = None;
@@ -82,8 +94,17 @@ pub fn get_bool(key: &str, default: bool) -> bool {
 }
 
 pub fn set_bool(key: &str, value: bool) {
+    set_str(key, if value { "true" } else { "false" });
+}
+
+pub fn get_str(key: &str) -> Option<String> {
+    store().get(key).map(str::to_owned)
+}
+
+/// `value` must be a single line.
+pub fn set_str(key: &str, value: &str) {
     let mut s = store();
-    if s.set(key, if value { "true" } else { "false" }) && s.path.is_some() {
+    if s.set(key, value) && s.path.is_some() {
         drop(s);
         save_soon();
     }
@@ -168,7 +189,7 @@ mod tests {
 
     #[test]
     fn set_keeps_unknown_keys() {
-        let mut s = Store {
+        let mut s = IniFile {
             path: None,
             entries: parse("other = 1\na = false\n"),
         };
@@ -187,14 +208,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("settings.ini");
         save_to(&path, "# whir settings\npdf.minimap = false\n").unwrap();
-        let s = Store::load(Some(path.clone()));
+        let mut s = IniFile::load(Some(path.clone()));
         assert_eq!(s.get("pdf.minimap"), Some("false"));
         // Overwrites in place.
-        save_to(&path, "pdf.minimap = true\n").unwrap();
-        assert_eq!(Store::load(Some(path)).get("pdf.minimap"), Some("true"));
+        s.set("pdf.minimap", "true");
+        s.set("dock.edge", "left");
+        s.save().unwrap();
+        let s = IniFile::load(Some(path));
+        assert_eq!(s.get("pdf.minimap"), Some("true"));
+        assert_eq!(s.get("dock.edge"), Some("left"));
         // A missing file is just empty.
         assert!(
-            Store::load(Some(dir.join("missing.ini")))
+            IniFile::load(Some(dir.join("missing.ini")))
                 .entries
                 .is_empty()
         );

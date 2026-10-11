@@ -119,6 +119,7 @@ pub fn open_cx(dir: &std::path::Path) -> whir_core::OpenCx {
         textures: Arc::new(NoTextures),
         waker: whir_core::Waker::noop(),
         library: whir_core::Library::at(dir.to_path_buf(), whir_core::Waker::noop()),
+        captures: whir_core::Captures::at(dir.join("Screenshots"), whir_core::Waker::noop()),
     }
 }
 

@@ -32,6 +32,8 @@ struct Args {
     warp: bool,
     /// Relaunched after losing the GPU device.
     restarted: bool,
+    /// `--dock` and friends: this process is the capture dock, not a window.
+    dock: Option<whir_capture::Command>,
 }
 
 fn parse_args() -> Args {
@@ -41,6 +43,7 @@ fn parse_args() -> Args {
         unregister: false,
         warp: false,
         restarted: false,
+        dock: None,
     };
     for a in std::env::args_os().skip(1) {
         match a.to_str() {
@@ -48,6 +51,9 @@ fn parse_args() -> Args {
             Some("--unregister") => args.unregister = true,
             Some("--warp") => args.warp = true,
             Some("--restarted") => args.restarted = true,
+            Some(s) if whir_capture::Command::from_arg(s).is_some() => {
+                args.dock = whir_capture::Command::from_arg(s);
+            }
             _ => args.files.push(PathBuf::from(a)),
         }
     }
@@ -102,6 +108,12 @@ fn main() {
     trace::init();
     trace::mark("main");
     let args = parse_args();
+
+    // The capture dock is a process of its own: no window, no GPU, and none
+    // of the single-instance hand-off below.
+    if let Some(cmd) = args.dock {
+        std::process::exit(whir_capture::run(cmd));
+    }
 
     if args.register {
         match register::register() {

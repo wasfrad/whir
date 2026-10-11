@@ -116,6 +116,8 @@ pub enum WindowCommand {
     OpenUrl(String),
     /// Deliver the clipboard text as an `Event::Paste` next frame (menu "Paste").
     Paste,
+    /// Put an image (a packed DIB) on the clipboard.
+    CopyImage(Vec<u8>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -710,6 +712,9 @@ impl State {
                         self.input.borrow_mut().push_event(egui::Event::Paste(text));
                         self.request_repaint();
                     }
+                }
+                WindowCommand::CopyImage(dib) => {
+                    crate::clipboard::set_image(&dib);
                 }
             }
         }

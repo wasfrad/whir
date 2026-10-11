@@ -322,14 +322,7 @@ fn read_entry(
     size: u64,
     attributes: u32,
 ) -> LibraryEntry {
-    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
-    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
-    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
-    let cloud_only = attributes
-        & (FILE_ATTRIBUTE_OFFLINE
-            | FILE_ATTRIBUTE_RECALL_ON_OPEN
-            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-        != 0;
+    let cloud_only = file::is_cloud_only(attributes);
     let head = if cloud_only {
         String::new()
     } else {
@@ -389,7 +382,7 @@ pub fn decode_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn documents_dir() -> Option<PathBuf> {
+pub(crate) fn documents_dir() -> Option<PathBuf> {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
     unsafe {

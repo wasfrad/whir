@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, Vertex};
 use egui::{TextureFilter, TextureId, TextureOptions, TextureWrapMode};
-use whir_core::texture::Filter;
+use whir_core::texture::{Filter, MULTIPLY};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -95,6 +95,8 @@ pub struct Painter {
     layout: ID3D11InputLayout,
     locals: ID3D11Buffer,
     blend: ID3D11BlendState,
+    /// For [`MULTIPLY`] meshes; made the first time one is drawn.
+    multiply: Option<ID3D11BlendState>,
     raster: ID3D11RasterizerState,
     vb: Option<ID3D11Buffer>,
     vb_capacity: usize,
@@ -183,6 +185,7 @@ impl Painter {
                 layout: layout.unwrap(),
                 locals: locals.unwrap(),
                 blend: blend.unwrap(),
+                multiply: None,
                 raster: raster.unwrap(),
                 vb: None,
                 vb_capacity: 0,
@@ -193,6 +196,30 @@ impl Painter {
                 frame_user_textures: HashMap::new(),
             })
         }
+    }
+
+    /// destination × source colour, weighted by source alpha (so feathered
+    /// edges fade out); destination alpha is left alone.
+    fn multiply_blend(&mut self) -> Option<ID3D11BlendState> {
+        if self.multiply.is_none() {
+            let mut desc = D3D11_BLEND_DESC::default();
+            desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: true.into(),
+                SrcBlend: D3D11_BLEND_DEST_COLOR,
+                DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+                BlendOp: D3D11_BLEND_OP_ADD,
+                SrcBlendAlpha: D3D11_BLEND_ZERO,
+                DestBlendAlpha: D3D11_BLEND_ONE,
+                BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+            };
+            unsafe {
+                self.device
+                    .CreateBlendState(&desc, Some(&mut self.multiply))
+            }
+            .ok()?;
+        }
+        self.multiply.clone()
     }
 
     fn sampler(&mut self, key: SamplerKey) -> Option<ID3D11SamplerState> {
@@ -411,6 +438,7 @@ impl Painter {
         let mut vertex_base = 0i32;
         let mut index_base = 0u32;
         let mut bound: Option<(TextureId, SamplerKey)> = None;
+        let mut multiplying = false;
         for (clip, mesh) in meshes() {
             let (vcount, icount) = (mesh.vertices.len() as i32, mesh.indices.len() as u32);
             let draw = (|| {
@@ -422,13 +450,28 @@ impl Painter {
                 if max_x <= min_x || max_y <= min_y {
                     return None;
                 }
+                let multiply = mesh.texture_id == MULTIPLY;
                 let (srv, key) = match mesh.texture_id {
                     TextureId::Managed(id) => {
                         let t = self.managed.get(&id)?;
                         (t.srv.clone(), t.sampler)
                     }
+                    // Just its colour: sampled from the font atlas's white texel.
+                    _ if multiply => {
+                        let t = self.managed.get(&0)?;
+                        (t.srv.clone(), t.sampler)
+                    }
                     TextureId::User(id) => self.frame_user_textures.get(&id)?.clone(),
                 };
+                if multiply != multiplying {
+                    let state = if multiply {
+                        self.multiply_blend()?
+                    } else {
+                        self.blend.clone()
+                    };
+                    unsafe { context.OMSetBlendState(&state, Some(&[0.0; 4]), u32::MAX) };
+                    multiplying = multiply;
+                }
                 if bound != Some((mesh.texture_id, key)) {
                     let sampler = self.sampler(key)?;
                     unsafe {
@@ -489,5 +532,173 @@ impl Painter {
             self.ib_capacity = cap;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::epaint::{Mesh, WHITE_UV};
+    use egui::{Color32, ColorImage, Rect, pos2};
+
+    use super::*;
+    use crate::Device;
+
+    const SIDE: u32 = 8;
+
+    /// Paint `meshes` over a cleared `SIDE` × `SIDE` target on the software
+    /// rasterizer and read it back as rows of RGBA.
+    fn render(clear: [u8; 3], meshes: Vec<Mesh>) -> Vec<[u8; 4]> {
+        let Device {
+            device, context, ..
+        } = Device::create(true).expect("WARP device");
+        let mut painter = Painter::new(&device).unwrap();
+        // The font atlas: all that is used of it here is a white texel.
+        let white = ColorImage::new([1, 1], vec![Color32::WHITE]);
+        let atlas = ImageDelta::full(white, TextureOptions::LINEAR);
+        painter
+            .set_texture(&context, TextureId::Managed(0), &atlas)
+            .unwrap();
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: SIDE,
+            Height: SIDE,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..desc
+        };
+        let primitives: Vec<ClippedPrimitive> = meshes
+            .into_iter()
+            .map(|m| ClippedPrimitive {
+                clip_rect: Rect::EVERYTHING,
+                primitive: Primitive::Mesh(m),
+            })
+            .collect();
+        unsafe {
+            let (mut target, mut staging, mut rtv) = (None, None, None);
+            device
+                .CreateTexture2D(&desc, None, Some(&mut target))
+                .unwrap();
+            device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                .unwrap();
+            let (target, staging) = (target.unwrap(), staging.unwrap());
+            device
+                .CreateRenderTargetView(&target, None, Some(&mut rtv))
+                .unwrap();
+            let rtv = rtv.unwrap();
+            let [r, g, b] = clear.map(|c| c as f32 / 255.0);
+            context.ClearRenderTargetView(&rtv, &[r, g, b, 1.0]);
+            painter
+                .paint(
+                    &context,
+                    &rtv,
+                    [SIDE, SIDE],
+                    1.0,
+                    &primitives,
+                    &GpuTextures::new(),
+                )
+                .unwrap();
+
+            context.CopyResource(&staging, &target);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
+            let mut out = Vec::new();
+            for y in 0..SIDE as usize {
+                let row = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
+                for x in 0..SIDE as usize {
+                    let p = std::slice::from_raw_parts(row.add(x * 4), 4);
+                    out.push([p[0], p[1], p[2], p[3]]);
+                }
+            }
+            context.Unmap(&staging, 0);
+            out
+        }
+    }
+
+    /// A solid quad over the left (`x` < 4) or right half.
+    fn half(left: bool, texture: TextureId, color: Color32) -> Mesh {
+        let x = if left { 0.0 } else { 4.0 };
+        let mut mesh = Mesh::with_texture(texture);
+        mesh.add_rect_with_uv(
+            Rect::from_min_max(pos2(x, 0.0), pos2(x + 4.0, SIDE as f32)),
+            Rect::from_min_max(WHITE_UV, WHITE_UV),
+            color,
+        );
+        mesh
+    }
+
+    fn close(got: [u8; 4], want: [u8; 3]) -> bool {
+        (0..3).all(|c| got[c].abs_diff(want[c]) <= 1)
+    }
+
+    #[test]
+    fn multiply_meshes_tint_what_is_under_them() {
+        let paper = [200u8, 100, 50];
+        let ink = [0xffu8, 0xf0, 0x50];
+        let px = render(
+            paper,
+            vec![half(
+                true,
+                MULTIPLY,
+                Color32::from_rgb(ink[0], ink[1], ink[2]),
+            )],
+        );
+        // What baking the same mark into the pixels gives: (p × c + 127) / 255.
+        let baked = [0, 1, 2].map(|c| ((paper[c] as u32 * ink[c] as u32 + 127) / 255) as u8);
+        for y in 0..SIDE as usize {
+            for x in 0..SIDE as usize {
+                let got = px[y * SIDE as usize + x];
+                let want = if x < 4 { baked } else { paper };
+                assert!(close(got, want), "at {x},{y}: {got:?}, expected {want:?}");
+            }
+        }
+        // Black stays black, white takes the ink exactly.
+        let px = render(
+            [0, 0, 0],
+            vec![half(true, MULTIPLY, Color32::from_rgb(255, 240, 80))],
+        );
+        assert!(close(px[0], [0, 0, 0]), "{:?}", px[0]);
+        let px = render(
+            [255, 255, 255],
+            vec![half(true, MULTIPLY, Color32::from_rgb(255, 240, 80))],
+        );
+        assert!(close(px[0], [255, 240, 80]), "{:?}", px[0]);
+    }
+
+    #[test]
+    fn ordinary_meshes_blend_normally_after_a_multiply_one() {
+        // Multiply on the left, then an opaque and a half-transparent quad on
+        // the right: the blend state must have switched back.
+        let half_red = Color32::from_rgba_unmultiplied(255, 0, 0, 128);
+        let px = render(
+            [200, 100, 50],
+            vec![
+                half(true, MULTIPLY, Color32::from_rgb(128, 128, 128)),
+                half(false, TextureId::Managed(0), Color32::from_rgb(10, 20, 30)),
+                half(false, TextureId::Managed(0), half_red),
+            ],
+        );
+        assert!(close(px[0], [100, 50, 25]), "{:?}", px[0]);
+        // Premultiplied "over": src + dst × (1 - a).
+        let [r, g, b, a] = half_red.to_array();
+        let over = |src: u8, dst: u8| (src as u32 + dst as u32 * (255 - a as u32) / 255) as u8;
+        let want = [over(r, 10), over(g, 20), over(b, 30)];
+        assert!(close(px[7], want), "{:?}, expected {want:?}", px[7]);
     }
 }

@@ -962,6 +962,10 @@ mod tests {
                 textures: textures.clone(),
                 waker: Waker::noop(),
                 library: Library::at(std::env::temp_dir(), Waker::noop()),
+                captures: whir_core::Captures::at(
+                    std::env::temp_dir().join("whir-no-captures"),
+                    Waker::noop(),
+                ),
             };
             Self {
                 ctx,

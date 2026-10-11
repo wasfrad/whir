@@ -70,7 +70,7 @@ thread_local! {
     static FACTORY: RefCell<Option<IWICImagingFactory>> = const { RefCell::new(None) };
 }
 
-fn factory() -> Result<IWICImagingFactory, DecodeError> {
+pub(crate) fn factory() -> windows::core::Result<IWICImagingFactory> {
     FACTORY.with(|f| {
         if let Some(fac) = &*f.borrow() {
             return Ok(fac.clone());

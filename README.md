@@ -3,10 +3,11 @@
 A fast, lean, native Windows app for the files that matter at work: **images, PDFs,
 CSVs and notes**. Double-click a file and it's on screen; open another and it becomes a
 tab in the same window. Start whir on its own and you get a blank note to type into —
-it saves itself, no questions asked.
+it saves itself, no questions asked. A small capture dock takes screenshots, keeps them,
+and opens each one ready to highlight.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~4.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
+- One portable folder: `whir.exe` (~5.2 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
 - No installer, no admin rights, no VC++ redistributable
 
 ## Using it on a work PC
@@ -17,7 +18,8 @@ it saves itself, no questions asked.
 3. Right-click a `.png`, `.pdf` and `.csv` → **Open with → Choose another app → whir → Always**.
    (Windows doesn't let programs make themselves the default; this click is required once per type.)
 
-`whir.exe --unregister` removes the entries. Deleting the folder removes the program.
+`whir.exe --unregister` removes the entries. Deleting the folder removes the program
+(close the capture dock first, if it is running: it is `whir.exe` too).
 
 If your PC blocks unsigned programs (AppLocker/WDAC), try running `whir.exe` from the
 folder first. If it's blocked there, it will be blocked everywhere.
@@ -30,7 +32,8 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+Shift+N · right-click `+` | New table (CSV) |
 | Ctrl+O | Open files |
 | Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
-| Ctrl+E · rest the pointer on the right edge | Notes drawer |
+| Ctrl+E · rest the pointer on the right edge | The drawer: notes and screenshots |
+| Camera button at the right of the toolbar | Open the capture dock |
 | Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
 | Right-click a tab | Close others · close tabs to the right · close all (leaves a blank note) · copy path · show in Explorer |
@@ -55,11 +58,12 @@ Notes are plain Markdown files in `Documents\whir`, saved about a second after y
 typing (and whenever you switch away). Other `.md` / `.txt` files open in the same editor
 and are saved with Ctrl+S.
 
-| Notes drawer | |
+| Drawer | |
 |---|---|
 | Rest the pointer on the right edge, then on the strip | Peek, then open the list (newest first) |
+| Notes · Library at the top | Switch between notes and screenshots (thumbnails show their highlights) |
 | Click · right-click | Open · Show in Explorer / Delete (to the Recycle Bin) |
-| Ctrl+E, then ↑ ↓ · Enter · Delete · Esc | Keyboard: move · open · delete · close |
+| Ctrl+E, then ↑ ↓ · ← → · Enter · Delete · Esc | Keyboard: move · Notes / Library · open · delete · close |
 
 | Images | |
 |---|---|
@@ -69,6 +73,42 @@ and are saved with Ctrl+S.
 | 0 · 1 · + · − | Fit · 100% · zoom in · zoom out |
 | ← → · Home End · PgUp PgDn | Previous/next image in the folder (Explorer's sort order) · first/last |
 | R · Shift+R · right-click | Rotate right · left (on screen only, for as long as the tab is open; the file isn't changed) |
+| H · the highlighter in the toolbar (hold or right-click it for colours) | Highlighter on / off |
+| Highlighter on: drag · click · drag a selected highlight · Delete · Esc | Draw a highlight · select one · move it · remove it · let go (selection, then the tool) |
+| Ctrl+Z · Ctrl+Y / Ctrl+Shift+Z | Undo · redo highlights |
+| Ctrl+C · right-click → Copy image | Copy the image as it is on screen, highlights and rotation included |
+| Ctrl+Shift+S · right-click → Save a copy… | Save that as a new PNG (Ctrl+S offers the same once there are highlights) |
+
+Highlights tint what is under them the way a marker does: white paper takes the colour,
+black text stays black. They are never drawn into the file. On a screenshot in the
+Library they are saved as you make them and can be moved or removed any time; on any
+other image they last as long as the tab. What leaves whir with the highlights in it is
+a copy: the clipboard, or Save a copy.
+
+## Screenshots
+
+`whir.exe --dock` (or the camera button in the toolbar) starts the capture dock: a slim
+grip on a screen edge that slides out when the pointer rests on it. It is a small process
+of its own (about 2 MB) and stays when whir's window is closed.
+
+| Capture dock | |
+|---|---|
+| Camera · Ctrl+PrtSc from anywhere | Capture: the screen freezes and dims |
+| …then drag · click a window · click the desktop | Take that region · that window · that monitor |
+| Esc · right-click | Cancel |
+| Stopwatch | Delay: off → 3 s → 5 s (time to open a menu or a tooltip before the freeze) |
+| Drag the dock | Move it to any edge of any monitor (remembered) |
+| Right-click the dock | Capture · delay · open whir · open the screenshots folder · close the dock |
+
+Each capture is saved as a PNG in `Documents\whir\Screenshots` and opens in whir with the
+highlighter in hand; the drawer's Library lists them all. Their highlights are kept beside
+them (in `Screenshots\.whir`), so the PNG is always the capture itself.
+`whir.exe --dock-capture` captures at once; `whir.exe --dock-quit` closes the dock. The
+hotkey can be changed or switched off in `%LOCALAPPDATA%\whir\dock.ini`
+(`hotkey = ctrl+alt+f9`, `hotkey = off`).
+
+Captures are taken with GDI, which keeps the dock small: HDR content comes out as SDR,
+protected video is black, and the mouse pointer is never in the picture.
 
 | PDFs | |
 |---|---|
@@ -153,6 +193,7 @@ Diagnostics:
   `%LOCALAPPDATA%\whir\trace.log`.
 - `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
 - `WHIR_NOTES_DIR=<folder>` keeps notes somewhere other than `Documents\whir` (testing).
+- `WHIR_CAPTURES_DIR=<folder>` does the same for screenshots.
 
 ## Measured (release build, desktop with NVIDIA GPU, files in the OS cache)
 
@@ -164,6 +205,7 @@ Diagnostics:
 | 20 MB / 300k-row CSV | ~90 ms | ~150 ms | ~67 MB |
 | 66-page PDF | ~90 ms | ~160 ms | ~113 MB |
 | same CSV, `--warp` | — | ~72 ms | ~34 MB |
+| the capture dock (`--dock`), idle | — | — | ~2 MB (a frozen screen's worth more while selecting) |
 
 On this machine the critical path is the GPU driver (`D3D11CreateDevice` ≈ 135 ms),
 which runs in parallel with everything else. If the device isn't ready ~40 ms after the
@@ -175,15 +217,19 @@ Much of the baseline memory is the GPU driver itself. On weak or remote machines
 
 ```
 crates/
-  whir/           exe: startup ordering, single instance, tabs + title bar, shortcuts, save/close
-                  prompts, the notes drawer, the Find in all tabs panel, --register
+  whir/           exe: startup ordering, single instance, tabs + title bar, toolbar, shortcuts,
+                  save/close prompts, the drawer, the Find in all tabs panel, --register
+  whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer;
+                  screen grab, the selection overlay, PNG into the screenshots folder
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
                   input → egui, Open/Save dialogs, Recycle Bin, session end
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
-                  replace, the notes library, find bar, f64 scrolling, theme tokens, tracing
+                  replace, the notes library, the screenshots store, highlights, toolbar widgets,
+                  find bar, f64 scrolling, theme tokens, tracing
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
-  whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures
+  whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
+                  highlights (multiply-blended on screen, baked the same way into copies), PNG encoding, thumbnails
   whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
   whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background
                   sort and a find that parses only rows containing the query,
@@ -214,7 +260,8 @@ CJK and emoji fallbacks load on first use.
 
 ## Not yet
 
-PDF passwords, animated GIFs, ICC colour management, image editing, tab reordering,
+PDF passwords, animated GIFs, ICC colour management, image editing beyond highlights,
+freehand marks, resizing a highlight, hiding the dock over full-screen apps, tab reordering,
 spreadsheet formulas, cell formatting and multiple sheets,
 WebP/HEIC without the Microsoft Store codecs, IME composition at the caret, spell check,
 subfolders in the notes library.

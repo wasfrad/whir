@@ -1,6 +1,7 @@
-//! The notes drawer: a slim panel at the right edge, hidden until you reach for
-//! it. Resting the pointer against the edge slides out a narrow strip; resting
-//! on the strip opens the list of saved notes and tables, newest first.
+//! The drawer: a slim panel at the right edge, hidden until you reach for it.
+//! Resting the pointer against the edge slides out a narrow strip; resting on
+//! the strip opens it. It has two views: Notes (saved notes and tables) and
+//! Library (screenshots, with thumbnails), each newest first.
 //!
 //! Every document has an overlay scrollbar along that same edge, so the drawer
 //! defers to it: it never appears while a button is held or a scrollbar is in
@@ -11,16 +12,31 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use egui::{
-    Align2, Area, CursorIcon, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Stroke, pos2,
-    vec2,
+    Align2, Area, Color32, CursorIcon, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Sense,
+    Stroke, pos2, vec2,
 };
-use whir_core::DocKind;
-use whir_core::library::{EntryKind, LibraryEntry, LibrarySnapshot};
+use whir_core::captures::CapturesSnapshot;
+use whir_core::library::{EntryKind, LibrarySnapshot};
 use whir_core::theme::Theme;
+use whir_core::{DocKind, OpenCx, marks};
+use whir_image::{Thumb, Thumbs};
 
 use crate::keys::consume_exact;
 use crate::reltime::{self, SystemFormats};
 use crate::tab_bar::paint_kind_glyph;
+
+/// What the drawer lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    #[default]
+    Notes,
+    /// Screenshots.
+    Library,
+}
+
+/// Height of a Library row, and the box its thumbnail is fitted in.
+const SHOT_ROW_H: f32 = 72.0;
+const THUMB: egui::Vec2 = vec2(96.0, 60.0);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
@@ -76,10 +92,13 @@ pub struct Drawer {
     quiet_until: f64,
     /// The pointer entered the edge with a button held (a drag): not a reach.
     entered_down: bool,
-    /// Keyboard selection (pinned mode).
-    selected: usize,
+    view: View,
+    /// Keyboard selection (pinned mode), per view.
+    selected: [usize; 2],
     panel: Rect,
     scroll_to_selected: bool,
+    /// Made the first time the Library is shown.
+    thumbs: Option<Thumbs>,
 }
 
 impl Default for Input {
@@ -111,9 +130,11 @@ impl Default for Drawer {
             away_since: None,
             quiet_until: 0.0,
             entered_down: false,
-            selected: 0,
+            view: View::Notes,
+            selected: [0; 2],
             panel: Rect::NOTHING,
             scroll_to_selected: false,
+            thumbs: None,
         }
     }
 }
@@ -126,8 +147,12 @@ pub struct Out {
     /// Show this file (or folder) in Explorer.
     pub reveal: Option<PathBuf>,
     pub delete: Option<PathBuf>,
+    /// Open the capture dock.
+    pub capture: bool,
     /// The strip just peeked: a good moment to rescan the folder.
     pub peeked: bool,
+    /// The Library came into view: rescan the screenshots folder.
+    pub rescan_library: bool,
     /// Seconds until the drawer needs another frame.
     pub wake: Option<f64>,
 }
@@ -135,6 +160,18 @@ pub struct Out {
 impl Drawer {
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    fn set_view(&mut self, view: View, out: &mut Out) {
+        if self.view != view {
+            self.view = view;
+            self.scroll_to_selected = true;
+            out.rescan_library |= view == View::Library;
+        }
     }
 
     /// Open and stay open (Ctrl+E); again to close.
@@ -266,20 +303,36 @@ impl Drawer {
         (wake, peeked)
     }
 
-    /// Keyboard navigation while pinned open. Call before the document's UI.
-    pub fn keys(&mut self, ui: &mut egui::Ui, entries: &[LibraryEntry], out: &mut Out) {
+    /// Keyboard navigation while pinned open. Call before the document's UI,
+    /// with the length of the list in view and the path of its row `i`.
+    pub fn keys(
+        &mut self,
+        ui: &mut egui::Ui,
+        n: usize,
+        path_at: impl Fn(usize) -> Option<PathBuf>,
+        out: &mut Out,
+    ) {
         if !self.has_keyboard() {
             return;
         }
-        let n = entries.len();
         let mut delete = false;
         let mut open = false;
         let mut close = false;
+        let mut view = None;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
+            // ← Notes, Library →
+            if consume_exact(i, none, Key::ArrowLeft) {
+                view = Some(View::Notes);
+            }
+            if consume_exact(i, none, Key::ArrowRight) {
+                view = Some(View::Library);
+            }
             let mut step = |d: isize| {
                 if n > 0 {
-                    self.selected = (self.selected as isize + d).clamp(0, n as isize - 1) as usize;
+                    self.selected[self.view as usize] =
+                        (self.selected[self.view as usize] as isize + d).clamp(0, n as isize - 1)
+                            as usize;
                     self.scroll_to_selected = true;
                 }
             };
@@ -305,12 +358,15 @@ impl Drawer {
             delete = consume_exact(i, none, Key::Delete);
             close = consume_exact(i, none, Key::Escape);
         });
-        if let Some(e) = entries.get(self.selected) {
+        if let Some(view) = view {
+            // The keys above were for the list that was in view.
+            self.set_view(view, out);
+        } else if let Some(path) = path_at(self.selected[self.view as usize]) {
             if open {
-                out.open = Some(e.path.clone());
+                out.open = Some(path);
                 self.close();
             } else if delete {
-                out.delete = Some(e.path.clone());
+                out.delete = Some(path);
             }
         }
         if close {
@@ -325,6 +381,9 @@ impl Drawer {
         content: Rect,
         lib: &LibrarySnapshot,
         library_dir: Option<&Path>,
+        shots: &CapturesSnapshot,
+        shots_dir: Option<&Path>,
+        cx: &OpenCx,
         active: Option<&Path>,
         blocked: bool,
         theme: &Theme,
@@ -364,6 +423,7 @@ impl Drawer {
         let (wake, peeked) = self.update(&input);
         out.wake = wake;
         out.peeked = peeked;
+        out.rescan_library = peeked && self.view == View::Library;
 
         // Slide: the panel is always laid out full width and moved in from the right.
         let id = Id::new("whir.drawer");
@@ -449,50 +509,79 @@ impl Drawer {
                 let body = Rect::from_min_max(pos2(spine.right(), panel.top()), panel.max);
                 let mut ui =
                     ui.new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(10.0, 10.0))));
-                self.contents(&mut ui, lib, library_dir, active, theme, &mut out);
+                let folders = (library_dir, shots_dir);
+                self.contents(&mut ui, lib, shots, folders, cx, active, theme, &mut out);
             });
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn contents(
         &mut self,
         ui: &mut egui::Ui,
         lib: &LibrarySnapshot,
-        library_dir: Option<&Path>,
+        shots: &CapturesSnapshot,
+        (library_dir, shots_dir): (Option<&Path>, Option<&Path>),
+        cx: &OpenCx,
         active: Option<&Path>,
         theme: &Theme,
         out: &mut Out,
     ) {
         let m = theme.metrics;
         let entries = &lib.entries;
-        // Header: "Notes 12" + new note + open folder.
+        // Header: Notes | Library, then what the view can make, and its folder.
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Notes").size(15.0).color(theme.text));
-            if !entries.is_empty() {
-                ui.label(
-                    egui::RichText::new(entries.len().to_string())
-                        .size(m.small_text_size)
-                        .color(theme.text_dim),
-                );
+            for (view, label, count) in [
+                (View::Notes, "Notes", entries.len()),
+                (View::Library, "Library", shots.entries.len()),
+            ] {
+                if segment(ui, label, count, self.view == view, theme).clicked() {
+                    self.set_view(view, out);
+                }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(dir) = library_dir
-                    && icon_button(ui, Icon::Folder, theme)
-                        .on_hover_text("Open the notes folder")
-                        .clicked()
-                {
-                    out.reveal = Some(dir.to_path_buf());
-                }
-                if icon_button(ui, Icon::Plus, theme)
-                    .on_hover_text("New note (Ctrl+N)")
-                    .clicked()
-                {
-                    out.new_note = true;
-                    self.close();
-                }
-            });
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match self.view {
+                    View::Notes => {
+                        if let Some(dir) = library_dir
+                            && icon_button(ui, Icon::Folder, theme)
+                                .on_hover_text("Open the notes folder")
+                                .clicked()
+                        {
+                            out.reveal = Some(dir.to_path_buf());
+                        }
+                        if icon_button(ui, Icon::Plus, theme)
+                            .on_hover_text("New note (Ctrl+N)")
+                            .clicked()
+                        {
+                            out.new_note = true;
+                            self.close();
+                        }
+                    }
+                    View::Library => {
+                        if let Some(dir) = shots_dir
+                            && icon_button(ui, Icon::Folder, theme)
+                                .on_hover_text("Open the screenshots folder")
+                                .clicked()
+                        {
+                            out.reveal = Some(dir.to_path_buf());
+                        }
+                        if icon_button(ui, Icon::Camera, theme)
+                            .on_hover_text("Open the capture dock")
+                            .clicked()
+                        {
+                            out.capture = true;
+                            self.close();
+                        }
+                    }
+                },
+            );
         });
         ui.add_space(6.0);
+        if self.view == View::Library {
+            self.library(ui, shots, cx, active, theme, out);
+            return;
+        }
 
         if entries.is_empty() {
             ui.add_space(24.0);
@@ -520,7 +609,8 @@ impl Drawer {
             }
             return;
         }
-        self.selected = self.selected.min(entries.len() - 1);
+        self.selected[self.view as usize] =
+            self.selected[self.view as usize].min(entries.len() - 1);
 
         let now_sys = SystemTime::now();
         let now = whir_core::time::now_local();
@@ -529,7 +619,7 @@ impl Drawer {
             .auto_shrink([false, false])
             .id_salt("whir.drawer.list");
         if std::mem::take(&mut self.scroll_to_selected) && self.has_keyboard() {
-            let target = self.selected as f32 * row_h;
+            let target = self.selected[self.view as usize] as f32 * row_h;
             let view = ui.available_height();
             let off = ui
                 .ctx()
@@ -553,7 +643,9 @@ impl Drawer {
                 let painter = ui.painter();
                 if is_active {
                     painter.rect_filled(rect, 6.0, theme.drawer_item_active);
-                } else if resp.hovered() || (self.has_keyboard() && idx == self.selected) {
+                } else if resp.hovered()
+                    || (self.has_keyboard() && idx == self.selected[self.view as usize])
+                {
                     painter.rect_filled(rect, 6.0, theme.drawer_item_hover);
                 }
                 let kind = match e.kind {
@@ -613,28 +705,15 @@ impl Drawer {
                 }
                 if resp.clicked() {
                     out.open = Some(e.path.clone());
-                    self.selected = idx;
+                    self.selected[self.view as usize] = idx;
                 }
-                let path = e.path.clone();
-                let popup = egui::Popup::context_menu(&resp).id(Id::new(("whir.drawer.menu", idx)));
-                popup.show(|ui| {
-                    if ui.button("Open").clicked() {
-                        out.open = Some(path.clone());
-                        ui.close();
-                    }
-                    if ui.button("Show in Explorer").clicked() {
-                        out.reveal = Some(path.clone());
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button(egui::RichText::new("Delete").color(theme.danger))
-                        .clicked()
-                    {
-                        out.delete = Some(path.clone());
-                        ui.close();
-                    }
-                });
+                row_menu(
+                    &resp,
+                    Id::new(("whir.drawer.menu", idx)),
+                    &e.path,
+                    theme,
+                    out,
+                );
             }
         });
         ui.ctx()
@@ -643,12 +722,247 @@ impl Drawer {
             self.close();
         }
     }
+
+    /// The Library: screenshots, each with a thumbnail showing its highlights.
+    fn library(
+        &mut self,
+        ui: &mut egui::Ui,
+        shots: &CapturesSnapshot,
+        cx: &OpenCx,
+        active: Option<&Path>,
+        theme: &Theme,
+        out: &mut Out,
+    ) {
+        let m = theme.metrics;
+        let entries = &shots.entries;
+        if entries.is_empty() {
+            ui.add_space(24.0);
+            if shots.scanning && !shots.scanned {
+                ui.vertical_centered(|ui| ui.add(egui::Spinner::new().size(16.0)));
+            } else if let Some(e) = &shots.error {
+                ui.label(egui::RichText::new(e).color(theme.text_dim));
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("No screenshots yet").color(theme.text));
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Captures are kept in Documents\\whir\\Screenshots.")
+                            .size(m.small_text_size)
+                            .color(theme.text_dim),
+                    );
+                    ui.add_space(10.0);
+                    if ui.button("Capture…").clicked() {
+                        out.capture = true;
+                        self.close();
+                    }
+                });
+            }
+            return;
+        }
+        let at = View::Library as usize;
+        self.selected[at] = self.selected[at].min(entries.len() - 1);
+        let selected = self.selected[at];
+        let keyboard = self.has_keyboard();
+        let thumbs = self
+            .thumbs
+            .get_or_insert_with(|| Thumbs::new(cx.textures.clone(), cx.waker.clone()));
+        thumbs.begin_frame();
+
+        let now_sys = SystemTime::now();
+        let now = whir_core::time::now_local();
+        let off_id = Id::new("whir.drawer.shots.off");
+        let mut scroll = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .id_salt("whir.drawer.shots");
+        if std::mem::take(&mut self.scroll_to_selected) && keyboard {
+            let target = selected as f32 * SHOT_ROW_H;
+            let view = ui.available_height();
+            let off = ui.ctx().data(|d| d.get_temp::<f32>(off_id)).unwrap_or(0.0);
+            let off = if target < off {
+                target
+            } else if target + SHOT_ROW_H > off + view {
+                target + SHOT_ROW_H - view
+            } else {
+                off
+            };
+            scroll = scroll.vertical_scroll_offset(off);
+        }
+        let mut clicked = None;
+        let res = scroll.show_rows(ui, SHOT_ROW_H, entries.len(), |ui, range| {
+            for idx in range {
+                let e = &entries[idx];
+                let (rect, resp) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), SHOT_ROW_H), Sense::CLICK);
+                let is_active = active.is_some_and(|a| whir_core::library::paths_equal(a, &e.path));
+                let painter = ui.painter();
+                if is_active {
+                    painter.rect_filled(rect, 6.0, theme.drawer_item_active);
+                } else if resp.hovered() || (keyboard && idx == selected) {
+                    painter.rect_filled(rect, 6.0, theme.drawer_item_hover);
+                }
+
+                // The thumbnail, fitted in its box, with the highlights over it.
+                let frame = Rect::from_min_size(
+                    pos2(rect.left() + 8.0, rect.center().y - THUMB.y / 2.0),
+                    THUMB,
+                );
+                painter.rect_filled(frame, 4.0, theme.canvas_bg);
+                let mut pixels = None;
+                if e.cloud_only {
+                    // Not downloaded: showing it would download it.
+                    whir_core::theme::note_text("☁");
+                    painter.text(
+                        frame.center(),
+                        Align2::CENTER_CENTER,
+                        "☁",
+                        FontId::proportional(16.0),
+                        theme.text_dim,
+                    );
+                } else if let Thumb::Ready {
+                    texture,
+                    size,
+                    full_size,
+                } = thumbs.get(&e.path, (e.modified, e.size))
+                {
+                    let size = vec2(size[0] as f32, size[1] as f32);
+                    let scale = (frame.width() / size.x).min(frame.height() / size.y);
+                    let image = Rect::from_center_size(frame.center(), size * scale);
+                    let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    painter.image(texture, image, whole, Color32::WHITE);
+                    if let Some(set) = &e.marks
+                        && set.size == full_size
+                    {
+                        let per_pixel = image.width() / full_size[0] as f32;
+                        let on_thumb = painter.with_clip_rect(image);
+                        for mark in &set.marks {
+                            let min = image.min + vec2(mark.x as f32, mark.y as f32) * per_pixel;
+                            let size = vec2(mark.w as f32, mark.h as f32) * per_pixel;
+                            marks::paint(&on_thumb, Rect::from_min_size(min, size), mark.ink);
+                        }
+                    }
+                    pixels = Some(full_size);
+                }
+
+                // When it was taken, and how big it is.
+                let text_left = frame.right() + 10.0;
+                let when = match (
+                    whir_core::time::to_local(e.created),
+                    now_sys.duration_since(e.created),
+                ) {
+                    (Some(then), Ok(age)) => {
+                        reltime::label(&now, &then, age.as_secs() as i64, &SystemFormats)
+                    }
+                    (Some(then), Err(_)) => reltime::label(&now, &then, -1, &SystemFormats),
+                    _ => e.name.clone(),
+                };
+                let width = rect.right() - 8.0 - text_left;
+                let title = elide(painter, &when, FontId::proportional(13.5), width);
+                painter.galley(pos2(text_left, rect.top() + 17.0), title, theme.text);
+                let small = FontId::proportional(m.small_text_size);
+                let detail = match pixels {
+                    Some([w, h]) => format!("{w} × {h}"),
+                    None => String::new(),
+                };
+                let detail = elide(painter, &detail, small, width);
+                painter.galley(pos2(text_left, rect.top() + 38.0), detail, theme.text_dim);
+
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
+                    out.open = Some(e.path.clone());
+                    clicked = Some(idx);
+                }
+                row_menu(
+                    &resp,
+                    Id::new(("whir.drawer.shot", idx)),
+                    &e.path,
+                    theme,
+                    out,
+                );
+            }
+        });
+        thumbs.end_frame();
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(off_id, res.state.offset.y));
+        if let Some(idx) = clicked {
+            self.selected[at] = idx;
+        }
+        if out.open.is_some() {
+            self.close();
+        }
+    }
+}
+
+/// Right-click on a row of either list.
+fn row_menu(resp: &egui::Response, id: Id, path: &Path, theme: &Theme, out: &mut Out) {
+    egui::Popup::context_menu(resp).id(id).show(|ui| {
+        if ui.button("Open").clicked() {
+            out.open = Some(path.to_owned());
+            ui.close();
+        }
+        if ui.button("Show in Explorer").clicked() {
+            out.reveal = Some(path.to_owned());
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button(egui::RichText::new("Delete").color(theme.danger))
+            .clicked()
+        {
+            out.delete = Some(path.to_owned());
+            ui.close();
+        }
+    });
+}
+
+/// One of the header's two views: its name, underlined while it is the one
+/// shown, and how many it holds.
+fn segment(
+    ui: &mut egui::Ui,
+    label: &str,
+    count: usize,
+    on: bool,
+    theme: &Theme,
+) -> egui::Response {
+    let color = if on { theme.text } else { theme.text_dim };
+    let name = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(15.0), color);
+    let number = (on && count > 0).then(|| {
+        ui.painter().layout_no_wrap(
+            count.to_string(),
+            FontId::proportional(theme.metrics.small_text_size),
+            theme.text_dim,
+        )
+    });
+    let width = name.size().x + number.as_ref().map_or(0.0, |n| n.size().x + 6.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width + 4.0, 24.0), Sense::CLICK);
+    let painter = ui.painter();
+    let baseline = rect.center().y - name.size().y / 2.0;
+    let name_width = name.size().x;
+    painter.galley(pos2(rect.left(), baseline), name, color);
+    if let Some(number) = number {
+        let at = pos2(rect.left() + name_width + 6.0, baseline + 3.0);
+        painter.galley(at, number, theme.text_dim);
+    }
+    if on {
+        let y = rect.bottom() - 1.0;
+        painter.line_segment(
+            [pos2(rect.left(), y), pos2(rect.left() + name_width, y)],
+            Stroke::new(2.0, theme.accent),
+        );
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
 }
 
 #[derive(Clone, Copy)]
 enum Icon {
     Plus,
     Folder,
+    Camera,
 }
 
 /// A small frameless icon button (drawn with lines: no font needs these glyphs).
@@ -678,6 +992,18 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, theme: &Theme) -> egui::Response {
                 r.left_bottom(),
             ];
             painter.add(egui::Shape::line(pts.to_vec(), s));
+        }
+        Icon::Camera => {
+            let body = Rect::from_center_size(c + vec2(0.0, 1.0), vec2(14.0, 9.5));
+            painter.rect_stroke(body, 2.0, s, egui::StrokeKind::Middle);
+            let hump = [
+                c + vec2(-3.0, -3.75),
+                c + vec2(-1.75, -6.0),
+                c + vec2(1.75, -6.0),
+                c + vec2(3.0, -3.75),
+            ];
+            painter.add(egui::Shape::line(hump.to_vec(), s));
+            painter.circle_stroke(c + vec2(0.0, 1.0), 2.5, s);
         }
     }
     resp

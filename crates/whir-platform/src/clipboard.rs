@@ -1,4 +1,4 @@
-//! Plain-text clipboard (CF_UNICODETEXT).
+//! The clipboard: plain text (CF_UNICODETEXT) and images (CF_DIB).
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -7,7 +7,7 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 
 static OWNER: AtomicIsize = AtomicIsize::new(0);
 
@@ -63,22 +63,33 @@ pub fn set_text(text: &str) -> bool {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    let bytes = unsafe { std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2) };
+    put(CF_UNICODETEXT.0 as u32, bytes)
+}
+
+/// `dib` is a packed DIB: a BITMAPINFOHEADER followed by its pixels. Windows
+/// offers it to other programs as a bitmap too.
+pub fn set_image(dib: &[u8]) -> bool {
+    put(CF_DIB.0 as u32, dib)
+}
+
+/// Replace the clipboard's contents with `bytes` in `format`.
+fn put(format: u32, bytes: &[u8]) -> bool {
     if !open() {
         return false;
     }
     let ok = unsafe {
         (|| {
             EmptyClipboard().ok()?;
-            let bytes = wide.len() * 2;
-            let hg = GlobalAlloc(GMEM_MOVEABLE, bytes).ok()?;
-            let ptr = GlobalLock(hg) as *mut u16;
+            let hg = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).ok()?;
+            let ptr = GlobalLock(hg) as *mut u8;
             if ptr.is_null() {
                 let _ = GlobalFree(Some(hg));
                 return None;
             }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             let _ = GlobalUnlock(hg);
-            if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(hg.0))).is_err() {
+            if SetClipboardData(format, Some(HANDLE(hg.0))).is_err() {
                 let _ = GlobalFree(Some(hg));
                 return None;
             }

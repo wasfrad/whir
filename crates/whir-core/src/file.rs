@@ -17,10 +17,11 @@ use std::sync::{Arc, Mutex, Weak};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_READONLY, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileAttributesW, GetFileInformationByHandle, INVALID_FILE_ATTRIBUTES,
-    MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileAttributesW, GetFileInformationByHandle,
+    INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    MoveFileExW, REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+    SetFileAttributesW,
 };
 use windows::core::HSTRING;
 
@@ -293,6 +294,26 @@ impl WriteError {
 impl From<io::Error> for WriteError {
     fn from(e: io::Error) -> Self {
         WriteError::from_io(e)
+    }
+}
+
+/// A OneDrive (or other sync client's) placeholder: reading the file would
+/// download it. `attributes` are its Win32 file attributes.
+pub fn is_cloud_only(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    attributes
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+}
+
+/// Mark a file or folder hidden in Explorer (if that fails, it just shows).
+pub fn hide(path: &Path) {
+    unsafe {
+        let _ = SetFileAttributesW(&HSTRING::from(path.as_os_str()), FILE_ATTRIBUTE_HIDDEN);
     }
 }
 

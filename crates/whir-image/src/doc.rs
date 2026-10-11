@@ -5,22 +5,32 @@
 //! resolution is decoded only when the user zooms past what the fit level can
 //! show, and dropped again when the tab is hidden.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::epaint::Vertex;
 use egui::{
-    Color32, ColorImage, CursorIcon, Key, Mesh, Modifiers, Rect, Sense, TextureOptions, pos2, vec2,
+    Color32, ColorImage, CursorIcon, Event, Key, Mesh, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Stroke, TextureOptions, pos2, vec2,
 };
+use whir_core::marks::{self, Ink, Mark, MarkSet};
 use whir_core::theme::Theme;
-use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, Waker};
+use whir_core::toolbar::{self, Glyph};
+use whir_core::{
+    Captures, ClipImage, DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec,
+    SaveResult, TextureRegistry, Waker,
+};
 
+use crate::decode::Decoded;
+use crate::edit::{self, Editor};
+use crate::encode::{PixelLayout, encode_png};
 use crate::pool::{self, JobHandle, Priority};
 use crate::tiles::{self, Level};
 use crate::view::{self, Mode, View};
-use crate::{decode, folder};
+use crate::{bake, decode, folder};
 
 enum Msg {
     Loaded {
@@ -33,6 +43,45 @@ enum Msg {
         level: Level,
     },
     Folder(Vec<PathBuf>),
+    /// The image as a clipboard DIB.
+    Copied(Result<Vec<u8>, String>),
+    /// "Save a copy" wrote this file.
+    Exported(Result<PathBuf, String>),
+    /// What the screenshots folder knows about an image about to be shown.
+    Marks {
+        path: PathBuf,
+        /// It is in that folder (so its marks are kept).
+        stored: bool,
+        /// It was captured moments ago.
+        fresh: bool,
+        saved: Option<MarkSet>,
+    },
+    /// A marks file was written (or couldn't be).
+    MarksSaved {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+/// A capture this recent is opening straight from the dock.
+const FRESH: Duration = Duration::from_secs(15);
+
+/// Look `path` up in the screenshots folder. Reads the disk (and resolves
+/// the Documents folder the first time): for decode workers only.
+fn stored_marks(captures: &Captures, path: &Path) -> Msg {
+    let stored = captures.contains(path);
+    let fresh = stored
+        && std::fs::metadata(path)
+            .and_then(|m| m.created())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < FRESH);
+    Msg::Marks {
+        path: path.to_owned(),
+        stored,
+        fresh,
+        saved: captures.load_marks(path),
+    }
 }
 
 struct Shown {
@@ -50,6 +99,65 @@ impl Shown {
     fn best(&self) -> &Level {
         self.full.as_deref().unwrap_or(&self.fit)
     }
+}
+
+/// What a primary-button drag is doing while the highlighter is armed
+/// (positions in image pixels).
+#[derive(Clone, Copy)]
+enum Drag {
+    /// Drawing a new mark between two corners.
+    Draw { from: Pos2, to: Pos2 },
+    /// Moving mark `index` by `to - from`.
+    Move { index: usize, from: Pos2, to: Pos2 },
+}
+
+/// A drawn mark is at least this many points a side (smaller is a slip).
+const MIN_DRAW: f32 = 4.0;
+
+/// The mark a drag between `a` and `b` draws: whole pixels, inside the
+/// image. `None` if a side is under `min` pixels.
+fn drawn(a: Pos2, b: Pos2, image: egui::Vec2, min: f32, ink: Ink) -> Option<Mark> {
+    let r = Rect::from_two_pos(a, b);
+    if r.width() < min || r.height() < min {
+        return None;
+    }
+    let x0 = r.min.x.floor().clamp(0.0, image.x) as u32;
+    let y0 = r.min.y.floor().clamp(0.0, image.y) as u32;
+    let x1 = r.max.x.ceil().clamp(0.0, image.x) as u32;
+    let y1 = r.max.y.ceil().clamp(0.0, image.y) as u32;
+    (x1 > x0 && y1 > y0).then(|| Mark {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+        ink,
+    })
+}
+
+/// `mark` moved by `delta` pixels, kept inside the image.
+fn moved(mark: Mark, delta: egui::Vec2, image: egui::Vec2) -> Mark {
+    let axis = |at: u32, len: u32, d: f32, size: f32| {
+        (at as f32 + d)
+            .round()
+            .clamp(0.0, (size - len as f32).max(0.0)) as u32
+    };
+    Mark {
+        x: axis(mark.x, mark.w, delta.x, image.x),
+        y: axis(mark.y, mark.h, delta.y, image.y),
+        ..mark
+    }
+}
+
+/// `path` decoded in full as it is on screen: its marks baked in and turned.
+/// Marks need paper to tint, so with marks (or `opaque`) transparency becomes
+/// white.
+fn flattened(path: &Path, marks: &[Mark], turns: u8, opaque: bool) -> Result<Decoded, String> {
+    let mut d = decode::decode(path, None).map_err(|e| e.to_string())?;
+    if opaque || !marks.is_empty() {
+        bake::flatten_on_white(&mut d);
+        bake::bake(&mut d, marks);
+    }
+    Ok(bake::turn(d, turns))
 }
 
 pub struct ImageDoc {
@@ -82,6 +190,23 @@ pub struct ImageDoc {
     /// Quarter turns clockwise per image (non-zero only), for as long as the
     /// tab is open. Only the screen turns: files are never changed.
     rotations: Vec<(PathBuf, u8)>,
+    /// The highlighter is armed: drags draw marks instead of panning.
+    tool_on: bool,
+    /// Highlights per image, kept the same way.
+    marks: Vec<(PathBuf, Editor)>,
+    drag: Option<Drag>,
+    /// A copy / an export is being made on a worker.
+    copying: bool,
+    exporting: bool,
+    /// A finished copy, for the shell to put on the clipboard.
+    clip: Option<Vec<u8>>,
+    /// Shown as the next toast (set where the clock isn't at hand).
+    notice: Option<String>,
+    captures: Arc<Captures>,
+    /// Marks files being written.
+    marks_in_flight: u32,
+    /// Why the last one couldn't be.
+    marks_error: Option<String>,
 }
 
 /// Longest side of the fit level: the screen's longer side (physical px).
@@ -118,6 +243,16 @@ impl ImageDoc {
             toast: None,
             checker: None,
             rotations: Vec::new(),
+            tool_on: false,
+            marks: Vec::new(),
+            drag: None,
+            copying: false,
+            exporting: false,
+            clip: None,
+            notice: None,
+            captures: cx.captures.clone(),
+            marks_in_flight: 0,
+            marks_error: None,
         };
         // Newly opened documents are almost always the active tab: decode now.
         doc.start_fit_decode(Priority::Visible);
@@ -131,7 +266,13 @@ impl ImageDoc {
             self.textures.clone(),
             self.generation,
         );
+        let captures = self.captures.clone();
         pool::submit(priority, move || {
+            edit::load_ink();
+            if !full {
+                // Ahead of the image, so its marks appear with it.
+                let _ = tx.send(stored_marks(&captures, &path));
+            }
             let max = if full { None } else { Some(fit_cap()) };
             let result = decode::decode(&path, max)
                 .map_err(|e| e.to_string())
@@ -167,61 +308,120 @@ impl ImageDoc {
 
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                Msg::Loaded {
-                    generation,
-                    full,
-                    result,
-                } => {
-                    if generation != self.generation {
-                        continue;
-                    }
-                    match result {
-                        Ok(level) if full => {
-                            self.full_job = None;
-                            if let Some(s) = &mut self.shown
-                                && folder::same_path(&s.path, &self.path)
-                            {
-                                s.full = Some(Arc::new(level));
-                            }
+            self.handle(msg);
+        }
+        self.check_marks_fit();
+    }
+
+    fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Loaded {
+                generation,
+                full,
+                result,
+            } => {
+                if generation != self.generation {
+                    return;
+                }
+                match result {
+                    Ok(level) if full => {
+                        self.full_job = None;
+                        if let Some(s) = &mut self.shown
+                            && folder::same_path(&s.path, &self.path)
+                        {
+                            s.full = Some(Arc::new(level));
                         }
-                        Ok(level) => {
+                    }
+                    Ok(level) => {
+                        self.fit_job = None;
+                        self.loading = false;
+                        self.error = None;
+                        let level = Arc::new(level);
+                        let full = level.is_full_resolution().then(|| level.clone());
+                        self.shown = Some(Shown {
+                            path: self.path.clone(),
+                            fit: level,
+                            full,
+                        });
+                        self.prefetch_neighbours();
+                    }
+                    Err(e) => {
+                        if full {
+                            // Keep showing the fit level; don't retry every frame.
+                            self.full_job = None;
+                            self.full_failed = true;
+                        } else {
                             self.fit_job = None;
                             self.loading = false;
-                            self.error = None;
-                            let level = Arc::new(level);
-                            let full = level.is_full_resolution().then(|| level.clone());
-                            self.shown = Some(Shown {
-                                path: self.path.clone(),
-                                fit: level,
-                                full,
-                            });
-                            self.prefetch_neighbours();
-                        }
-                        Err(e) => {
-                            if full {
-                                // Keep showing the fit level; don't retry every frame.
-                                self.full_job = None;
-                                self.full_failed = true;
-                            } else {
-                                self.fit_job = None;
-                                self.loading = false;
-                                self.shown = None;
-                                self.error = Some(e);
-                            }
+                            self.shown = None;
+                            self.error = Some(e);
                         }
                     }
                 }
-                Msg::Prefetched { path, level } => {
-                    self.prefetching.retain(|p| !folder::same_path(p, &path));
-                    if self.visible && self.is_neighbour(&path) {
-                        self.cache.push((path, Arc::new(level)));
-                        self.trim_cache();
-                    }
+            }
+            Msg::Prefetched { path, level } => {
+                self.prefetching.retain(|p| !folder::same_path(p, &path));
+                if self.visible && self.is_neighbour(&path) {
+                    self.cache.push((path, Arc::new(level)));
+                    self.trim_cache();
                 }
-                Msg::Folder(list) => {
-                    self.folder = Some(list);
-                    self.prefetch_neighbours();
+            }
+            Msg::Folder(list) => {
+                self.folder = Some(list);
+                self.prefetch_neighbours();
+            }
+            Msg::Copied(result) => {
+                self.copying = false;
+                match result {
+                    Ok(dib) => {
+                        self.clip = Some(dib);
+                        self.notice = Some("Copied".to_owned());
+                    }
+                    Err(e) => self.notice = Some(format!("Couldn't copy the image. {e}")),
+                }
+            }
+            Msg::Exported(result) => {
+                self.exporting = false;
+                self.notice = Some(match result {
+                    Ok(path) => {
+                        // Saved into the screenshots folder: the Library lists it.
+                        self.captures.refresh(vec![path.clone()]);
+                        format!("Saved {}", file_title(&path))
+                    }
+                    Err(e) => e,
+                });
+            }
+            Msg::Marks {
+                path,
+                stored,
+                fresh,
+                saved,
+            } => {
+                // What this tab already has for the image (drawn before
+                // it was reloaded) is newer than the file.
+                let known = self.marks.iter().any(|(p, _)| folder::same_path(p, &path));
+                if stored && !known {
+                    self.marks.push((path.clone(), Editor::stored(saved)));
+                }
+                // Straight from the dock: ready to highlight.
+                if fresh && folder::same_path(&path, &self.path) {
+                    self.tool_on = true;
+                }
+            }
+            Msg::MarksSaved { path, result } => {
+                self.marks_in_flight = self.marks_in_flight.saturating_sub(1);
+                match result {
+                    Ok(()) => self.marks_error = None,
+                    Err(e) => {
+                        self.marks_error = Some(e);
+                        let editor = self
+                            .marks
+                            .iter_mut()
+                            .find(|(p, _)| folder::same_path(p, &path));
+                        if let Some((_, e)) = editor {
+                            e.failed = true;
+                        }
+                    }
                 }
             }
         }
@@ -291,7 +491,9 @@ impl ImageDoc {
             self.prefetching.push(path.clone());
             let (tx, waker, textures) =
                 (self.tx.clone(), self.waker.clone(), self.textures.clone());
+            let captures = self.captures.clone();
             pool::submit(Priority::Prefetch, move || {
+                let _ = tx.send(stored_marks(&captures, &path));
                 let level = decode::decode(&path, Some(fit_cap()))
                     .ok()
                     .and_then(|d| tiles::upload(&textures, &d).ok());
@@ -331,6 +533,10 @@ impl ImageDoc {
         }
         self.generation += 1;
         self.full_failed = false;
+        self.drag = None;
+        for (_, e) in &mut self.marks {
+            e.selected = None;
+        }
         self.title = file_title(&path);
         self.path = path;
         self.view = View::default();
@@ -390,6 +596,253 @@ impl ImageDoc {
         self.toast = Some((label.to_owned(), time + 1.0));
     }
 
+    // --- highlighting -------------------------------------------------------------
+
+    /// The marks on the image on screen.
+    fn editor(&self) -> Option<&Editor> {
+        let shown = self.shown.as_ref()?;
+        self.marks
+            .iter()
+            .find(|(p, _)| folder::same_path(p, &shown.path))
+            .map(|(_, e)| e)
+    }
+
+    fn editor_mut(&mut self) -> Option<&mut Editor> {
+        let shown = self.shown.as_ref()?;
+        self.marks
+            .iter_mut()
+            .find(|(p, _)| folder::same_path(p, &shown.path))
+            .map(|(_, e)| e)
+    }
+
+    fn add_mark(&mut self, mark: Mark) {
+        let Some(path) = self.shown.as_ref().map(|s| s.path.clone()) else {
+            return;
+        };
+        if self.editor().is_none() {
+            self.marks.push((path, Editor::default()));
+        }
+        let size = self.shown.as_ref().map_or([0, 0], |s| s.fit.full_size);
+        if let Some(e) = self.editor_mut() {
+            e.size = size;
+            e.add(mark);
+        }
+    }
+
+    /// Marks saved for an image of another size (the file was replaced) can't
+    /// be placed on this one.
+    fn check_marks_fit(&mut self) {
+        let Some(size) = self.shown.as_ref().map(|s| s.fit.full_size) else {
+            return;
+        };
+        if let Some(e) = self.editor_mut()
+            && e.size != size
+            && e.size != [0, 0]
+        {
+            e.drop_loaded();
+            e.size = size;
+        }
+    }
+
+    /// Hand every changed set of marks to the screenshots folder's writer.
+    fn autosave(&mut self) {
+        for (path, editor) in &mut self.marks {
+            let Some(set) = editor.take_unsaved() else {
+                continue;
+            };
+            self.marks_in_flight += 1;
+            let (tx, waker, at) = (self.tx.clone(), self.waker.clone(), path.clone());
+            self.captures.save_marks(path.clone(), set, move |result| {
+                let _ = tx.send(Msg::MarksSaved { path: at, result });
+                waker.wake();
+            });
+        }
+    }
+
+    fn set_tool(&mut self, on: bool) {
+        self.tool_on = on;
+        self.drag = None;
+        if !on && let Some(e) = self.editor_mut() {
+            e.selected = None;
+        }
+    }
+
+    /// Pointer input while the highlighter is armed: a drag draws a mark (or
+    /// moves the selected one), a click selects.
+    fn handle_tool(&mut self, ui: &egui::Ui, resp: &egui::Response, viewport: Rect) {
+        let Some(size) = self.shown.as_ref().map(Shown::full_size) else {
+            return;
+        };
+        let turns = self.turns();
+        let on_screen = view::turned(size, turns);
+        let rect = self
+            .view
+            .image_rect(viewport, on_screen, ui.ctx().pixels_per_point());
+        let pixel = |p: Pos2| view::screen_to_image(p, rect, size, turns);
+        let inside = |p: Pos2| pos2(p.x.clamp(0.0, size.x), p.y.clamp(0.0, size.y));
+        let over_selected = |doc: &Self, at: Pos2| {
+            doc.editor()
+                .and_then(|e| e.marks().get(e.selected?))
+                .is_some_and(|m| m.contains(at.x, at.y))
+        };
+
+        if resp.drag_started_by(PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        {
+            let at = pixel(origin);
+            let selected = self.editor().and_then(|e| e.selected);
+            self.drag = Some(match selected {
+                Some(index) if over_selected(self, at) => Drag::Move {
+                    index,
+                    from: at,
+                    to: at,
+                },
+                _ => Drag::Draw {
+                    from: inside(at),
+                    to: inside(at),
+                },
+            });
+        }
+        if resp.dragged_by(PointerButton::Primary)
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            match &mut self.drag {
+                Some(Drag::Draw { to, .. }) => *to = inside(pixel(p)),
+                Some(Drag::Move { to, .. }) => *to = pixel(p),
+                None => {}
+            }
+        }
+        if resp.drag_stopped_by(PointerButton::Primary) {
+            // Points per image pixel.
+            let zoom = rect.width() / on_screen.x;
+            match self.drag.take() {
+                Some(Drag::Draw { from, to }) => {
+                    if let Some(m) = drawn(from, to, size, MIN_DRAW / zoom, edit::current_ink()) {
+                        self.add_mark(m);
+                    }
+                }
+                Some(Drag::Move { index, from, to }) => {
+                    if let Some(e) = self.editor_mut()
+                        && let Some(&m) = e.marks().get(index)
+                    {
+                        e.change(index, moved(m, to - from, size));
+                    }
+                }
+                None => {}
+            }
+        }
+        if resp.clicked_by(PointerButton::Primary)
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let at = pixel(p);
+            if let Some(e) = self.editor_mut() {
+                e.selected = e.hit(at.x, at.y);
+            }
+        }
+
+        if resp.hovered() || resp.dragged() {
+            let moving = matches!(self.drag, Some(Drag::Move { .. }))
+                || (self.drag.is_none()
+                    && resp
+                        .hover_pos()
+                        .is_some_and(|p| over_selected(self, pixel(p))));
+            ui.ctx().set_cursor_icon(if moving {
+                CursorIcon::Move
+            } else {
+                CursorIcon::Crosshair
+            });
+        }
+    }
+
+    /// The marks, over the image: where they are, or where a drag has them.
+    fn paint_marks(&self, painter: &egui::Painter, rect: Rect, theme: &Theme) {
+        let Some(size) = self.shown.as_ref().map(Shown::full_size) else {
+            return;
+        };
+        let turns = self.turns();
+        let on_screen = |m: &Mark| {
+            let corner =
+                |x: u32, y: u32| view::image_to_screen(pos2(x as f32, y as f32), rect, size, turns);
+            Rect::from_two_pos(corner(m.x, m.y), corner(m.x + m.w, m.y + m.h))
+        };
+        if let Some(e) = self.editor() {
+            for (i, m) in e.marks().iter().enumerate() {
+                let m = match self.drag {
+                    Some(Drag::Move { index, from, to }) if index == i => {
+                        moved(*m, to - from, size)
+                    }
+                    _ => *m,
+                };
+                let r = on_screen(&m);
+                marks::paint(painter, r, m.ink);
+                if e.selected == Some(i) {
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        Stroke::new(1.5, theme.accent),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+        }
+        if let Some(Drag::Draw { from, to }) = self.drag
+            && let Some(m) = drawn(from, to, size, 0.0, edit::current_ink())
+        {
+            marks::paint(painter, on_screen(&m), m.ink);
+        }
+    }
+
+    // --- copying out --------------------------------------------------------------
+
+    /// The image on screen: its file, marks and quarter turns.
+    fn on_screen(&self) -> Option<(PathBuf, Vec<Mark>, u8)> {
+        let shown = self.shown.as_ref()?;
+        let marks = self.editor().map_or(Vec::new(), |e| e.marks().to_vec());
+        Some((shown.path.clone(), marks, self.turns()))
+    }
+
+    /// Put the image on the clipboard as it is on screen.
+    fn copy_image(&mut self) {
+        if self.copying {
+            return;
+        }
+        let Some((path, marks, turns)) = self.on_screen() else {
+            return;
+        };
+        self.copying = true;
+        let (tx, waker) = (self.tx.clone(), self.waker.clone());
+        pool::submit(Priority::Visible, move || {
+            let result = flattened(&path, &marks, turns, true).map(|d| bake::pack_dib(&d));
+            let _ = tx.send(Msg::Copied(result));
+            waker.wake();
+        });
+    }
+
+    /// Write the image as it is on screen to `dest`, as a PNG.
+    fn export(&mut self, dest: PathBuf) {
+        let Some((path, marks, turns)) = self.on_screen() else {
+            return;
+        };
+        self.exporting = true;
+        let (tx, waker) = (self.tx.clone(), self.waker.clone());
+        pool::submit(Priority::Visible, move || {
+            let result = flattened(&path, &marks, turns, false).and_then(|d| {
+                let layout = if d.has_alpha {
+                    PixelLayout::PremultipliedBgra
+                } else {
+                    PixelLayout::Bgrx
+                };
+                let png = encode_png(&d.pixels, d.width, d.height, d.stride, layout)
+                    .map_err(|e| e.to_string())?;
+                whir_core::file::write_atomic(&dest, |f| f.write_all(&png))
+                    .map_err(|e| e.message(&file_title(&dest)))?;
+                Ok(dest)
+            });
+            let _ = tx.send(Msg::Exported(result));
+            waker.wake();
+        });
+    }
+
     // --- drawing -----------------------------------------------------------------
 
     fn checker(&mut self, ctx: &egui::Context, theme: &Theme) -> egui::TextureId {
@@ -411,6 +864,7 @@ impl ImageDoc {
         resp: &egui::Response,
         viewport: Rect,
         image: egui::Vec2,
+        requests: &mut Vec<DocRequest>,
     ) {
         let ppp = ui.ctx().pixels_per_point();
         let vp = viewport.size();
@@ -430,12 +884,16 @@ impl ImageDoc {
                 self.view.zoom_by(factor, anchor, image, vp, ppp);
             }
         }
-        if resp.dragged_by(egui::PointerButton::Primary)
-            || resp.dragged_by(egui::PointerButton::Middle)
+        if self.tool_on {
+            self.handle_tool(ui, resp, viewport);
+        }
+        // The highlighter takes the primary button; the middle one still pans.
+        if (!self.tool_on && resp.dragged_by(PointerButton::Primary))
+            || resp.dragged_by(PointerButton::Middle)
         {
             self.view.pan(resp.drag_delta(), image, vp, ppp);
         }
-        if resp.double_clicked() {
+        if resp.double_clicked() && !self.tool_on {
             let anchor = resp
                 .interact_pointer_pos()
                 .map_or(egui::Vec2::ZERO, |p| p - viewport.center());
@@ -451,8 +909,33 @@ impl ImageDoc {
         // Keyboard (this tab is active whenever ui() runs).
         let mut nav = 0isize;
         let mut turn = None;
+        let mut tool = None;
+        // Some(true): undo; Some(false): redo.
+        let mut history = None;
+        let (mut escape, mut delete) = (false, false);
+        let mut copy = false;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
+            // Ctrl+C arrives as a copy event, not a key.
+            if i.events.iter().any(|e| matches!(e, Event::Copy)) {
+                i.events.retain(|e| !matches!(e, Event::Copy));
+                copy = true;
+            }
+            if i.consume_key(none, Key::H) {
+                tool = Some(!self.tool_on);
+            }
+            // The Shift form first (see R below).
+            if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
+                || i.consume_key(Modifiers::CTRL, Key::Y)
+            {
+                history = Some(false);
+            } else if i.consume_key(Modifiers::CTRL, Key::Z) {
+                history = Some(true);
+            }
+            if self.tool_on {
+                escape = i.consume_key(none, Key::Escape);
+                delete = i.consume_key(none, Key::Delete) || i.consume_key(none, Key::Backspace);
+            }
             if i.consume_key(none, Key::ArrowRight) || i.consume_key(none, Key::PageDown) {
                 nav = 1;
             }
@@ -497,6 +980,18 @@ impl ImageDoc {
             }
         });
         resp.context_menu(|ui| {
+            ui.set_min_width(190.0);
+            let item = egui::Button::new("Copy image").shortcut_text("Ctrl+C");
+            if ui.add(item).clicked() {
+                copy = true;
+                ui.close();
+            }
+            let item = egui::Button::new("Save a copy…").shortcut_text("Ctrl+Shift+S");
+            if ui.add(item).clicked() {
+                requests.push(DocRequest::SaveAs);
+                ui.close();
+            }
+            ui.separator();
             let right = egui::Button::new("Rotate right").shortcut_text("R");
             if ui.add(right).clicked() {
                 turn = Some(true);
@@ -508,6 +1003,36 @@ impl ImageDoc {
                 ui.close();
             }
         });
+        if copy {
+            self.copy_image();
+        }
+        if let Some(on) = tool {
+            self.set_tool(on);
+        }
+        if let Some(undo) = history
+            && let Some(e) = self.editor_mut()
+        {
+            let _ = if undo { e.undo() } else { e.redo() };
+        }
+        if delete
+            && let Some(e) = self.editor_mut()
+            && let Some(i) = e.selected
+        {
+            e.remove(i);
+        }
+        if escape {
+            // One thing at a time: the drag, then the selection, then the tool.
+            let selected = self.editor().and_then(|e| e.selected).is_some();
+            if self.drag.take().is_some() {
+                // Cancelled.
+            } else if selected {
+                if let Some(e) = self.editor_mut() {
+                    e.selected = None;
+                }
+            } else {
+                self.set_tool(false);
+            }
+        }
         if nav != 0 {
             self.ensure_folder();
             self.navigate(nav, time);
@@ -587,6 +1112,7 @@ impl ImageDoc {
             mesh.add_triangle(0, 2, 3);
             painter.add(mesh);
         }
+        self.paint_marks(&painter, rect, theme);
         if wants_full && self.visible {
             self.request_full();
         }
@@ -676,8 +1202,138 @@ impl Document for ImageDoc {
         self.drain();
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+    /// A capture's highlights save themselves; any other image has nothing
+    /// to save (its highlights last as long as the tab).
+    fn persistence(&self) -> Persistence {
+        if self.marks.iter().any(|(_, e)| e.stored) {
+            Persistence::Auto
+        } else {
+            Persistence::None
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.marks.iter().any(|(_, e)| e.unsaved())
+    }
+
+    fn is_saving(&self) -> bool {
+        self.exporting || self.marks_in_flight > 0
+    }
+
+    fn save_error(&self) -> Option<&str> {
+        self.marks_error.as_deref()
+    }
+
+    fn flush(&mut self) {
+        self.autosave();
+    }
+
+    fn flush_blocking(&mut self, deadline: Instant) -> Result<(), String> {
+        self.autosave();
+        while self.marks_in_flight > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(left) {
+                Ok(msg) => self.handle(msg),
+                Err(_) => return Err("The highlights are still being saved.".to_owned()),
+            }
+        }
+        self.marks_error.clone().map_or(Ok(()), Err)
+    }
+
+    fn discard(&mut self) {
+        for (_, e) in &mut self.marks {
+            e.forget_unsaved();
+        }
+    }
+
+    /// Nothing here is ever unsaved (the file is never changed), but Ctrl+S
+    /// on a marked-up image means "keep this": offer a copy with the marks in.
+    fn save(&mut self) -> SaveResult {
+        let marked = self.editor().is_some_and(|e| !e.marks().is_empty());
+        match self.save_as_spec() {
+            Some(spec) if marked => SaveResult::NeedsPath(spec),
+            _ => SaveResult::Unsupported,
+        }
+    }
+
+    fn save_as_spec(&self) -> Option<SaveAsSpec> {
+        let shown = self.shown.as_ref()?;
+        let stem = shown.path.file_stem()?.to_string_lossy();
+        Some(SaveAsSpec {
+            title: "Save a copy".to_owned(),
+            suggested_name: format!("{stem} copy.png"),
+            filters: vec![("PNG image".to_owned(), "*.png".to_owned())],
+            default_ext: "png".to_owned(),
+            folder: shown.path.parent().map(Path::to_owned),
+        })
+    }
+
+    /// Exports what is on screen; the tab stays on the original.
+    fn save_as(&mut self, path: PathBuf) -> SaveResult {
+        let Some(shown) = &self.shown else {
+            return SaveResult::Unsupported;
+        };
+        if folder::same_path(&path, &shown.path) {
+            return SaveResult::Failed(
+                "Give the copy another name: the original is kept as it is.".to_owned(),
+            );
+        }
+        self.export(path);
+        SaveResult::Started
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        let theme = Theme::current();
+        let ink = edit::current_ink();
+        let pressed = toolbar::tool_button(
+            ui,
+            Glyph::Highlighter,
+            self.tool_on,
+            Some(ink.color()),
+            true,
+            &theme,
+        );
+        if pressed.clicked {
+            self.set_tool(!self.tool_on);
+        }
+        let inks = egui::Id::new("whir.image.inks");
+        if pressed.menu {
+            toolbar::open_flyout(ui.ctx(), inks);
+        }
+        let button = pressed.response.rect;
+        if !egui::Popup::is_id_open(ui.ctx(), inks) {
+            pressed
+                .response
+                .on_hover_text("Highlight (H) · hold or right-click for colours");
+        }
+        toolbar::flyout(ui, inks, button, |ui| {
+            let colours = Ink::ALL.map(Ink::color);
+            let current = Ink::ALL.iter().position(|&i| i == ink).unwrap_or(0);
+            let Some(picked) = toolbar::swatches(ui, &colours, current, &theme) else {
+                return false;
+            };
+            let ink = Ink::ALL[picked];
+            edit::set_ink(ink);
+            // Picking a colour is reaching for the pen; a selected mark takes it too.
+            self.tool_on = true;
+            if let Some(e) = self.editor_mut()
+                && let Some(i) = e.selected
+                && let Some(&m) = e.marks().get(i)
+            {
+                e.change(i, Mark { ink, ..m });
+            }
+            true
+        });
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
         self.drain();
+        if let Some(dib) = self.clip.take() {
+            cx.requests.push(DocRequest::CopyImage(ClipImage(dib)));
+        }
+        if let Some(text) = self.notice.take() {
+            self.toast = Some((text, ui.input(|i| i.time) + 2.0));
+        }
         let theme = Theme::current();
         let (viewport, resp) =
             ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
@@ -685,10 +1341,10 @@ impl Document for ImageDoc {
 
         if let Some(size) = self.shown.as_ref().map(Shown::full_size) {
             let image = view::turned(size, self.turns());
-            self.handle_input(ui, &resp, viewport, image);
+            self.handle_input(ui, &resp, viewport, image, cx.requests);
             self.paint(ui, viewport, &theme);
             let ppp = ui.ctx().pixels_per_point();
-            if self.view.pannable(image, viewport.size(), ppp) {
+            if !self.tool_on && self.view.pannable(image, viewport.size(), ppp) {
                 ui.ctx().set_cursor_icon(if resp.dragged() {
                     CursorIcon::Grabbing
                 } else {
@@ -717,6 +1373,8 @@ impl Document for ImageDoc {
                 self.navigate(nav, time);
             }
         }
+        // Highlights are saved as they are made: there is no Save for them.
+        self.autosave();
         if self.loading && self.shown.is_none() && self.error.is_none() {
             ui.put(
                 Rect::from_center_size(viewport.center(), vec2(24.0, 24.0)),
@@ -737,3 +1395,6 @@ impl Drop for ImageDoc {
         }
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

@@ -1,0 +1,16 @@
+[package]
+name = "whir-capture"
+description = "whir's capture dock: screen grabs, the selection overlay, and the edge tab that starts them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No egui and no whir-gfx here: the dock runs as its own small process
+# (`whir.exe --dock`) and must never load the renderer.
+[dependencies]
+whir-core.workspace = true
+whir-image.workspace = true
+whir-platform.workspace = true
+windows.workspace = true

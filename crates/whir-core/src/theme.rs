@@ -91,6 +91,8 @@ pub struct Theme {
 #[derive(Clone, Copy, Debug)]
 pub struct Metrics {
     pub tab_strip_height: f32,
+    /// The strip of tools between the tabs and the document.
+    pub toolbar_height: f32,
     pub tab_min_width: f32,
     pub tab_max_width: f32,
     pub tab_gap: f32,
@@ -122,6 +124,7 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             tab_strip_height: 36.0,
+            toolbar_height: 32.0,
             tab_min_width: 72.0,
             tab_max_width: 232.0,
             tab_gap: 2.0,

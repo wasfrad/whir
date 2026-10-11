@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+/// Not a texture: a mesh drawn with this id multiplies what is already on
+/// screen by its vertex colour (an image highlight). Registries hand out ids
+/// from 1, so 0 is never a real texture.
+pub const MULTIPLY: egui::TextureId = egui::TextureId::User(0);
+
 /// Pixel layout of texture data handed to [`TextureRegistry::create`].
 /// Both are 8 bits per channel, premultiplied alpha, gamma (sRGB) encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

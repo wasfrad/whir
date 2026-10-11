@@ -5,6 +5,13 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
+    # A running capture dock is whir.exe too, and would keep it from being replaced.
+    # It is asked to close by its own exe (one old enough not to know the flag
+    # can't be running a dock, and would take the flag for a file to open).
+    Get-CimInstance Win32_Process -Filter "Name = 'whir.exe'" |
+        Where-Object { $_.CommandLine -match '--dock' } |
+        Select-Object -First 1 |
+        ForEach-Object { & $_.ExecutablePath --dock-quit | Out-Null; Start-Sleep -Milliseconds 300 }
     cargo build --release -p whir
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 

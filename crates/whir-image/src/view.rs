@@ -60,6 +60,20 @@ pub fn turn_point(p: Pos2, turns: u8) -> Pos2 {
     }
 }
 
+/// A screen position → a pixel of the unturned image. `rect` is the image on
+/// screen ([`View::image_rect`]) after `turns`, `image` its unturned size.
+pub fn screen_to_image(p: Pos2, rect: Rect, image: Vec2, turns: u8) -> Pos2 {
+    let f = (p - rect.min) / rect.size();
+    let u = turn_point(pos2(f.x, f.y), (4 - turns % 4) % 4);
+    pos2(u.x * image.x, u.y * image.y)
+}
+
+/// The inverse of [`screen_to_image`].
+pub fn image_to_screen(p: Pos2, rect: Rect, image: Vec2, turns: u8) -> Pos2 {
+    let t = turn_point(pos2(p.x / image.x, p.y / image.y), turns);
+    rect.min + t.to_vec2() * rect.size()
+}
+
 impl View {
     /// The image was turned a quarter (clockwise if `clockwise`); `image` is its
     /// size before. A zoomed-in view keeps its zoom and the point in the middle.
@@ -233,6 +247,33 @@ mod tests {
         assert_eq!(q, p);
         assert_eq!(turned(IMG, 1), vec2(3000.0, 4000.0));
         assert_eq!(turned(IMG, 2), IMG);
+    }
+
+    #[test]
+    fn screen_and_image_positions_map_both_ways_at_every_turn() {
+        let image = vec2(400.0, 200.0);
+        for turns in 0..4 {
+            // Shown at half size, somewhere on screen.
+            let rect = Rect::from_min_size(pos2(30.0, 70.0), turned(image, turns) * 0.5);
+            // The unturned top-left pixel is at the corner the turn moved it to.
+            let corner = image_to_screen(pos2(0.0, 0.0), rect, image, turns);
+            let want = [
+                rect.left_top(),
+                rect.right_top(),
+                rect.right_bottom(),
+                rect.left_bottom(),
+            ][turns as usize];
+            assert_eq!(corner, want, "{turns} turns");
+            let p = pos2(100.0, 150.0);
+            let back = screen_to_image(image_to_screen(p, rect, image, turns), rect, image, turns);
+            assert!((back - p).length() < 1e-3, "{turns} turns: {back:?}");
+        }
+        // Unturned, at half size: 10 points across is 20 pixels.
+        let rect = Rect::from_min_size(pos2(30.0, 70.0), image * 0.5);
+        assert_eq!(
+            screen_to_image(pos2(40.0, 70.0), rect, image, 0),
+            pos2(20.0, 0.0)
+        );
     }
 
     #[test]

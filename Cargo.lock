@@ -638,12 +638,23 @@ name = "whir"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "whir-capture",
  "whir-core",
  "whir-csv",
  "whir-gfx",
  "whir-image",
  "whir-notes",
  "whir-pdf",
+ "whir-platform",
+ "windows",
+]
+
+[[package]]
+name = "whir-capture"
+version = "0.1.0"
+dependencies = [
+ "whir-core",
+ "whir-image",
  "whir-platform",
  "windows",
 ]

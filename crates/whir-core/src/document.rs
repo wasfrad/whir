@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::captures::Captures;
 use crate::find_bar::FindQuery;
 use crate::library::Library;
 use crate::{TextureRegistry, Waker};
@@ -53,6 +54,16 @@ pub enum SaveResult {
     Unsupported,
 }
 
+/// An image for the clipboard, as a packed `CF_DIB` (a BITMAPINFOHEADER and
+/// its pixels).
+pub struct ClipImage(pub Vec<u8>);
+
+impl std::fmt::Debug for ClipImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClipImage({} bytes)", self.0.len())
+    }
+}
+
 /// Things a document asks the shell to do (collected in [`DocCx::requests`]).
 #[derive(Debug)]
 pub enum DocRequest {
@@ -63,6 +74,8 @@ pub enum DocRequest {
     Close,
     /// Search every open tab for this (Find in all tabs).
     FindInTabs(FindQuery),
+    /// Put this image on the clipboard.
+    CopyImage(ClipImage),
 }
 
 /// Where a document's search stands, for the Find in all tabs panel.
@@ -103,6 +116,8 @@ pub struct OpenCx {
     pub waker: Waker,
     /// The notes folder (`Documents\whir`).
     pub library: Arc<Library>,
+    /// The screenshots folder (`Documents\whir\Screenshots`).
+    pub captures: Arc<Captures>,
 }
 
 /// Per-frame context handed to [`Document::ui`].
@@ -134,7 +149,11 @@ pub trait Document {
     /// background tabs finish loading), before `ui` for the active one. Must be cheap.
     fn poll(&mut self) {}
 
-    /// Draw into `ui` (the area below the tab strip). Only called for the active tab.
+    /// Draw this document's tools into the toolbar strip, left to right. Only
+    /// called for the active tab, before `ui`.
+    fn toolbar(&mut self, _ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {}
+
+    /// Draw into `ui` (the area below the toolbar). Only called for the active tab.
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>);
 
     /// The tab became visible / hidden. Hook for later texture eviction.

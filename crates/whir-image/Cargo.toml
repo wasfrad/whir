@@ -10,3 +10,6 @@ publish.workspace = true
 whir-core.workspace = true
 egui.workspace = true
 windows.workspace = true
+
+[dev-dependencies]
+egui = { workspace = true, features = ["default_fonts"] }
