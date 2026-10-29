@@ -1,5 +1,5 @@
 //! Headless egui tests: real frames through `Document::ui`, real key and
-//! pointer events, checking the highlighter.
+//! pointer events, checking the highlighter and the text tool.
 
 use egui::{Event, RawInput};
 use whir_core::{Captures, TextureDesc, UserTexture};
@@ -159,10 +159,10 @@ impl Harness {
         out.drop_without_applying_deltas();
     }
 
-    /// Where image pixel (`x`, `y`) is on screen.
+    /// Where image pixel (`x`, `y`) is on screen (however it is turned).
     fn at(&self, x: f32, y: f32) -> Pos2 {
-        let rect = self.doc.view.image_rect(self.viewport, IMAGE, 1.0);
-        view::image_to_screen(pos2(x, y), rect, IMAGE, 0)
+        let at = self.doc.placement(self.viewport, 1.0).unwrap();
+        at.screen(pos2(x, y))
     }
 
     fn button(&mut self, pos: Pos2, button: PointerButton, pressed: bool) {
@@ -199,6 +199,39 @@ impl Harness {
             repeat: false,
             modifiers,
         }]);
+    }
+
+    /// Two clicks in quick succession.
+    fn double_click(&mut self, pos: Pos2) {
+        self.frame(vec![Event::PointerMoved(pos)]);
+        for _ in 0..2 {
+            self.button(pos, PointerButton::Primary, true);
+            self.button(pos, PointerButton::Primary, false);
+        }
+        self.time += 1.0;
+    }
+
+    fn type_text(&mut self, text: &str) {
+        self.frame(vec![Event::Text(text.to_owned())]);
+    }
+
+    /// The text of mark `i`.
+    fn text(&self, i: usize) -> Text {
+        let e = self.doc.editor().unwrap();
+        e.marks()[i].text().expect("a text mark").clone()
+    }
+
+    /// Pick up the text tool, click at pixel (`x`, `y`), type `text`, Esc.
+    fn write(&mut self, x: f32, y: f32, text: &str) {
+        if self.doc.tool != Some(Tool::Text) {
+            self.key(Key::T, Modifiers::NONE);
+        }
+        let at = self.at(x, y);
+        self.click(at);
+        assert!(self.doc.typing.is_some(), "typing");
+        self.type_text(text);
+        self.key(Key::Escape, Modifiers::NONE);
+        assert!(self.doc.typing.is_none(), "finished");
     }
 
     fn marks(&self) -> Vec<(u32, u32, u32, u32)> {
@@ -257,7 +290,7 @@ fn a_drag_draws_a_mark_only_while_the_tool_is_on() {
     assert!(h.marks().is_empty());
 
     h.key(Key::H, Modifiers::NONE);
-    assert!(h.doc.tool_on);
+    assert_eq!(h.doc.tool, Some(Tool::Highlight));
     h.drag(a, b, PointerButton::Primary);
     assert_eq!(h.marks(), [(50, 40, 100, 40)]);
     // Drawn right to left and bottom to top: the same mark.
@@ -267,7 +300,7 @@ fn a_drag_draws_a_mark_only_while_the_tool_is_on() {
     assert_eq!(h.selected(), None);
 
     h.key(Key::H, Modifiers::NONE);
-    assert!(!h.doc.tool_on);
+    assert_eq!(h.doc.tool, None);
 }
 
 #[test]
@@ -369,9 +402,9 @@ fn escape_lets_go_one_thing_at_a_time() {
 
     h.key(Key::Escape, Modifiers::NONE);
     assert_eq!(h.selected(), None);
-    assert!(h.doc.tool_on);
+    assert_eq!(h.doc.tool, Some(Tool::Highlight));
     h.key(Key::Escape, Modifiers::NONE);
-    assert!(!h.doc.tool_on);
+    assert_eq!(h.doc.tool, None);
 }
 
 #[test]
@@ -389,17 +422,6 @@ fn the_middle_button_still_pans_while_the_tool_is_on() {
         "{before:?} → {after:?}"
     );
     assert!(h.marks().is_empty());
-}
-
-#[test]
-fn drawn_marks_cover_whole_pixels() {
-    let ink = Ink::Yellow;
-    let m = drawn(pos2(10.4, 20.6), pos2(30.2, 25.1), IMAGE, 0.0, ink).unwrap();
-    assert_eq!((m.x, m.y, m.w, m.h), (10, 20, 21, 6));
-    // Too small a side.
-    assert!(drawn(pos2(10.0, 20.0), pos2(30.0, 22.0), IMAGE, 4.0, ink).is_none());
-    // Entirely on the edge: no pixels at all.
-    assert!(drawn(pos2(400.0, 0.0), pos2(400.0, 50.0), IMAGE, 0.0, ink).is_none());
 }
 
 /// (width, height) of a clipboard DIB, and its BGRA pixel at (`x`, `y`) from
@@ -479,7 +501,7 @@ fn a_captures_highlights_save_themselves_and_come_back() {
 
     // Just captured, so the highlighter is already in hand. Drawn, and
     // written without anyone saving.
-    assert!(h.doc.tool_on);
+    assert_eq!(h.doc.tool, Some(Tool::Highlight));
     let (a, b) = (h.at(50.0, 40.0), h.at(150.0, 80.0));
     h.drag(a, b, PointerButton::Primary);
     h.saved();
@@ -540,12 +562,12 @@ fn an_image_elsewhere_keeps_its_highlights_to_the_tab() {
 fn a_fresh_capture_opens_ready_to_highlight() {
     // The file was written a moment ago, in the screenshots folder.
     let mut h = Harness::open_stored("fresh", None);
-    assert!(h.doc.tool_on);
+    assert_eq!(h.doc.tool, Some(Tool::Highlight));
     let (a, b) = (h.at(50.0, 40.0), h.at(150.0, 80.0));
     h.drag(a, b, PointerButton::Primary);
     assert_eq!(h.marks(), [(50, 40, 100, 40)]);
     // Anywhere else, the highlighter waits to be picked up.
-    assert!(!Harness::open("not-fresh").doc.tool_on);
+    assert_eq!(Harness::open("not-fresh").doc.tool, None);
 }
 
 #[test]
@@ -557,7 +579,8 @@ rect 0 0 5 5 blue
 ";
     let h = Harness::open_stored("load", Some(saved));
     assert_eq!(h.marks(), [(10, 20, 30, 40), (0, 0, 5, 5)]);
-    assert_eq!(h.doc.editor().unwrap().marks()[0].ink, Ink::Pink);
+    let kind = &h.doc.editor().unwrap().marks()[0].kind;
+    assert_eq!(*kind, Kind::Highlight(Ink::Pink));
     assert!(!h.doc.is_dirty(), "loading isn't an edit");
 
     // The file was replaced by one of another size: its marks can't be placed.
@@ -567,4 +590,252 @@ rect 10 20 30 40 pink
 ";
     let h = Harness::open_stored("stale", Some(stale));
     assert!(h.marks().is_empty());
+}
+
+fn key_event(key: Key) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+#[test]
+fn a_selected_highlight_is_resized_by_its_handles() {
+    let mut h = Harness::open("resize");
+    h.draw_one();
+    let inside = h.at(100.0, 60.0);
+    h.click(inside);
+    assert_eq!(h.selected(), Some(0));
+
+    // A corner moves two sides.
+    let (corner, to) = (h.at(150.0, 80.0), h.at(200.0, 100.0));
+    h.drag(corner, to, PointerButton::Primary);
+    assert_eq!(h.marks(), [(50, 40, 150, 60)]);
+    assert_eq!(h.selected(), Some(0));
+    // The middle of a side moves that side only.
+    let (side, to) = (h.at(200.0, 70.0), h.at(220.0, 150.0));
+    h.drag(side, to, PointerButton::Primary);
+    assert_eq!(h.marks(), [(50, 40, 170, 60)]);
+
+    // Each resize is an edit of its own.
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.marks(), [(50, 40, 150, 60)]);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.marks(), [(50, 40, 100, 40)]);
+    h.key(Key::Y, Modifiers::CTRL);
+    assert_eq!(h.marks(), [(50, 40, 150, 60)]);
+}
+
+#[test]
+fn an_unselected_mark_has_no_handles() {
+    let mut h = Harness::open("resize-unselected");
+    h.draw_one();
+    // From its corner, without selecting it first: another highlight.
+    let (corner, to) = (h.at(150.0, 80.0), h.at(200.0, 100.0));
+    h.drag(corner, to, PointerButton::Primary);
+    assert_eq!(h.marks(), [(50, 40, 100, 40), (150, 80, 50, 20)]);
+}
+
+#[test]
+fn handles_work_on_a_turned_image() {
+    let mut h = Harness::open("resize-turned");
+    h.draw_one();
+    h.key(Key::R, Modifiers::NONE);
+    let inside = h.at(100.0, 60.0);
+    h.click(inside);
+    assert_eq!(h.selected(), Some(0));
+    let (corner, to) = (h.at(150.0, 80.0), h.at(200.0, 100.0));
+    h.drag(corner, to, PointerButton::Primary);
+    assert_eq!(h.marks(), [(50, 40, 150, 60)]);
+}
+
+#[test]
+fn the_text_tool_types_where_it_is_clicked() {
+    let mut h = Harness::open("text");
+    h.write(60.0, 50.0, "Hi");
+    let t = h.text(0);
+    assert_eq!(t.body, "Hi");
+    assert_eq!(t.size, 20, "20 points tall on screen, at 100%");
+    assert_eq!(t.turn, 0);
+    let (x, y, w, height) = h.marks()[0];
+    assert_eq!((x, y), (60, 50));
+    assert!(w > 10 && height > 10, "{w} × {height}");
+    // Finished, it is selected: ready to move, resize, recolour or remove.
+    assert_eq!(h.selected(), Some(0));
+    assert_eq!(h.doc.tool, Some(Tool::Text));
+    // Typed in one go, undone in one.
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(h.marks().is_empty());
+    h.key(Key::Y, Modifiers::CTRL);
+    assert_eq!(h.text(0).body, "Hi");
+}
+
+#[test]
+fn enter_starts_a_line_and_ctrl_enter_finishes() {
+    let mut h = Harness::open("text-lines");
+    h.write(60.0, 50.0, "one");
+    let one_line = h.marks()[0].3;
+
+    let at = h.at(60.0, 120.0);
+    h.click(at);
+    h.type_text("one");
+    h.frame(vec![key_event(Key::Enter)]);
+    h.type_text("two");
+    h.key(Key::Enter, Modifiers::CTRL);
+    assert!(h.doc.typing.is_none());
+    assert_eq!(h.text(1).body, "one\ntwo");
+    assert!(h.marks()[1].3 > one_line * 3 / 2, "two lines tall");
+}
+
+#[test]
+fn keys_typed_are_the_texts_not_the_tabs() {
+    let mut h = Harness::open("text-keys");
+    h.key(Key::T, Modifiers::NONE);
+    let at = h.at(60.0, 50.0);
+    h.click(at);
+    h.frame(vec![
+        key_event(Key::H),
+        Event::Text("h".into()),
+        key_event(Key::R),
+        Event::Text("r".into()),
+        key_event(Key::T),
+        Event::Text("t".into()),
+    ]);
+    assert_eq!(h.doc.typing.as_ref().unwrap().body, "hrt");
+    // Not the highlighter, not a turn, not the tool put down.
+    assert_eq!(h.doc.tool, Some(Tool::Text));
+    assert_eq!(h.doc.turns(), 0);
+    // Esc finishes it.
+    h.key(Key::Escape, Modifiers::NONE);
+    assert_eq!(h.text(0).body, "hrt");
+}
+
+#[test]
+fn a_click_elsewhere_finishes_the_text_and_does_nothing_else() {
+    let mut h = Harness::open("text-click-off");
+    h.key(Key::T, Modifiers::NONE);
+    let a = h.at(60.0, 50.0);
+    h.click(a);
+    h.type_text("Hi");
+    let b = h.at(250.0, 150.0);
+    h.click(b);
+    assert!(h.doc.typing.is_none(), "finished, not started again");
+    assert_eq!(h.marks().len(), 1);
+    assert_eq!(h.text(0).body, "Hi");
+    // The next click starts more; left empty, nothing is kept.
+    h.click(b);
+    assert!(h.doc.typing.is_some());
+    h.key(Key::Escape, Modifiers::NONE);
+    assert_eq!(h.marks().len(), 1);
+}
+
+#[test]
+fn double_clicking_text_retypes_it() {
+    let mut h = Harness::open("retype");
+    h.write(60.0, 50.0, "Hi");
+    let inside = h.at(65.0, 55.0);
+    h.double_click(inside);
+    let t = h.doc.typing.as_ref().expect("retyping");
+    assert_eq!((t.index, t.body.as_str()), (Some(0), "Hi"));
+    h.type_text("!");
+    h.key(Key::Escape, Modifiers::NONE);
+    assert_eq!(h.marks().len(), 1);
+    assert_eq!(h.text(0).body, "Hi!");
+
+    // Emptied, it goes; undo brings it back.
+    h.double_click(inside);
+    h.frame(vec![key_event(Key::Backspace); 3]);
+    h.key(Key::Escape, Modifiers::NONE);
+    assert!(h.marks().is_empty());
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.text(0).body, "Hi!");
+}
+
+#[test]
+fn text_is_resized_from_a_corner_and_removed_with_delete() {
+    let mut h = Harness::open("text-resize");
+    h.write(60.0, 50.0, "Hi");
+    let (x, y, w, height) = h.marks()[0];
+    let size = h.text(0).size;
+    // Dragged out to twice as wide: twice the size, from the same top left.
+    let corner = h.at((x + w) as f32, (y + height) as f32);
+    let to = h.at((x + 2 * w) as f32, (y + height) as f32);
+    h.drag(corner, to, PointerButton::Primary);
+    assert_eq!(h.text(0).size, size * 2);
+    let (x2, y2, w2, h2) = h.marks()[0];
+    assert_eq!((x2, y2), (x, y));
+    assert!(w2 > w * 3 / 2 && h2 > height * 3 / 2, "{w2} × {h2}");
+    assert_eq!(h.text(0).body, "Hi");
+    // The next text is that size too.
+    assert_eq!(h.doc.text_size, Some(size * 2));
+
+    h.key(Key::Delete, Modifiers::NONE);
+    assert!(h.marks().is_empty());
+}
+
+#[test]
+fn text_typed_on_a_turned_image_reads_upright_that_way() {
+    let mut h = Harness::open("text-turned");
+    h.key(Key::R, Modifiers::NONE);
+    h.write(60.0, 150.0, "Hello");
+    let t = h.text(0);
+    assert_eq!(t.turn, 1);
+    // On the image itself it runs up the page: taller than wide.
+    let (x, _, w, height) = h.marks()[0];
+    assert!(height > w, "{w} × {height}");
+    assert_eq!(x, 60);
+}
+
+#[test]
+fn copying_sets_the_text_into_the_clipboard_image() {
+    let mut h = Harness::open("copy-text");
+    h.doc.text_size = Some(60);
+    h.write(20.0, 20.0, "Hi");
+    let (x, y, w, height) = h.marks()[0];
+    h.frame(vec![Event::Copy]);
+    let dib = h.copied();
+    let [r, g, b] = h.text(0).pen.rgb();
+    let mut inked = false;
+    for py in 0..200 {
+        for px in 0..400 {
+            let p = dib_pixel(&dib, px, py).1;
+            let inside =
+                (x..x + w).contains(&(px as u32)) && (y..y + height).contains(&(py as u32));
+            if inside {
+                inked |= p == [b, g, r, 255];
+            } else {
+                assert_eq!(p, [255; 4], "outside the text at ({px}, {py})");
+            }
+        }
+    }
+    assert!(inked, "no letters in the copy");
+}
+
+#[test]
+fn a_captures_text_saves_itself_even_mid_word() {
+    let mut h = Harness::open_stored("text-stored", None);
+    h.key(Key::T, Modifiers::NONE);
+    let at = h.at(60.0, 50.0);
+    h.click(at);
+    h.type_text("Hi \"there\"");
+    // Closing the tab (or quitting) finishes what is being typed.
+    h.saved();
+    assert!(h.doc.typing.is_none());
+    let file = std::fs::read_to_string(h.marks_file()).unwrap();
+    assert!(file.contains("text 60 50 "), "{file}");
+    assert!(file.contains(r#""Hi \"there\"""#), "{file}");
+
+    h.reopen();
+    assert_eq!(h.text(0).body, "Hi \"there\"");
+    // Leaving the tab does too.
+    h.key(Key::T, Modifiers::NONE);
+    let at = h.at(60.0, 120.0);
+    h.click(at);
+    h.type_text("Yo");
+    h.doc.on_visibility(false);
+    assert!(h.doc.typing.is_none());
+    assert_eq!(h.marks().len(), 2);
 }

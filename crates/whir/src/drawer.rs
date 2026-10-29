@@ -17,8 +17,9 @@ use egui::{
 };
 use whir_core::captures::CapturesSnapshot;
 use whir_core::library::{EntryKind, LibrarySnapshot};
+use whir_core::marks::{self, Kind};
 use whir_core::theme::Theme;
-use whir_core::{DocKind, OpenCx, marks};
+use whir_core::{DocKind, OpenCx};
 use whir_image::{Thumb, Thumbs};
 
 use crate::keys::consume_exact;
@@ -837,7 +838,20 @@ impl Drawer {
                         for mark in &set.marks {
                             let min = image.min + vec2(mark.x as f32, mark.y as f32) * per_pixel;
                             let size = vec2(mark.w as f32, mark.h as f32) * per_pixel;
-                            marks::paint(&on_thumb, Rect::from_min_size(min, size), mark.ink);
+                            let r = Rect::from_min_size(min, size);
+                            match &mark.kind {
+                                Kind::Highlight(ink) => marks::paint(&on_thumb, r, *ink),
+                                Kind::Text(t) => {
+                                    // To the half point: every thumbnail's own
+                                    // size of text would crowd the font atlas.
+                                    let points = t.size as f32 * per_pixel;
+                                    let points = ((points * 2.0).round() / 2.0).max(0.5);
+                                    let scale = points / t.size as f32;
+                                    // The thumbnail is the image unturned.
+                                    let turns = (4 - t.turn % 4) % 4;
+                                    marks::paint_text(&on_thumb, r, t, turns, scale);
+                                }
+                            }
                         }
                     }
                     pixels = Some(full_size);

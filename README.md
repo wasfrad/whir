@@ -4,7 +4,7 @@ A fast, lean, native Windows app for the files that matter at work: **images, PD
 CSVs and notes**. Double-click a file and it's on screen; open another and it becomes a
 tab in the same window. Start whir on its own and you get a blank note to type into —
 it saves itself, no questions asked. A small capture dock takes screenshots, keeps them,
-and opens each one ready to highlight.
+and opens each one ready to highlight and label.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
 - One portable folder: `whir.exe` (~5.2 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
@@ -61,7 +61,7 @@ and are saved with Ctrl+S.
 | Drawer | |
 |---|---|
 | Rest the pointer on the right edge, then on the strip | Peek, then open the list (newest first) |
-| Notes · Library at the top | Switch between notes and screenshots (thumbnails show their highlights) |
+| Notes · Library at the top | Switch between notes and screenshots (thumbnails show their highlights and text) |
 | Click · right-click | Open · Show in Explorer / Delete (to the Recycle Bin) |
 | Ctrl+E, then ↑ ↓ · ← → · Enter · Delete · Esc | Keyboard: move · Notes / Library · open · delete · close |
 
@@ -74,22 +74,30 @@ and are saved with Ctrl+S.
 | ← → · Home End · PgUp PgDn | Previous/next image in the folder (Explorer's sort order) · first/last |
 | R · Shift+R · right-click | Rotate right · left (on screen only, for as long as the tab is open; the file isn't changed) |
 | H · the highlighter in the toolbar (hold or right-click it for colours) | Highlighter on / off |
-| Highlighter on: drag · click · drag a selected highlight · Delete · Esc | Draw a highlight · select one · move it · remove it · let go (selection, then the tool) |
-| Ctrl+Z · Ctrl+Y / Ctrl+Shift+Z | Undo · redo highlights |
-| Ctrl+C · right-click → Copy image | Copy the image as it is on screen, highlights and rotation included |
-| Ctrl+Shift+S · right-click → Save a copy… | Save that as a new PNG (Ctrl+S offers the same once there are highlights) |
+| T · the text tool in the toolbar (hold or right-click it for colours) | Text on / off |
+| Highlighter on: drag | Draw a highlight |
+| Text on: click | Type there (Enter: new line · Esc, Ctrl+Enter or a click elsewhere: done) |
+| Either on: click · drag a selected mark · drag its handles · Delete · Esc | Select a highlight or text · move it · resize it · remove it · let go (selection, then the tool) |
+| Either on: double-click text | Change what it says |
+| Ctrl+Z · Ctrl+Y / Ctrl+Shift+Z | Undo · redo marks |
+| Ctrl+C · right-click → Copy image | Copy the image as it is on screen, marks and rotation included |
+| Ctrl+Shift+S · right-click → Save a copy… | Save that as a new PNG (Ctrl+S offers the same once there are marks) |
 
 Highlights tint what is under them the way a marker does: white paper takes the colour,
-black text stays black. They are never drawn into the file. On a screenshot in the
-Library they are saved as you make them and can be moved or removed any time; on any
-other image they last as long as the tab. What leaves whir with the highlights in it is
-a copy: the clipboard, or Save a copy.
+black text stays black. Text is drawn with a thin halo (white around dark colours, dark
+around white) so it reads on a busy screenshot; resizing it from a corner scales it.
+Neither is ever drawn into the file. On a screenshot in the Library they are saved as you
+make them and can be moved, resized, changed or removed any time; on any other image
+they last as long as the tab. What leaves whir with the marks in it is a copy: the
+clipboard, or Save a copy.
 
 ## Screenshots
 
 `whir.exe --dock` (or the camera button in the toolbar) starts the capture dock: a slim
-grip on a screen edge that slides out when the pointer rests on it. It is a small process
-of its own (about 2 MB) and stays when whir's window is closed.
+grip on a screen edge that slides out when the pointer rests on it. It stays on top of
+every other window, full-screen ones included (only the Start menu and Windows'
+notifications go over it). It is a small process of its own (about 2 MB) and stays when
+whir's window is closed.
 
 | Capture dock | |
 |---|---|
@@ -101,8 +109,8 @@ of its own (about 2 MB) and stays when whir's window is closed.
 | Right-click the dock | Capture · delay · open whir · open the screenshots folder · close the dock |
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots` and opens in whir with the
-highlighter in hand; the drawer's Library lists them all. Their highlights are kept beside
-them (in `Screenshots\.whir`), so the PNG is always the capture itself.
+highlighter in hand; the drawer's Library lists them all. Their highlights and text are
+kept beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
 `whir.exe --dock-capture` captures at once; `whir.exe --dock-quit` closes the dock. The
 hotkey can be changed or switched off in `%LOCALAPPDATA%\whir\dock.ini`
 (`hotkey = ctrl+alt+f9`, `hotkey = off`).
@@ -225,11 +233,12 @@ crates/
                   input → egui, Open/Save dialogs, Recycle Bin, session end
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
-                  replace, the notes library, the screenshots store, highlights, toolbar widgets,
+                  replace, the notes library, the screenshots store, marks, toolbar widgets,
                   find bar, f64 scrolling, theme tokens, tracing
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
-                  highlights (multiply-blended on screen, baked the same way into copies), PNG encoding, thumbnails
+                  marks (highlights multiply-blended, text in egui's own glyphs, baked the same way
+                  into copies), PNG encoding, thumbnails
   whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
   whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background
                   sort and a find that parses only rows containing the query,
@@ -260,8 +269,8 @@ CJK and emoji fallbacks load on first use.
 
 ## Not yet
 
-PDF passwords, animated GIFs, ICC colour management, image editing beyond highlights,
-freehand marks, resizing a highlight, hiding the dock over full-screen apps, tab reordering,
+PDF passwords, animated GIFs, ICC colour management, image editing beyond highlights and
+text, freehand marks, arrows and boxes, text fonts and sizes from a menu, tab reordering,
 spreadsheet formulas, cell formatting and multiple sheets,
 WebP/HEIC without the Microsoft Store codecs, IME composition at the caret, spell check,
 subfolders in the notes library.

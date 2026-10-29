@@ -1,8 +1,10 @@
 //! Marks flattened into pixels, for copying and exporting: the same
-//! arithmetic the screen does (the painter's multiply blend), so what leaves
-//! whir is what was on screen.
+//! arithmetic the screen does (the painter's multiply blend for highlights,
+//! egui's own glyphs for text), so what leaves whir is what was on screen.
 
-use whir_core::marks::Mark;
+use egui::epaint::{Fonts, Galley, TextOptions};
+use egui::{Color32, ColorImage, FontDefinitions, FontId, Vec2};
+use whir_core::marks::{Kind, Mark, Text};
 
 use crate::decode::Decoded;
 
@@ -21,20 +23,42 @@ pub fn flatten_on_white(d: &mut Decoded) {
     d.has_alpha = false;
 }
 
-/// Multiply each mark into opaque BGRA pixels, clipped to the image.
-pub fn bake(d: &mut Decoded, marks: &[Mark]) {
-    let (w, h) = (d.width, d.height);
+/// Draw each mark into opaque BGRA pixels, bottom to top as the screen does,
+/// clipped to the image. Text is set in `fonts` (the ones on screen); without
+/// them it is left out.
+pub fn bake(d: &mut Decoded, marks: &[Mark], fonts: Option<&FontDefinitions>) {
+    let mut typesetter = None;
     for m in marks {
-        let [r, g, b] = m.ink.rgb();
-        let (x0, x1) = (m.x.min(w) as usize, m.x.saturating_add(m.w).min(w) as usize);
-        let (y0, y1) = (m.y.min(h) as usize, m.y.saturating_add(m.h).min(h) as usize);
-        for y in y0..y1 {
-            let row = &mut d.pixels[y * d.stride + x0 * 4..y * d.stride + x1 * 4];
-            for p in row.chunks_exact_mut(4) {
-                p[0] = multiply(p[0], b);
-                p[1] = multiply(p[1], g);
-                p[2] = multiply(p[2], r);
+        match &m.kind {
+            Kind::Highlight(ink) => highlight(d, m, ink.rgb()),
+            Kind::Text(t) => {
+                let Some(fonts) = fonts else { continue };
+                let fonts = typesetter.get_or_insert_with(|| typesetter_for(fonts));
+                let (w, h) = if t.turn % 2 == 1 {
+                    (m.h, m.w)
+                } else {
+                    (m.w, m.h)
+                };
+                // Typed upright on an image turned `turn` quarters: on the
+                // image itself, it runs that many quarters the other way.
+                let tile = turn(typeset(t, w, h, fonts), (4 - t.turn % 4) % 4);
+                composite(d, &tile, m.x, m.y);
             }
+        }
+    }
+}
+
+/// Multiply a highlight's ink into its box.
+fn highlight(d: &mut Decoded, m: &Mark, [r, g, b]: [u8; 3]) {
+    let (w, h) = (d.width, d.height);
+    let (x0, x1) = (m.x.min(w) as usize, m.x.saturating_add(m.w).min(w) as usize);
+    let (y0, y1) = (m.y.min(h) as usize, m.y.saturating_add(m.h).min(h) as usize);
+    for y in y0..y1 {
+        let row = &mut d.pixels[y * d.stride + x0 * 4..y * d.stride + x1 * 4];
+        for p in row.chunks_exact_mut(4) {
+            p[0] = multiply(p[0], b);
+            p[1] = multiply(p[1], g);
+            p[2] = multiply(p[2], r);
         }
     }
 }
@@ -43,6 +67,116 @@ pub fn bake(d: &mut Decoded, marks: &[Mark]) {
 #[inline]
 fn multiply(p: u8, ink: u8) -> u8 {
     ((p as u32 * ink as u32 + 127) / 255) as u8
+}
+
+/// Fonts for laying text out at one point per image pixel. Text is at most
+/// `Text::MAX_SIZE` pixels, so its glyphs always fit the atlas.
+fn typesetter_for(definitions: &FontDefinitions) -> Fonts {
+    let options = TextOptions {
+        max_texture_side: 4096,
+        // Whole-pixel glyph positions: each glyph is stamped once, unscaled.
+        subpixel_binning: false,
+        ..TextOptions::default()
+    };
+    Fonts::new(options, definitions.clone())
+}
+
+/// A text mark drawn upright on a transparent `w` × `h` tile (premultiplied
+/// BGRA): the halo, then the letters, inset by the halo.
+fn typeset(t: &Text, w: u32, h: u32, fonts: &mut Fonts) -> Decoded {
+    let size = t.size.clamp(Text::MIN_SIZE, Text::MAX_SIZE) as f32;
+    let galley = fonts.with_pixels_per_point(1.0).layout_no_wrap(
+        t.body.clone(),
+        FontId::proportional(size),
+        Color32::WHITE,
+    );
+    let atlas = fonts.texture_atlas().image();
+    let mut tile = Decoded {
+        width: w,
+        height: h,
+        stride: w as usize * 4,
+        pixels: vec![0; w as usize * h as usize * 4],
+        full_size: [w, h],
+        has_alpha: true,
+    };
+    let inset = Vec2::splat(t.halo());
+    for offset in t.halo_offsets() {
+        stamp(&mut tile, &galley, atlas, inset + offset, t.pen.halo());
+    }
+    stamp(&mut tile, &galley, atlas, inset, t.pen.color());
+    tile
+}
+
+/// Each glyph of `galley`, from the font atlas, at `at` in `color`: placed
+/// as epaint places it on screen (`tessellate_glyphs`).
+fn stamp(tile: &mut Decoded, galley: &Galley, atlas: &ColorImage, at: Vec2, color: Color32) {
+    let (tw, th) = (tile.width as i64, tile.height as i64);
+    for placed in &galley.rows {
+        for g in &placed.row.glyphs {
+            let uv = g.uv_rect;
+            if uv.is_nothing() {
+                continue;
+            }
+            let left = (g.pos.x + uv.offset.x).round() + placed.pos.x + at.x;
+            let top = (g.pos.y + uv.offset.y).round() + placed.pos.y + at.y;
+            let (left, top) = (left.round() as i64, top.round() as i64);
+            for v in uv.min[1]..uv.max[1] {
+                let y = top + (v - uv.min[1]) as i64;
+                if !(0..th).contains(&y) {
+                    continue;
+                }
+                for u in uv.min[0]..uv.max[0] {
+                    let x = left + (u - uv.min[0]) as i64;
+                    if !(0..tw).contains(&x) {
+                        continue;
+                    }
+                    let texel = atlas.pixels[v as usize * atlas.size[0] + u as usize];
+                    if texel.a() == 0 {
+                        continue;
+                    }
+                    // The vertex colour times the texel, as the GPU has it.
+                    let src = color * texel;
+                    let i = y as usize * tile.stride + x as usize * 4;
+                    over(
+                        &mut tile.pixels[i..i + 4],
+                        [src.b(), src.g(), src.r(), src.a()],
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Premultiplied BGRA `src` over `dst`.
+#[inline]
+fn over(dst: &mut [u8], src: [u8; 4]) {
+    let keep = 255 - src[3] as u32;
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d = (s as u32 + (*d as u32 * keep + 127) / 255).min(255) as u8;
+    }
+}
+
+/// `tile` over `d` with its top left at (`x0`, `y0`), clipped to `d`.
+fn composite(d: &mut Decoded, tile: &Decoded, x0: u32, y0: u32) {
+    for ty in 0..tile.height {
+        let y = y0 as u64 + ty as u64;
+        if y >= d.height as u64 {
+            break;
+        }
+        for tx in 0..tile.width {
+            let x = x0 as u64 + tx as u64;
+            if x >= d.width as u64 {
+                break;
+            }
+            let s = ty as usize * tile.stride + tx as usize * 4;
+            let src: [u8; 4] = tile.pixels[s..s + 4].try_into().expect("four bytes");
+            if src[3] == 0 {
+                continue;
+            }
+            let at = y as usize * d.stride + x as usize * 4;
+            over(&mut d.pixels[at..at + 4], src);
+        }
+    }
 }
 
 /// `d` turned `turns` quarters clockwise (as rotated on screen).
@@ -98,7 +232,7 @@ pub fn pack_dib(d: &Decoded) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use whir_core::marks::Ink;
+    use whir_core::marks::{Ink, Pen};
 
     use super::*;
 
@@ -120,6 +254,23 @@ mod tests {
         }
     }
 
+    fn white(w: u32, h: u32) -> Decoded {
+        let mut d = image(w, h);
+        d.pixels.fill(255);
+        d
+    }
+
+    const GREY: [u8; 4] = [128, 128, 128, 255];
+
+    /// Grey paper, so a white halo shows on it.
+    fn grey(w: u32, h: u32) -> Decoded {
+        let mut d = image(w, h);
+        d.pixels
+            .chunks_exact_mut(4)
+            .for_each(|p| p.copy_from_slice(&GREY));
+        d
+    }
+
     fn at(d: &Decoded, x: usize, y: usize) -> [u8; 4] {
         let i = y * d.stride + x * 4;
         [
@@ -131,12 +282,40 @@ mod tests {
     }
 
     fn mark(x: u32, y: u32, w: u32, h: u32) -> Mark {
+        Mark::highlight(x, y, w, h, Ink::Yellow)
+    }
+
+    fn text(x: u32, y: u32, w: u32, h: u32, body: &str, turn: u8) -> Mark {
         Mark {
             x,
             y,
             w,
             h,
-            ink: Ink::Yellow,
+            kind: Kind::Text(Text {
+                body: body.to_owned(),
+                size: 40,
+                pen: Pen::Black,
+                turn,
+            }),
+        }
+    }
+
+    /// Whether any pixel is in the pen's colour, and any in the halo's.
+    fn inked(d: &Decoded) -> (bool, bool) {
+        let [r, g, b] = Pen::Black.rgb();
+        let mut pixels = d.pixels.chunks_exact(4);
+        let pen = pixels.clone().any(|p| p == [b, g, r, 255]);
+        (pen, pixels.any(|p| p == [255; 4]))
+    }
+
+    /// Every pixel of `d` outside `x` × `y` is grey.
+    fn grey_outside(d: &Decoded, x: std::ops::Range<usize>, y: std::ops::Range<usize>) {
+        for py in 0..d.height as usize {
+            for px in 0..d.width as usize {
+                if !x.contains(&px) || !y.contains(&py) {
+                    assert_eq!(at(d, px, py), GREY, "outside the box at ({px}, {py})");
+                }
+            }
         }
     }
 
@@ -149,9 +328,8 @@ mod tests {
         assert_eq!(multiply(100, 240), 94);
         assert_eq!(multiply(50, 80), 16);
 
-        let mut d = image(4, 4);
-        d.pixels.fill(255);
-        bake(&mut d, &[mark(1, 1, 2, 2)]);
+        let mut d = white(4, 4);
+        bake(&mut d, &[mark(1, 1, 2, 2)], None);
         assert_eq!(at(&d, 1, 1), [b, g, r, 255]);
         assert_eq!(at(&d, 2, 2), [b, g, r, 255]);
         // Outside the mark, nothing changed.
@@ -163,15 +341,68 @@ mod tests {
     #[test]
     fn overlapping_marks_multiply_twice_and_marks_are_clipped() {
         let [_, g, _] = Ink::Yellow.rgb();
-        let mut d = image(4, 4);
-        d.pixels.fill(255);
+        let mut d = white(4, 4);
         // The second hangs off the right and bottom edges (and can't overflow).
-        bake(&mut d, &[mark(0, 0, 3, 3), mark(2, 2, u32::MAX, 50)]);
+        bake(&mut d, &[mark(0, 0, 3, 3), mark(2, 2, u32::MAX, 50)], None);
         assert_eq!(at(&d, 0, 0)[1], g);
         assert_eq!(at(&d, 2, 2)[1], multiply(g, g));
         assert_eq!(at(&d, 3, 3)[1], g);
         // Entirely outside: nothing to do.
-        bake(&mut d, &[mark(9, 9, 5, 5)]);
+        bake(&mut d, &[mark(9, 9, 5, 5)], None);
+    }
+
+    #[test]
+    fn text_is_set_inside_its_box_in_the_pen_with_its_halo() {
+        let fonts = FontDefinitions::default();
+        let mut d = grey(200, 100);
+        bake(&mut d, &[text(20, 10, 120, 60, "Hi", 0)], Some(&fonts));
+        assert_eq!(inked(&d), (true, true), "letters and halo");
+        grey_outside(&d, 20..140, 10..70);
+        // Without fonts, there is nothing to set it in.
+        let mut d = grey(200, 100);
+        bake(&mut d, &[text(20, 10, 120, 60, "Hi", 0)], None);
+        grey_outside(&d, 0..0, 0..0);
+    }
+
+    #[test]
+    fn text_typed_on_a_turned_image_runs_the_other_way_on_the_image() {
+        let fonts = FontDefinitions::default();
+        // Upright: wider than tall.
+        let mut upright = grey(200, 200);
+        bake(
+            &mut upright,
+            &[text(10, 10, 150, 60, "Hello", 0)],
+            Some(&fonts),
+        );
+        // Typed with the image turned a quarter: its box is tall, and the
+        // letters are the upright ones turned back a quarter.
+        let mut turned = grey(200, 200);
+        bake(
+            &mut turned,
+            &[text(10, 10, 60, 150, "Hello", 1)],
+            Some(&fonts),
+        );
+        grey_outside(&turned, 10..70, 10..160);
+        let back = turn(turned, 1);
+        // Turned clockwise, the box (10..70, 10..160) lands at (40..190, 10..70).
+        for y in 0..60 {
+            for x in 0..150 {
+                assert_eq!(
+                    at(&back, 40 + x, 10 + y),
+                    at(&upright, 10 + x, 10 + y),
+                    "at ({x}, {y}) of the box"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_off_the_edge_is_clipped() {
+        let fonts = FontDefinitions::default();
+        let mut d = grey(50, 30);
+        bake(&mut d, &[text(30, 0, 150, 60, "Hello", 0)], Some(&fonts));
+        assert!(inked(&d).0);
+        grey_outside(&d, 30..50, 0..30);
     }
 
     #[test]

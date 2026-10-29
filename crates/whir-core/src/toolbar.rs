@@ -15,6 +15,7 @@ const SWATCH: egui::Vec2 = vec2(24.0, 24.0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Highlighter,
+    Text,
     Camera,
 }
 
@@ -138,6 +139,15 @@ fn paint_glyph(painter: &egui::Painter, c: Pos2, glyph: Glyph, color: Color32) {
                 s,
             ));
         }
+        Glyph::Text => {
+            // A serif capital T.
+            painter.add(Shape::line(
+                vec![at(-5.5, -4.5), at(-5.5, -6.5), at(5.5, -6.5), at(5.5, -4.5)],
+                s,
+            ));
+            painter.line_segment([at(0.0, -6.5), at(0.0, 5.0)], s);
+            painter.line_segment([at(-2.5, 5.0), at(2.5, 5.0)], s);
+        }
         Glyph::Camera => {
             let body = Rect::from_center_size(at(0.0, 1.0), vec2(15.0, 10.0));
             painter.rect_stroke(body, 2.0, s, egui::StrokeKind::Middle);
@@ -169,6 +179,13 @@ pub fn swatches(
             }
             let chip = Rect::from_center_size(rect.center(), vec2(14.0, 14.0));
             painter.rect_filled(chip, 3.0, colour);
+            // A hairline, so white (or black, in the dark) still shows.
+            painter.rect_stroke(
+                chip,
+                3.0,
+                Stroke::new(1.0, theme.text_dim.gamma_multiply(0.35)),
+                egui::StrokeKind::Inside,
+            );
             if i == current {
                 painter.rect_stroke(
                     chip.expand(2.5),

@@ -499,13 +499,7 @@ mod tests {
         MarkSet {
             size: [800, 600],
             marks: (0..n)
-                .map(|i| Mark {
-                    x: i * 10,
-                    y: 5,
-                    w: 100,
-                    h: 20,
-                    ink: Ink::Yellow,
-                })
+                .map(|i| Mark::highlight(i * 10, 5, 100, 20, Ink::Yellow))
                 .collect(),
             other: Vec::new(),
         }

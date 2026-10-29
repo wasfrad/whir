@@ -8,15 +8,18 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use egui::epaint::Vertex;
+use egui::epaint::text::LayoutJob;
+use egui::epaint::{TextShape, Vertex};
 use egui::{
-    Color32, ColorImage, CursorIcon, Event, Key, Mesh, Modifiers, PointerButton, Pos2, Rect, Sense,
-    Stroke, TextureOptions, pos2, vec2,
+    Align, Color32, ColorImage, CursorIcon, Event, FontDefinitions, FontId, Key, Layout, Mesh,
+    Modifiers, PointerButton, Pos2, Rect, Sense, Shape, Stroke, TextBuffer, TextureOptions,
+    UiBuilder, Vec2, pos2, vec2,
 };
-use whir_core::marks::{self, Ink, Mark, MarkSet};
+use whir_core::marks::{self, Ink, Kind, Mark, MarkSet, Pen, Text};
 use whir_core::theme::Theme;
 use whir_core::toolbar::{self, Glyph};
 use whir_core::{
@@ -31,6 +34,10 @@ use crate::pool::{self, JobHandle, Priority};
 use crate::tiles::{self, Level};
 use crate::view::{self, Mode, View};
 use crate::{bake, decode, folder};
+
+mod tools;
+
+use tools::{Handle, MIN_DRAW, drawn, moved};
 
 enum Msg {
     Loaded {
@@ -101,61 +108,148 @@ impl Shown {
     }
 }
 
-/// What a primary-button drag is doing while the highlighter is armed
-/// (positions in image pixels).
+/// The tools that mark an image. Either one selects, moves, resizes and
+/// removes any mark; they differ in what a drag or a click on bare image does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    /// A drag draws a highlight.
+    Highlight,
+    /// A click starts typing there.
+    Text,
+}
+
+/// What a primary-button drag is doing while a tool is armed (positions in
+/// image pixels).
 #[derive(Clone, Copy)]
 enum Drag {
     /// Drawing a new mark between two corners.
     Draw { from: Pos2, to: Pos2 },
     /// Moving mark `index` by `to - from`.
     Move { index: usize, from: Pos2, to: Pos2 },
+    /// Resizing mark `index` by one of its handles, dragged `to - from`.
+    Resize {
+        index: usize,
+        handle: Handle,
+        from: Pos2,
+        to: Pos2,
+    },
 }
 
-/// A drawn mark is at least this many points a side (smaller is a slip).
-const MIN_DRAW: f32 = 4.0;
+/// Text being typed on the image: a new mark, or one being retyped.
+struct Typing {
+    /// The mark being retyped; `None` for a new one.
+    index: Option<usize>,
+    /// The image pixel at the text's top left as it reads on screen.
+    anchor: Pos2,
+    body: String,
+    size: u32,
+    pen: Pen,
+    /// The editor on screen last frame: a press anywhere else finishes it.
+    screen: Rect,
+    /// It has had the keyboard: losing it finishes the text.
+    focused: bool,
+    /// The editor's, new each time: it starts with the caret at the end,
+    /// not wherever the last one left it.
+    id: egui::Id,
+}
 
-/// The mark a drag between `a` and `b` draws: whole pixels, inside the
-/// image. `None` if a side is under `min` pixels.
-fn drawn(a: Pos2, b: Pos2, image: egui::Vec2, min: f32, ink: Ink) -> Option<Mark> {
-    let r = Rect::from_two_pos(a, b);
-    if r.width() < min || r.height() < min {
-        return None;
+/// New text is about this many points tall on screen, whatever the zoom.
+const TEXT_POINTS: f32 = 20.0;
+
+/// Counts the times typing started, for [`Typing::id`].
+static TYPED: AtomicU64 = AtomicU64::new(0);
+
+/// Handles are this many points a side, and can be grabbed this far from
+/// their middle.
+const HANDLE: f32 = 7.0;
+const HANDLE_REACH: f32 = 6.0;
+
+/// Where the image is on screen this frame, and how its pixels map there.
+#[derive(Clone, Copy)]
+struct Placement {
+    /// The image on screen, after its quarter turns.
+    rect: Rect,
+    /// Its unturned size in pixels.
+    size: Vec2,
+    turns: u8,
+}
+
+impl Placement {
+    /// A screen position → a pixel of the unturned image.
+    fn pixel(&self, p: Pos2) -> Pos2 {
+        view::screen_to_image(p, self.rect, self.size, self.turns)
     }
-    let x0 = r.min.x.floor().clamp(0.0, image.x) as u32;
-    let y0 = r.min.y.floor().clamp(0.0, image.y) as u32;
-    let x1 = r.max.x.ceil().clamp(0.0, image.x) as u32;
-    let y1 = r.max.y.ceil().clamp(0.0, image.y) as u32;
-    (x1 > x0 && y1 > y0).then(|| Mark {
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-        ink,
-    })
-}
 
-/// `mark` moved by `delta` pixels, kept inside the image.
-fn moved(mark: Mark, delta: egui::Vec2, image: egui::Vec2) -> Mark {
-    let axis = |at: u32, len: u32, d: f32, size: f32| {
-        (at as f32 + d)
-            .round()
-            .clamp(0.0, (size - len as f32).max(0.0)) as u32
-    };
-    Mark {
-        x: axis(mark.x, mark.w, delta.x, image.x),
-        y: axis(mark.y, mark.h, delta.y, image.y),
-        ..mark
+    fn screen(&self, p: Pos2) -> Pos2 {
+        view::image_to_screen(p, self.rect, self.size, self.turns)
+    }
+
+    /// Points per image pixel.
+    fn zoom(&self) -> f32 {
+        self.rect.width() / view::turned(self.size, self.turns).x
+    }
+
+    /// A mark's box on screen.
+    fn mark_rect(&self, m: &Mark) -> Rect {
+        let corner = |x: u32, y: u32| self.screen(pos2(x as f32, y as f32));
+        Rect::from_two_pos(corner(m.x, m.y), corner(m.x + m.w, m.y + m.h))
+    }
+
+    /// The handles of `m`, where they are on screen. A box too small on
+    /// screen for eight is given its corners only.
+    fn handles(&self, m: &Mark) -> impl Iterator<Item = (Handle, Pos2)> {
+        let r = self.mark_rect(m);
+        let edges = r.width().min(r.height()) >= 3.0 * HANDLE;
+        tools::handles(m, edges)
+            .iter()
+            .map(move |&h| (h, self.screen(h.on(m))))
     }
 }
 
-/// `path` decoded in full as it is on screen: its marks baked in and turned.
-/// Marks need paper to tint, so with marks (or `opaque`) transparency becomes
-/// white.
-fn flattened(path: &Path, marks: &[Mark], turns: u8, opaque: bool) -> Result<Decoded, String> {
+/// The resize cursor for `handle`, the way it points on screen.
+fn resize_cursor(handle: Handle, turns: u8) -> CursorIcon {
+    let d = marks::turn_vec(handle.pull(), turns);
+    if d.x == 0.0 {
+        CursorIcon::ResizeVertical
+    } else if d.y == 0.0 {
+        CursorIcon::ResizeHorizontal
+    } else if d.x == d.y {
+        CursorIcon::ResizeNwSe
+    } else {
+        CursorIcon::ResizeNeSw
+    }
+}
+
+/// A text box's upright size as it lies on the image.
+fn on_image([w, h]: [u32; 2], turn: u8) -> [u32; 2] {
+    if turn % 2 == 1 { [h, w] } else { [w, h] }
+}
+
+/// Draw `m` in its box `r` on screen.
+fn paint_mark(painter: &egui::Painter, r: Rect, m: &Mark, at: &Placement) {
+    match &m.kind {
+        Kind::Highlight(ink) => marks::paint(painter, r, *ink),
+        Kind::Text(t) => {
+            let turns = (at.turns + 4 - t.turn % 4) % 4;
+            marks::paint_text(painter, r, t, turns, at.zoom());
+        }
+    }
+}
+
+/// `path` decoded in full as it is on screen: its marks baked in (text set
+/// in `fonts`) and turned. Marks need paper to tint, so with marks (or
+/// `opaque`) transparency becomes white.
+fn flattened(
+    path: &Path,
+    marks: &[Mark],
+    turns: u8,
+    opaque: bool,
+    fonts: Option<&FontDefinitions>,
+) -> Result<Decoded, String> {
     let mut d = decode::decode(path, None).map_err(|e| e.to_string())?;
     if opaque || !marks.is_empty() {
         bake::flatten_on_white(&mut d);
-        bake::bake(&mut d, marks);
+        bake::bake(&mut d, marks, fonts);
     }
     Ok(bake::turn(d, turns))
 }
@@ -190,11 +284,18 @@ pub struct ImageDoc {
     /// Quarter turns clockwise per image (non-zero only), for as long as the
     /// tab is open. Only the screen turns: files are never changed.
     rotations: Vec<(PathBuf, u8)>,
-    /// The highlighter is armed: drags draw marks instead of panning.
-    tool_on: bool,
-    /// Highlights per image, kept the same way.
+    /// The tool in hand: the primary button marks instead of panning.
+    tool: Option<Tool>,
+    /// Marks per image, kept the same way.
     marks: Vec<(PathBuf, Editor)>,
     drag: Option<Drag>,
+    typing: Option<Typing>,
+    /// The press under way finished the typing: it does nothing else.
+    swallow: bool,
+    /// The size of the text typed or resized last, for the next.
+    text_size: Option<u32>,
+    /// For laying text out between frames (finishing typing, exporting).
+    ctx: Option<egui::Context>,
     /// A copy / an export is being made on a worker.
     copying: bool,
     exporting: bool,
@@ -243,9 +344,13 @@ impl ImageDoc {
             toast: None,
             checker: None,
             rotations: Vec::new(),
-            tool_on: false,
+            tool: None,
             marks: Vec::new(),
             drag: None,
+            typing: None,
+            swallow: false,
+            text_size: None,
+            ctx: None,
             copying: false,
             exporting: false,
             clip: None,
@@ -268,7 +373,7 @@ impl ImageDoc {
         );
         let captures = self.captures.clone();
         pool::submit(priority, move || {
-            edit::load_ink();
+            edit::load_choices();
             if !full {
                 // Ahead of the image, so its marks appear with it.
                 let _ = tx.send(stored_marks(&captures, &path));
@@ -405,7 +510,7 @@ impl ImageDoc {
                 }
                 // Straight from the dock: ready to highlight.
                 if fresh && folder::same_path(&path, &self.path) {
-                    self.tool_on = true;
+                    self.tool = Some(Tool::Highlight);
                 }
             }
             Msg::MarksSaved { path, result } => {
@@ -525,6 +630,7 @@ impl ImageDoc {
     }
 
     fn go_to(&mut self, path: PathBuf) {
+        self.commit_typing();
         if let Some(j) = self.fit_job.take() {
             j.cancel();
         }
@@ -579,6 +685,7 @@ impl ImageDoc {
 
     /// `image` is the on-screen size before the turn.
     fn rotate(&mut self, clockwise: bool, image: egui::Vec2, vp: egui::Vec2, ppp: f32, time: f64) {
+        self.commit_typing();
         let Some(path) = self.shown.as_ref().map(|s| s.path.clone()) else {
             return;
         };
@@ -596,7 +703,7 @@ impl ImageDoc {
         self.toast = Some((label.to_owned(), time + 1.0));
     }
 
-    // --- highlighting -------------------------------------------------------------
+    // --- marking ------------------------------------------------------------------
 
     /// The marks on the image on screen.
     fn editor(&self) -> Option<&Editor> {
@@ -615,18 +722,16 @@ impl ImageDoc {
             .map(|(_, e)| e)
     }
 
-    fn add_mark(&mut self, mark: Mark) {
-        let Some(path) = self.shown.as_ref().map(|s| s.path.clone()) else {
-            return;
-        };
+    /// A new mark, on top. Returns its index.
+    fn add_mark(&mut self, mark: Mark) -> Option<usize> {
+        let path = self.shown.as_ref().map(|s| s.path.clone())?;
         if self.editor().is_none() {
             self.marks.push((path, Editor::default()));
         }
         let size = self.shown.as_ref().map_or([0, 0], |s| s.fit.full_size);
-        if let Some(e) = self.editor_mut() {
-            e.size = size;
-            e.add(mark);
-        }
+        let e = self.editor_mut()?;
+        e.size = size;
+        Some(e.add(mark))
     }
 
     /// Marks saved for an image of another size (the file was replaced) can't
@@ -659,122 +764,309 @@ impl ImageDoc {
         }
     }
 
-    fn set_tool(&mut self, on: bool) {
-        self.tool_on = on;
+    fn set_tool(&mut self, tool: Option<Tool>) {
+        self.commit_typing();
+        self.tool = tool;
         self.drag = None;
-        if !on && let Some(e) = self.editor_mut() {
+        if tool.is_none()
+            && let Some(e) = self.editor_mut()
+        {
             e.selected = None;
         }
     }
 
-    /// Pointer input while the highlighter is armed: a drag draws a mark (or
-    /// moves the selected one), a click selects.
-    fn handle_tool(&mut self, ui: &egui::Ui, resp: &egui::Response, viewport: Rect) {
-        let Some(size) = self.shown.as_ref().map(Shown::full_size) else {
-            return;
-        };
+    fn toggle_tool(&mut self, tool: Tool) {
+        self.set_tool((self.tool != Some(tool)).then_some(tool));
+    }
+
+    /// Have `tool` in hand, as when one of its colours is picked.
+    fn arm(&mut self, tool: Tool) {
+        if self.tool != Some(tool) {
+            self.set_tool(Some(tool));
+        }
+    }
+
+    /// Recolour the selected mark (`paint` knows which kinds it applies to).
+    fn recolour(&mut self, paint: impl FnOnce(&mut Kind)) {
+        if let Some(e) = self.editor_mut()
+            && let Some(i) = e.selected
+            && let Some(m) = e.marks().get(i)
+        {
+            let mut after = m.clone();
+            paint(&mut after.kind);
+            e.change(i, after);
+        }
+    }
+
+    /// Where the image is on screen in `viewport`, if one is shown.
+    fn placement(&self, viewport: Rect, ppp: f32) -> Option<Placement> {
+        let size = self.shown.as_ref().map(Shown::full_size)?;
         let turns = self.turns();
-        let on_screen = view::turned(size, turns);
         let rect = self
             .view
-            .image_rect(viewport, on_screen, ui.ctx().pixels_per_point());
-        let pixel = |p: Pos2| view::screen_to_image(p, rect, size, turns);
+            .image_rect(viewport, view::turned(size, turns), ppp);
+        Some(Placement { rect, size, turns })
+    }
+
+    /// The handle of the selected mark at screen point `p`.
+    fn handle_at(&self, at: &Placement, p: Pos2) -> Option<(usize, Handle)> {
+        let e = self.editor()?;
+        let index = e.selected?;
+        let m = e.marks().get(index)?;
+        at.handles(m)
+            .find(|(_, c)| (*c - p).abs().max_elem() <= HANDLE_REACH)
+            .map(|(h, _)| (index, h))
+    }
+
+    /// Mark `index` (`m`) as `drag` has it, if `drag` is moving or resizing it.
+    fn dragged(&self, drag: Drag, index: usize, m: &Mark, at: &Placement) -> Option<Mark> {
+        match drag {
+            Drag::Move { index: i, from, to } if i == index => Some(moved(m, to - from, at.size)),
+            Drag::Resize {
+                index: i,
+                handle,
+                from,
+                to,
+            } if i == index => {
+                let r = tools::resized(m, handle, to - from, at.size, MIN_DRAW / at.zoom())?;
+                let (Some(ctx), Some(t)) = (&self.ctx, r.text()) else {
+                    return Some(r);
+                };
+                // Text: the box is what the text measures at its new size.
+                let [w, h] = on_image(marks::measure(ctx, t), t.turn);
+                let (x, y) = tools::anchored(m, handle, w, h);
+                Some(Mark { x, y, w, h, ..r })
+            }
+            _ => None,
+        }
+    }
+
+    /// A drag that moved or resized a mark is over: keep what it did.
+    fn drop_drag(&mut self, drag: Drag, at: &Placement) {
+        let (Drag::Move { index, .. } | Drag::Resize { index, .. }) = drag else {
+            return;
+        };
+        let after = self
+            .editor()
+            .and_then(|e| e.marks().get(index))
+            .and_then(|m| self.dragged(drag, index, m, at));
+        let Some(after) = after else { return };
+        if let (Drag::Resize { .. }, Some(t)) = (drag, after.text()) {
+            self.text_size = Some(t.size);
+        }
+        if let Some(e) = self.editor_mut() {
+            e.change(index, after);
+        }
+    }
+
+    /// Start typing with the text's top left at image pixel `anchor`: new
+    /// text, or mark `index` retyped.
+    fn start_typing(&mut self, index: Option<usize>, anchor: Pos2, zoom: f32) {
+        self.commit_typing();
+        self.drag = None;
+        let retyped = index.and_then(|i| self.editor()?.marks().get(i)?.text().cloned());
+        let (body, size, pen) = match retyped {
+            Some(t) => (t.body, t.size, t.pen),
+            None => {
+                let readable = (TEXT_POINTS / zoom).round() as u32;
+                let size = readable.clamp(Text::MIN_SIZE, Text::MAX_SIZE);
+                (
+                    String::new(),
+                    self.text_size.unwrap_or(size),
+                    edit::current_pen(),
+                )
+            }
+        };
+        if let Some(e) = self.editor_mut() {
+            e.selected = None;
+        }
+        self.typing = Some(Typing {
+            index,
+            anchor,
+            body,
+            size,
+            pen,
+            screen: Rect::NOTHING,
+            focused: false,
+            id: egui::Id::new("whir.image.typing").with(TYPED.fetch_add(1, Ordering::Relaxed)),
+        });
+    }
+
+    /// Finish the text being typed: it becomes a mark (or the mark it was),
+    /// selected. With nothing typed it is dropped, and so is the mark it was.
+    fn commit_typing(&mut self) {
+        let Some(t) = self.typing.take() else { return };
+        let (Some(ctx), Some(image)) =
+            (self.ctx.clone(), self.shown.as_ref().map(Shown::full_size))
+        else {
+            return;
+        };
+        let body = t.body.replace('\r', "");
+        if body.trim().is_empty() {
+            if let Some(i) = t.index
+                && let Some(e) = self.editor_mut()
+            {
+                e.remove(i);
+            }
+            return;
+        }
+        // Upright on screen as it is turned now.
+        let turns = self.turns();
+        let text = Text {
+            body,
+            size: t.size,
+            pen: t.pen,
+            turn: turns,
+        };
+        let [w, h] = marks::measure(&ctx, &text);
+        // The box it fills on screen from the anchor, back on the image.
+        let far = t.anchor + marks::turn_vec(vec2(w as f32, h as f32), (4 - turns) % 4);
+        let r = Rect::from_two_pos(t.anchor, far);
+        let (w, h) = (r.width().round() as u32, r.height().round() as u32);
+        let (x, y) = tools::placed(r.min, w, h, image);
+        let mark = Mark {
+            x,
+            y,
+            w,
+            h,
+            kind: Kind::Text(text),
+        };
+        self.text_size = Some(t.size);
+        let index = match t.index {
+            Some(i) => {
+                if let Some(e) = self.editor_mut() {
+                    e.change(i, mark);
+                }
+                Some(i)
+            }
+            None => self.add_mark(mark),
+        };
+        if let Some(e) = self.editor_mut() {
+            e.selected = index;
+        }
+    }
+
+    /// Pointer input while a tool is armed: a drag resizes the selected mark
+    /// by a handle, moves it, or (the highlighter) draws a new one; a click
+    /// selects, or (the text tool, on bare image) starts typing; a double
+    /// click on text retypes it.
+    fn handle_tool(&mut self, ui: &egui::Ui, resp: &egui::Response, at: &Placement) {
+        let Some(tool) = self.tool else { return };
+        let size = at.size;
         let inside = |p: Pos2| pos2(p.x.clamp(0.0, size.x), p.y.clamp(0.0, size.y));
-        let over_selected = |doc: &Self, at: Pos2| {
+        let over_selected = |doc: &Self, p: Pos2| {
             doc.editor()
                 .and_then(|e| e.marks().get(e.selected?))
-                .is_some_and(|m| m.contains(at.x, at.y))
+                .is_some_and(|m| m.contains(p.x, p.y))
         };
+        let swallowed = self.swallow;
 
-        if resp.drag_started_by(PointerButton::Primary)
+        if !swallowed
+            && resp.drag_started_by(PointerButton::Primary)
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
-            let at = pixel(origin);
+            let p = at.pixel(origin);
             let selected = self.editor().and_then(|e| e.selected);
-            self.drag = Some(match selected {
-                Some(index) if over_selected(self, at) => Drag::Move {
+            self.drag = match (self.handle_at(at, origin), selected) {
+                (Some((index, handle)), _) => Some(Drag::Resize {
                     index,
-                    from: at,
-                    to: at,
-                },
-                _ => Drag::Draw {
-                    from: inside(at),
-                    to: inside(at),
-                },
-            });
+                    handle,
+                    from: p,
+                    to: p,
+                }),
+                (None, Some(index)) if over_selected(self, p) => Some(Drag::Move {
+                    index,
+                    from: p,
+                    to: p,
+                }),
+                _ if tool == Tool::Highlight => Some(Drag::Draw {
+                    from: inside(p),
+                    to: inside(p),
+                }),
+                _ => None,
+            };
         }
         if resp.dragged_by(PointerButton::Primary)
             && let Some(p) = resp.interact_pointer_pos()
         {
             match &mut self.drag {
-                Some(Drag::Draw { to, .. }) => *to = inside(pixel(p)),
-                Some(Drag::Move { to, .. }) => *to = pixel(p),
+                Some(Drag::Draw { to, .. }) => *to = inside(at.pixel(p)),
+                Some(Drag::Move { to, .. } | Drag::Resize { to, .. }) => *to = at.pixel(p),
                 None => {}
             }
         }
         if resp.drag_stopped_by(PointerButton::Primary) {
-            // Points per image pixel.
-            let zoom = rect.width() / on_screen.x;
             match self.drag.take() {
                 Some(Drag::Draw { from, to }) => {
-                    if let Some(m) = drawn(from, to, size, MIN_DRAW / zoom, edit::current_ink()) {
+                    let min = MIN_DRAW / at.zoom();
+                    if let Some(m) = drawn(from, to, size, min, edit::current_ink()) {
                         self.add_mark(m);
                     }
                 }
-                Some(Drag::Move { index, from, to }) => {
-                    if let Some(e) = self.editor_mut()
-                        && let Some(&m) = e.marks().get(index)
-                    {
-                        e.change(index, moved(m, to - from, size));
-                    }
-                }
+                Some(drag) => self.drop_drag(drag, at),
                 None => {}
             }
         }
-        if resp.clicked_by(PointerButton::Primary)
+        if !swallowed
+            && resp.clicked_by(PointerButton::Primary)
             && let Some(p) = resp.interact_pointer_pos()
         {
-            let at = pixel(p);
-            if let Some(e) = self.editor_mut() {
-                e.selected = e.hit(at.x, at.y);
+            let px = at.pixel(p);
+            let hit = self.editor().and_then(|e| e.hit(px.x, px.y));
+            let on_image = (0.0..size.x).contains(&px.x) && (0.0..size.y).contains(&px.y);
+            if hit.is_none() && tool == Tool::Text && on_image {
+                self.start_typing(None, px, at.zoom());
+            } else if let Some(e) = self.editor_mut() {
+                e.selected = hit;
+            }
+        }
+        if !swallowed
+            && resp.double_clicked_by(PointerButton::Primary)
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let px = at.pixel(p);
+            let text = self.editor().and_then(|e| {
+                let i = e.hit(px.x, px.y)?;
+                let m = e.marks()[i].text().is_some().then(|| &e.marks()[i])?;
+                Some((i, at.mark_rect(m).min))
+            });
+            if let Some((i, corner)) = text {
+                self.start_typing(Some(i), at.pixel(corner), at.zoom());
             }
         }
 
         if resp.hovered() || resp.dragged() {
-            let moving = matches!(self.drag, Some(Drag::Move { .. }))
-                || (self.drag.is_none()
-                    && resp
-                        .hover_pos()
-                        .is_some_and(|p| over_selected(self, pixel(p))));
-            ui.ctx().set_cursor_icon(if moving {
-                CursorIcon::Move
-            } else {
-                CursorIcon::Crosshair
-            });
+            let icon = match self.drag {
+                Some(Drag::Move { .. }) => CursorIcon::Move,
+                Some(Drag::Resize { handle, .. }) => resize_cursor(handle, at.turns),
+                Some(Drag::Draw { .. }) => CursorIcon::Crosshair,
+                None => match resp.hover_pos() {
+                    Some(p) => match self.handle_at(at, p) {
+                        Some((_, handle)) => resize_cursor(handle, at.turns),
+                        None if over_selected(self, at.pixel(p)) => CursorIcon::Move,
+                        None if tool == Tool::Text => CursorIcon::Text,
+                        None => CursorIcon::Crosshair,
+                    },
+                    None => CursorIcon::Crosshair,
+                },
+            };
+            ui.ctx().set_cursor_icon(icon);
         }
     }
 
-    /// The marks, over the image: where they are, or where a drag has them.
-    fn paint_marks(&self, painter: &egui::Painter, rect: Rect, theme: &Theme) {
-        let Some(size) = self.shown.as_ref().map(Shown::full_size) else {
-            return;
-        };
-        let turns = self.turns();
-        let on_screen = |m: &Mark| {
-            let corner =
-                |x: u32, y: u32| view::image_to_screen(pos2(x as f32, y as f32), rect, size, turns);
-            Rect::from_two_pos(corner(m.x, m.y), corner(m.x + m.w, m.y + m.h))
-        };
+    /// The marks, over the image: where they are, or where a drag has them;
+    /// the selected one outlined, with its handles.
+    fn paint_marks(&self, painter: &egui::Painter, at: &Placement, theme: &Theme) {
         if let Some(e) = self.editor() {
             for (i, m) in e.marks().iter().enumerate() {
-                let m = match self.drag {
-                    Some(Drag::Move { index, from, to }) if index == i => {
-                        moved(*m, to - from, size)
-                    }
-                    _ => *m,
-                };
-                let r = on_screen(&m);
-                marks::paint(painter, r, m.ink);
+                // Being retyped: the editor shows it.
+                if self.typing.as_ref().is_some_and(|t| t.index == Some(i)) {
+                    continue;
+                }
+                let dragged = self.drag.and_then(|d| self.dragged(d, i, m, at));
+                let m = dragged.as_ref().unwrap_or(m);
+                let r = at.mark_rect(m);
+                paint_mark(painter, r, m, at);
                 if e.selected == Some(i) {
                     painter.rect_stroke(
                         r,
@@ -782,23 +1074,103 @@ impl ImageDoc {
                         Stroke::new(1.5, theme.accent),
                         egui::StrokeKind::Outside,
                     );
+                    for (_, c) in at.handles(m) {
+                        let grip = Rect::from_center_size(c, Vec2::splat(HANDLE));
+                        painter.rect_filled(grip, 1.0, Color32::WHITE);
+                        painter.rect_stroke(
+                            grip,
+                            1.0,
+                            Stroke::new(1.0, theme.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                 }
             }
         }
         if let Some(Drag::Draw { from, to }) = self.drag
-            && let Some(m) = drawn(from, to, size, 0.0, edit::current_ink())
+            && let Some(m) = drawn(from, to, at.size, 0.0, edit::current_ink())
         {
-            marks::paint(painter, on_screen(&m), m.ink);
+            paint_mark(painter, at.mark_rect(&m), &m, at);
+        }
+    }
+
+    /// The editor for the text being typed, where its letters will be, with
+    /// their halo under them.
+    fn show_typing(&mut self, ui: &mut egui::Ui, at: &Placement, viewport: Rect) {
+        let lost = {
+            let Some(t) = &mut self.typing else { return };
+            let zoom = at.zoom();
+            let style = Text {
+                body: String::new(),
+                size: t.size,
+                pen: t.pen,
+                turn: 0,
+            };
+            let font = FontId::proportional((t.size as f32 * zoom).min(marks::SCREEN_TEXT_MAX));
+            let color = t.pen.color();
+            // Laid out as the mark will be: on one line per line, never wrapped.
+            let mut layouter = |ui: &egui::Ui, text: &dyn TextBuffer, _wrap: f32| {
+                let mut job =
+                    LayoutJob::simple(text.as_str().to_owned(), font.clone(), color, f32::INFINITY);
+                job.keep_trailing_whitespace = true;
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+            let laid_out = layouter(ui, &t.body, f32::INFINITY);
+            // Room for the caret and the next letter.
+            let size = laid_out.size() + vec2(font.size, 0.0);
+            let origin = at.screen(t.anchor) + Vec2::splat(style.halo() * zoom);
+            let painter = ui.painter().with_clip_rect(viewport);
+            let under = painter.add(Shape::Noop);
+            let edit = egui::TextEdit::multiline(&mut t.body)
+                .id(t.id)
+                .frame(egui::Frame::NONE)
+                .font(font.clone())
+                .text_color(color)
+                .desired_width(size.x)
+                .desired_rows(1)
+                .lock_focus(true)
+                .layouter(&mut layouter);
+            let place = UiBuilder::new()
+                .max_rect(Rect::from_min_size(origin, size))
+                .layout(Layout::top_down_justified(Align::Min));
+            let out = ui.scope_builder(place, |ui| edit.show(ui)).inner;
+            let halo = t.pen.halo();
+            let shapes = style
+                .halo_offsets()
+                .into_iter()
+                .map(|o| {
+                    let pos = out.galley_pos + o * zoom;
+                    let shape = TextShape::new(pos, out.galley.clone(), halo);
+                    Shape::Text(shape.with_override_text_color(halo))
+                })
+                .collect();
+            painter.set(under, Shape::Vec(shapes));
+            if !t.focused {
+                out.response.request_focus();
+            }
+            let lost = t.focused && !out.response.has_focus();
+            t.focused |= out.response.has_focus();
+            t.screen = out.response.rect;
+            lost
+        };
+        if lost {
+            self.commit_typing();
         }
     }
 
     // --- copying out --------------------------------------------------------------
 
-    /// The image on screen: its file, marks and quarter turns.
-    fn on_screen(&self) -> Option<(PathBuf, Vec<Mark>, u8)> {
+    /// The image on screen: its file, marks and quarter turns, and the fonts
+    /// its text is set in.
+    fn on_screen(&self) -> Option<(PathBuf, Vec<Mark>, u8, Option<FontDefinitions>)> {
         let shown = self.shown.as_ref()?;
         let marks = self.editor().map_or(Vec::new(), |e| e.marks().to_vec());
-        Some((shown.path.clone(), marks, self.turns()))
+        let fonts = self
+            .ctx
+            .as_ref()
+            .filter(|_| marks.iter().any(|m| m.text().is_some()))
+            .map(|ctx| ctx.fonts(|f| f.definitions().clone()));
+        Some((shown.path.clone(), marks, self.turns(), fonts))
     }
 
     /// Put the image on the clipboard as it is on screen.
@@ -806,13 +1178,15 @@ impl ImageDoc {
         if self.copying {
             return;
         }
-        let Some((path, marks, turns)) = self.on_screen() else {
+        self.commit_typing();
+        let Some((path, marks, turns, fonts)) = self.on_screen() else {
             return;
         };
         self.copying = true;
         let (tx, waker) = (self.tx.clone(), self.waker.clone());
         pool::submit(Priority::Visible, move || {
-            let result = flattened(&path, &marks, turns, true).map(|d| bake::pack_dib(&d));
+            let result =
+                flattened(&path, &marks, turns, true, fonts.as_ref()).map(|d| bake::pack_dib(&d));
             let _ = tx.send(Msg::Copied(result));
             waker.wake();
         });
@@ -820,13 +1194,14 @@ impl ImageDoc {
 
     /// Write the image as it is on screen to `dest`, as a PNG.
     fn export(&mut self, dest: PathBuf) {
-        let Some((path, marks, turns)) = self.on_screen() else {
+        self.commit_typing();
+        let Some((path, marks, turns, fonts)) = self.on_screen() else {
             return;
         };
         self.exporting = true;
         let (tx, waker) = (self.tx.clone(), self.waker.clone());
         pool::submit(Priority::Visible, move || {
-            let result = flattened(&path, &marks, turns, false).and_then(|d| {
+            let result = flattened(&path, &marks, turns, false, fonts.as_ref()).and_then(|d| {
                 let layout = if d.has_alpha {
                     PixelLayout::PremultipliedBgra
                 } else {
@@ -871,6 +1246,17 @@ impl ImageDoc {
         let time = ui.input(|i| i.time);
         let before = self.view.zoom(image, vp, ppp);
 
+        // A press anywhere but on the text being typed finishes it, and is
+        // used up by that: it doesn't also select, draw or start more text.
+        let press = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()));
+        if let (Some(t), Some(Some(p))) = (&self.typing, press)
+            && !t.screen.expand(4.0).contains(p)
+        {
+            self.commit_typing();
+            self.swallow = true;
+        }
+        let typing = self.typing.is_some();
+
         // Wheel zooms around the cursor (smoothed by egui); Ctrl+wheel / pinch too.
         if resp.hovered() {
             let (scroll, zoom_delta, pointer) =
@@ -884,16 +1270,19 @@ impl ImageDoc {
                 self.view.zoom_by(factor, anchor, image, vp, ppp);
             }
         }
-        if self.tool_on {
-            self.handle_tool(ui, resp, viewport);
+        if let Some(at) = self.placement(viewport, ppp) {
+            self.handle_tool(ui, resp, &at);
         }
-        // The highlighter takes the primary button; the middle one still pans.
-        if (!self.tool_on && resp.dragged_by(PointerButton::Primary))
+        if self.swallow && !ui.input(|i| i.pointer.any_down()) {
+            self.swallow = false;
+        }
+        // A tool takes the primary button; the middle one still pans.
+        if (self.tool.is_none() && resp.dragged_by(PointerButton::Primary))
             || resp.dragged_by(PointerButton::Middle)
         {
             self.view.pan(resp.drag_delta(), image, vp, ppp);
         }
-        if resp.double_clicked() && !self.tool_on {
+        if resp.double_clicked() && self.tool.is_none() {
             let anchor = resp
                 .interact_pointer_pos()
                 .map_or(egui::Vec2::ZERO, |p| p - viewport.center());
@@ -913,16 +1302,25 @@ impl ImageDoc {
         // Some(true): undo; Some(false): redo.
         let mut history = None;
         let (mut escape, mut delete) = (false, false);
-        let mut copy = false;
+        let (mut copy, mut finish) = (false, false);
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
+            if typing {
+                // Every other key is the text's (Ctrl+C copies from it).
+                finish =
+                    i.consume_key(Modifiers::CTRL, Key::Enter) || i.consume_key(none, Key::Escape);
+                return;
+            }
             // Ctrl+C arrives as a copy event, not a key.
             if i.events.iter().any(|e| matches!(e, Event::Copy)) {
                 i.events.retain(|e| !matches!(e, Event::Copy));
                 copy = true;
             }
             if i.consume_key(none, Key::H) {
-                tool = Some(!self.tool_on);
+                tool = Some(Tool::Highlight);
+            }
+            if i.consume_key(none, Key::T) {
+                tool = Some(Tool::Text);
             }
             // The Shift form first (see R below).
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
@@ -932,7 +1330,7 @@ impl ImageDoc {
             } else if i.consume_key(Modifiers::CTRL, Key::Z) {
                 history = Some(true);
             }
-            if self.tool_on {
+            if self.tool.is_some() {
                 escape = i.consume_key(none, Key::Escape);
                 delete = i.consume_key(none, Key::Delete) || i.consume_key(none, Key::Backspace);
             }
@@ -1003,11 +1401,14 @@ impl ImageDoc {
                 ui.close();
             }
         });
+        if finish {
+            self.commit_typing();
+        }
         if copy {
             self.copy_image();
         }
-        if let Some(on) = tool {
-            self.set_tool(on);
+        if let Some(tool) = tool {
+            self.toggle_tool(tool);
         }
         if let Some(undo) = history
             && let Some(e) = self.editor_mut()
@@ -1030,7 +1431,7 @@ impl ImageDoc {
                     e.selected = None;
                 }
             } else {
-                self.set_tool(false);
+                self.set_tool(None);
             }
         }
         if nav != 0 {
@@ -1112,7 +1513,12 @@ impl ImageDoc {
             mesh.add_triangle(0, 2, 3);
             painter.add(mesh);
         }
-        self.paint_marks(&painter, rect, theme);
+        let at = Placement {
+            rect,
+            size: shown.full_size(),
+            turns,
+        };
+        self.paint_marks(&painter, &at, theme);
         if wants_full && self.visible {
             self.request_full();
         }
@@ -1172,6 +1578,9 @@ impl Document for ImageDoc {
     }
 
     fn on_visibility(&mut self, visible: bool) {
+        if !visible {
+            self.commit_typing();
+        }
         self.visible = visible;
         let priority = if visible {
             Priority::Visible
@@ -1225,10 +1634,12 @@ impl Document for ImageDoc {
     }
 
     fn flush(&mut self) {
+        self.commit_typing();
         self.autosave();
     }
 
     fn flush_blocking(&mut self, deadline: Instant) -> Result<(), String> {
+        self.commit_typing();
         self.autosave();
         while self.marks_in_flight > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -1249,6 +1660,7 @@ impl Document for ImageDoc {
     /// Nothing here is ever unsaved (the file is never changed), but Ctrl+S
     /// on a marked-up image means "keep this": offer a copy with the marks in.
     fn save(&mut self) -> SaveResult {
+        self.commit_typing();
         let marked = self.editor().is_some_and(|e| !e.marks().is_empty());
         match self.save_as_spec() {
             Some(spec) if marked => SaveResult::NeedsPath(spec),
@@ -1284,17 +1696,14 @@ impl Document for ImageDoc {
 
     fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
         let theme = Theme::current();
+
+        // The highlighter, and its inks.
         let ink = edit::current_ink();
-        let pressed = toolbar::tool_button(
-            ui,
-            Glyph::Highlighter,
-            self.tool_on,
-            Some(ink.color()),
-            true,
-            &theme,
-        );
+        let on = self.tool == Some(Tool::Highlight);
+        let pressed =
+            toolbar::tool_button(ui, Glyph::Highlighter, on, Some(ink.color()), true, &theme);
         if pressed.clicked {
-            self.set_tool(!self.tool_on);
+            self.toggle_tool(Tool::Highlight);
         }
         let inks = egui::Id::new("whir.image.inks");
         if pressed.menu {
@@ -1314,19 +1723,56 @@ impl Document for ImageDoc {
             };
             let ink = Ink::ALL[picked];
             edit::set_ink(ink);
-            // Picking a colour is reaching for the pen; a selected mark takes it too.
-            self.tool_on = true;
-            if let Some(e) = self.editor_mut()
-                && let Some(i) = e.selected
-                && let Some(&m) = e.marks().get(i)
-            {
-                e.change(i, Mark { ink, ..m });
+            // Picking a colour is reaching for the pen; a selected highlight takes it too.
+            self.arm(Tool::Highlight);
+            self.recolour(|kind| {
+                if let Kind::Highlight(i) = kind {
+                    *i = ink;
+                }
+            });
+            true
+        });
+
+        // Text, and its pens.
+        let pen = edit::current_pen();
+        let on = self.tool == Some(Tool::Text);
+        let pressed = toolbar::tool_button(ui, Glyph::Text, on, Some(pen.color()), true, &theme);
+        if pressed.clicked {
+            self.toggle_tool(Tool::Text);
+        }
+        let pens = egui::Id::new("whir.image.pens");
+        if pressed.menu {
+            toolbar::open_flyout(ui.ctx(), pens);
+        }
+        let button = pressed.response.rect;
+        if !egui::Popup::is_id_open(ui.ctx(), pens) {
+            pressed
+                .response
+                .on_hover_text("Text (T) · hold or right-click for colours");
+        }
+        toolbar::flyout(ui, pens, button, |ui| {
+            let colours = Pen::ALL.map(Pen::color);
+            let current = Pen::ALL.iter().position(|&p| p == pen).unwrap_or(0);
+            let Some(picked) = toolbar::swatches(ui, &colours, current, &theme) else {
+                return false;
+            };
+            let pen = Pen::ALL[picked];
+            edit::set_pen(pen);
+            self.arm(Tool::Text);
+            if let Some(t) = &mut self.typing {
+                t.pen = pen;
             }
+            self.recolour(|kind| {
+                if let Kind::Text(t) = kind {
+                    t.pen = pen;
+                }
+            });
             true
         });
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
+        self.ctx = Some(ui.ctx().clone());
         self.drain();
         if let Some(dib) = self.clip.take() {
             cx.requests.push(DocRequest::CopyImage(ClipImage(dib)));
@@ -1344,7 +1790,10 @@ impl Document for ImageDoc {
             self.handle_input(ui, &resp, viewport, image, cx.requests);
             self.paint(ui, viewport, &theme);
             let ppp = ui.ctx().pixels_per_point();
-            if !self.tool_on && self.view.pannable(image, viewport.size(), ppp) {
+            if let Some(at) = self.placement(viewport, ppp) {
+                self.show_typing(ui, &at, viewport);
+            }
+            if self.tool.is_none() && self.view.pannable(image, viewport.size(), ppp) {
                 ui.ctx().set_cursor_icon(if resp.dragged() {
                     CursorIcon::Grabbing
                 } else {
@@ -1373,7 +1822,7 @@ impl Document for ImageDoc {
                 self.navigate(nav, time);
             }
         }
-        // Highlights are saved as they are made: there is no Save for them.
+        // Marks are saved as they are made: there is no Save for them.
         self.autosave();
         if self.loading && self.shown.is_none() && self.error.is_none() {
             ui.put(

@@ -4,8 +4,16 @@
 //!
 //! It never takes the keyboard or becomes the active window: clicking it must
 //! not disturb whatever is about to be captured (an open menu, a tooltip).
+//!
+//! It stays above every other window, full-screen ones included. Being
+//! topmost isn't enough for that: whichever topmost window came forward last
+//! is above the rest, and a window that is never activated is never brought
+//! forward. So it puts itself back on top whenever another window becomes
+//! the active one, and every couple of seconds for those that appear without
+//! being activated.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use whir_core::theme::Theme;
 use whir_platform::ipc;
@@ -15,6 +23,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, ReleaseCapture, SetCapture, TME_HOVER,
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, UnregisterHotKey,
@@ -22,17 +31,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsIconic, KillTimer, LoadCursorW, MF_BYCOMMAND,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SM_CXDRAG, SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, ShowWindow, ShowWindowAsync, SystemParametersInfoW, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA,
-    UpdateLayeredWindow, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, GetCursorPos,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
+    IsIconic, KillTimer, LoadCursorW, MF_BYCOMMAND, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG,
+    SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync,
+    SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
@@ -48,12 +59,16 @@ const WM_MOUSEHOVER: u32 = 0x02A1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Posted to ourselves: take a capture (outside whatever handler asked).
 const WM_CAPTURE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
+/// Posted to ourselves: another window became the active one.
+const WM_RAISE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
 /// `WM_MOUSEACTIVATE`'s "don't activate me".
 const MA_NOACTIVATE: isize = 3;
 
 const TIMER_SLIDE: usize = 1;
 const TIMER_LINGER: usize = 2;
 const TIMER_COUNT: usize = 3;
+const TIMER_RAISE: usize = 4;
+const TIMER_KEEP_ON_TOP: usize = 5;
 const HOTKEY: i32 = 1;
 
 const CAPTURE: usize = 0;
@@ -65,6 +80,16 @@ const HOVER_MS: u32 = 150;
 const LINGER_MS: u32 = 400;
 /// How long it shows itself when asked to (`whir.exe --dock`).
 const REVEAL_MS: u32 = 1800;
+/// After another window is activated, the dock goes back on top at once and
+/// again this much later: programs often raise windows of their own (a call's
+/// controls, a full-screen view) just after they come forward.
+const RAISE_AGAIN_MS: u32 = 250;
+/// And every so often, for windows that come forward without being activated
+/// (notifications, floating toolbars).
+const KEEP_ON_TOP_MS: u32 = 2000;
+
+/// The dock's window, for the foreground hook (it has no other way to it).
+static DOCK: AtomicIsize = AtomicIsize::new(0);
 
 const CAMERA: char = '\u{E722}';
 const STOPWATCH: char = '\u{E916}';
@@ -344,6 +369,25 @@ impl Dock {
         }
     }
 
+    /// Back above every other window. Not while hidden for a capture, or
+    /// while the right-click menu is up (it would cover it).
+    fn raise(&self) {
+        if self.capturing || self.menu_open {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+
     fn pointer_is_over(&self) -> bool {
         let mut r = RECT::default();
         unsafe {
@@ -525,7 +569,12 @@ fn capture(dock: &RefCell<Dock>, hwnd: HWND) {
         while PeekMessageW(&mut stale, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {}
         result
     };
-    dock.borrow_mut().capturing = false;
+    {
+        let mut d = dock.borrow_mut();
+        d.capturing = false;
+        // The selection window was above everything; now we are again.
+        d.raise();
+    }
     // The frozen screen was tens of megabytes: give its pages back now.
     unsafe {
         use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
@@ -723,12 +772,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 TIMER_SLIDE => d.slide(),
                 TIMER_LINGER => d.lingered(),
                 TIMER_COUNT => d.count(),
+                TIMER_RAISE => {
+                    let _ = KillTimer(Some(hwnd), TIMER_RAISE);
+                    d.raise();
+                }
+                TIMER_KEEP_ON_TOP => d.raise(),
                 _ => {}
             },
             WM_HOTKEY => {
                 if !d.capturing {
                     d.capture_now();
                 }
+            }
+            WM_RAISE => {
+                d.raise();
+                SetTimer(Some(hwnd), TIMER_RAISE, RAISE_AGAIN_MS, None);
             }
             WM_LAUNCHED => match instance::from_code(wparam.0) {
                 Some(Command::Reveal) => {
@@ -746,8 +804,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
                 d.relayout();
                 d.present();
+                d.raise();
             }
             WM_DESTROY => {
+                DOCK.store(0, Ordering::Relaxed);
                 if d.hotkey_registered {
                     let _ = UnregisterHotKey(Some(hwnd), HOTKEY);
                 }
@@ -759,6 +819,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
         }
         LRESULT(0)
+    }
+}
+
+/// Another program's window became the active one: it may be above us now.
+/// Out of context, so this runs on our thread, inside `GetMessageW`.
+unsafe extern "system" fn foreground_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let dock = DOCK.load(Ordering::Relaxed);
+    if dock != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(dock as *mut _)), WM_RAISE, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -807,6 +886,17 @@ pub fn run(cmd: Command) -> i32 {
         };
         let dock = RefCell::new(Dock::new(hwnd));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &dock as *const RefCell<Dock> as isize);
+        DOCK.store(hwnd.0 as isize, Ordering::Relaxed);
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(foreground_changed),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        SetTimer(Some(hwnd), TIMER_KEEP_ON_TOP, KEEP_ON_TOP_MS, None);
         {
             let mut d = dock.borrow_mut();
             d.register_hotkey();
@@ -826,6 +916,9 @@ pub fn run(cmd: Command) -> i32 {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        if !hook.is_invalid() {
+            let _ = UnhookWinEvent(hook);
         }
         msg.wParam.0 as i32
     }

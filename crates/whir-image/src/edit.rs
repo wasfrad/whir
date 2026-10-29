@@ -1,12 +1,12 @@
-//! Editing the marks on one image (add, move, remove, with undo), and the
-//! highlighter's current ink.
+//! Editing the marks on one image (add, move, resize, remove, with undo), and
+//! the tools' current ink and pen.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use whir_core::marks::{Ink, Mark, MarkSet};
+use whir_core::marks::{Ink, Mark, MarkSet, Pen};
 use whir_core::settings;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Op {
     Add {
         index: usize,
@@ -21,6 +21,25 @@ enum Op {
         before: Mark,
         after: Mark,
     },
+}
+
+impl Op {
+    /// The op that takes this one back.
+    fn inverse(&self) -> Op {
+        match self.clone() {
+            Op::Add { index, mark } => Op::Remove { index, mark },
+            Op::Remove { index, mark } => Op::Add { index, mark },
+            Op::Change {
+                index,
+                before,
+                after,
+            } => Op::Change {
+                index,
+                before: after,
+                after: before,
+            },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -96,24 +115,25 @@ impl Editor {
         self.failed = false;
     }
 
-    /// A new mark, on top.
-    pub fn add(&mut self, mark: Mark) {
-        self.apply(Op::Add {
-            index: self.marks.len(),
-            mark,
-        });
+    /// A new mark, on top. Returns its index.
+    pub fn add(&mut self, mark: Mark) -> usize {
+        let index = self.marks.len();
+        self.apply(Op::Add { index, mark });
+        index
     }
 
     pub fn remove(&mut self, index: usize) {
-        if let Some(&mark) = self.marks.get(index) {
+        if let Some(mark) = self.marks.get(index).cloned() {
             self.apply(Op::Remove { index, mark });
         }
     }
 
-    /// Replace mark `index` (moved, recoloured). The selection stays on it.
+    /// Replace mark `index` (moved, resized, recoloured, retyped). The
+    /// selection stays on it.
     pub fn change(&mut self, index: usize, after: Mark) {
         match self.marks.get(index) {
-            Some(&before) if before != after => {
+            Some(before) if *before != after => {
+                let before = before.clone();
                 let selected = self.selected;
                 self.apply(Op::Change {
                     index,
@@ -127,7 +147,7 @@ impl Editor {
     }
 
     fn apply(&mut self, op: Op) {
-        self.perform(op);
+        self.perform(op.clone());
         self.undo.push(op);
         self.redo.clear();
     }
@@ -150,19 +170,7 @@ impl Editor {
         let Some(op) = self.undo.pop() else {
             return false;
         };
-        self.perform(match op {
-            Op::Add { index, mark } => Op::Remove { index, mark },
-            Op::Remove { index, mark } => Op::Add { index, mark },
-            Op::Change {
-                index,
-                before,
-                after,
-            } => Op::Change {
-                index,
-                before: after,
-                after: before,
-            },
-        });
+        self.perform(op.inverse());
         self.redo.push(op);
         true
     }
@@ -171,7 +179,7 @@ impl Editor {
         let Some(op) = self.redo.pop() else {
             return false;
         };
-        self.perform(op);
+        self.perform(op.clone());
         self.undo.push(op);
         true
     }
@@ -182,12 +190,14 @@ impl Editor {
     }
 }
 
-// --- the ink ------------------------------------------------------------------
+// --- the ink and the pen ------------------------------------------------------
 
 const INK_KEY: &str = "image.highlight.ink";
+const PEN_KEY: &str = "image.text.pen";
 const UNSET: u8 = u8::MAX;
 /// Shared by every image tab, and remembered across runs.
 static INK: AtomicU8 = AtomicU8::new(UNSET);
+static PEN: AtomicU8 = AtomicU8::new(UNSET);
 
 pub fn current_ink() -> Ink {
     Ink::ALL
@@ -201,31 +211,42 @@ pub fn set_ink(ink: Ink) {
     settings::set_str(INK_KEY, ink.name());
 }
 
-/// Read the remembered ink. Reads the settings file the first time, so this
-/// is called from a decode worker, never from the UI's first frame.
-pub fn load_ink() {
-    if INK.load(Ordering::Relaxed) != UNSET {
+pub fn current_pen() -> Pen {
+    Pen::ALL
+        .get(PEN.load(Ordering::Relaxed) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+pub fn set_pen(pen: Pen) {
+    PEN.store(pen as u8, Ordering::Relaxed);
+    settings::set_str(PEN_KEY, pen.name());
+}
+
+/// Read the remembered ink and pen. Reads the settings file the first time,
+/// so this is called from a decode worker, never from the UI's first frame.
+pub fn load_choices() {
+    load(&INK, INK_KEY, |name| Ink::from_name(name).map(|i| i as u8));
+    load(&PEN, PEN_KEY, |name| Pen::from_name(name).map(|p| p as u8));
+}
+
+fn load(slot: &AtomicU8, key: &str, index: impl FnOnce(&str) -> Option<u8>) {
+    if slot.load(Ordering::Relaxed) != UNSET {
         return;
     }
-    let ink = settings::get_str(INK_KEY)
-        .and_then(|s| Ink::from_name(&s))
-        .unwrap_or_default();
+    let remembered = settings::get_str(key).and_then(|s| index(&s)).unwrap_or(0);
     // Unless the user picked one meanwhile.
-    let _ = INK.compare_exchange(UNSET, ink as u8, Ordering::Relaxed, Ordering::Relaxed);
+    let _ = slot.compare_exchange(UNSET, remembered, Ordering::Relaxed, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 mod tests {
+    use whir_core::marks::{Kind, Text};
+
     use super::*;
 
     fn mark(x: u32) -> Mark {
-        Mark {
-            x,
-            y: 0,
-            w: 10,
-            h: 10,
-            ink: Ink::Yellow,
-        }
+        Mark::highlight(x, 0, 10, 10, Ink::Yellow)
     }
 
     #[test]
@@ -251,6 +272,34 @@ mod tests {
         }
         assert_eq!(e.marks(), [mark(50)]);
         assert!(!e.redo());
+    }
+
+    #[test]
+    fn text_is_undone_like_any_other_mark() {
+        let text = |body: &str| Mark {
+            x: 5,
+            y: 5,
+            w: 40,
+            h: 20,
+            kind: Kind::Text(Text {
+                body: body.to_owned(),
+                size: 16,
+                pen: Pen::Red,
+                turn: 0,
+            }),
+        };
+        let mut e = Editor::default();
+        assert_eq!(e.add(mark(0)), 0);
+        assert_eq!(e.add(text("Hi")), 1);
+        e.change(1, text("Hello"));
+        assert_eq!(e.marks()[1], text("Hello"));
+        e.undo();
+        assert_eq!(e.marks()[1], text("Hi"));
+        e.undo();
+        assert_eq!(e.marks(), [mark(0)]);
+        e.redo();
+        e.redo();
+        assert_eq!(e.marks(), [mark(0), text("Hello")]);
     }
 
     #[test]
