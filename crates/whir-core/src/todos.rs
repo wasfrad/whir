@@ -85,7 +85,7 @@ impl Todos {
     /// The open ones, the most recently flagged first.
     pub fn open(&self) -> Vec<&Todo> {
         let mut open: Vec<&Todo> = self.items.iter().filter(|t| t.state.is_open()).collect();
-        open.sort_by(|a, b| b.state.since().cmp(&a.state.since()));
+        open.sort_by_key(|t| std::cmp::Reverse(t.state.since()));
         open
     }
 

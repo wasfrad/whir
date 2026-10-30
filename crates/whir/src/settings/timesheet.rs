@@ -15,6 +15,9 @@ const PROJECT_W: f32 = 250.0;
 const CELL: egui::Vec2 = vec2(62.0, 26.0);
 const MIDNIGHT: u32 = 24 * 3600;
 
+/// An entry's start, end and note, as changed.
+type Span = (Stamp, Stamp, String);
+
 pub struct View {
     /// The week shown.
     monday: i64,
@@ -435,7 +438,7 @@ impl View {
             .filter(|e| e.timer == timer && e.day() == date)
             .cloned()
             .collect();
-        let mut change: Option<(Entry, Option<(Stamp, Stamp, String)>)> = None;
+        let mut change: Option<(Entry, Option<Span>)> = None;
         egui::Grid::new(("whir.entries", timer, date))
             .spacing(vec2(8.0, 4.0))
             .show(ui, |ui| {

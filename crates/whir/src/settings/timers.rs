@@ -10,6 +10,9 @@ use whir_core::timesheet::{Rounding, Store, Txn};
 
 use super::{edit_line, heading, note, primary};
 
+/// A change to make to the timesheet, decided while drawing.
+type Change = Box<dyn FnOnce(&mut Txn)>;
+
 #[derive(Default)]
 pub struct View {
     new_customer: String,
@@ -71,7 +74,7 @@ impl View {
         });
         let used = used.clone();
         let state = store.state().clone();
-        let mut change: Option<Box<dyn FnOnce(&mut Txn)>> = None;
+        let mut change: Option<Change> = None;
         for (customer, timers) in state.by_customer(true, true) {
             let cid = customer.id;
             ui.horizontal(|ui| {

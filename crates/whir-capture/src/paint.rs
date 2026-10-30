@@ -198,10 +198,12 @@ pub struct Mask {
     pub coverage: Vec<u8>,
 }
 
+/// Fonts made so far, by face, size and weight (semibold or not).
+type Fonts = Vec<((String, i32, bool), HFONT)>;
+
 thread_local! {
-    /// Fonts made so far, by face, size and weight: a dock uses a handful,
-    /// and redraws often.
-    static FONTS: RefCell<Vec<((String, i32, bool), HFONT)>> = const { RefCell::new(Vec::new()) };
+    /// A dock uses a handful of fonts, and redraws often.
+    static FONTS: RefCell<Fonts> = const { RefCell::new(Vec::new()) };
 }
 
 fn font(face: &str, px: i32, bold: bool) -> HFONT {
