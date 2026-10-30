@@ -290,7 +290,7 @@ fn parse_text(line: &str) -> Option<Mark> {
 }
 
 /// `"…"` with `\\`, `\"`, `\n` and `\r` escaped: one line, whatever is in it.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -306,7 +306,7 @@ fn quote(s: &str) -> String {
     out
 }
 
-fn unquote(s: &str) -> Option<String> {
+pub(crate) fn unquote(s: &str) -> Option<String> {
     let inner = s.strip_prefix('"')?.strip_suffix('"')?;
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
