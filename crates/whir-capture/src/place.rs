@@ -1,6 +1,7 @@
 //! Where the dock sits: flush against one edge of a monitor's work area,
-//! somewhere along it, with only a grip showing until it slides out; and
-//! where its panel (todos, the time drawer) goes beside it.
+//! somewhere along it, with only a grip showing until it slides out; where
+//! things are on its bar; and where its panel (todos, today's times, the
+//! project picker) goes beside it.
 
 use crate::geom::{Point, Rect};
 use crate::monitors::Monitor;
@@ -36,51 +37,119 @@ impl Edge {
     }
 }
 
-/// The dock's measurements in pixels, at one display scale.
+/// What the bar holds, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Capture,
+    Delay,
+    /// Play or pause the stopwatch.
+    Play,
+    /// Today's time on the project (only to read).
+    Time,
+    /// The customer over the project: opens the picker.
+    Project,
+    /// The ⌄ that opens today's times.
+    More,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 6] = [
+        Slot::Capture,
+        Slot::Delay,
+        Slot::Play,
+        Slot::Time,
+        Slot::Project,
+        Slot::More,
+    ];
+
+    /// Clicking it does something.
+    pub fn clickable(self) -> bool {
+        self != Slot::Time
+    }
+}
+
+/// The dock's measurements in pixels, at one display scale. The bar is laid
+/// out left to right on every edge; on a side edge it lies along the screen
+/// edge and slides out sideways.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
-    /// How far the open panel reaches in from the edge.
-    pub depth: i32,
-    /// Its extent along the edge.
-    pub length: i32,
+    /// The bar, without its grip: (width, height).
+    pub bar: (i32, i32),
     /// The strip on its inner side that stays out when it is closed.
     pub grip: i32,
+    /// A square button's side.
     pub button: i32,
     pub pad: i32,
-    /// The last button (the ▾ that opens the panel) is this long.
-    pub chevron: i32,
-    /// The panel's width.
+    /// Between the capture buttons and the stopwatch (a hairline in it).
+    pub gap: i32,
+    pub time: i32,
+    pub project: i32,
+    pub more: i32,
+    /// The panel's width: the bar's, so it sits flush with it.
     pub panel: i32,
 }
 
-/// Capture, Delay, the timer, and the ▾ that opens the time drawer.
-pub const BUTTONS: usize = 4;
-
 pub fn layout(dpi: u32) -> Layout {
     let px = |v: i32| (v * dpi.max(48) as i32 + 48) / 96;
-    let (button, pad, grip, chevron) = (px(34), px(4), px(8), px(20));
-    Layout {
-        depth: button + 2 * pad + grip,
-        length: (BUTTONS as i32 - 1) * (button + pad) + chevron + 2 * pad,
-        grip,
-        button,
-        pad,
-        chevron,
-        panel: px(300),
-    }
+    let mut l = Layout {
+        bar: (0, 0),
+        grip: px(8),
+        button: px(34),
+        pad: px(4),
+        gap: px(9),
+        time: px(70),
+        project: px(150),
+        more: px(24),
+        panel: 0,
+    };
+    let (x, w) = l.slot_at(Slot::More);
+    l.bar = (x + w + l.pad, l.button + 2 * l.pad);
+    l.panel = l.bar.0;
+    l
 }
 
 impl Layout {
-    /// The whole panel, as (width, height) on `edge`.
+    /// How far along the bar a slot starts, and how long it is.
+    fn slot_at(&self, slot: Slot) -> (i32, i32) {
+        let extent = |s: Slot| match s {
+            Slot::Capture | Slot::Delay | Slot::Play => self.button,
+            Slot::Time => self.time,
+            Slot::Project => self.project,
+            Slot::More => self.more,
+        };
+        let mut x = self.pad;
+        for s in Slot::ALL {
+            if s == slot {
+                break;
+            }
+            x += extent(s) + if s == Slot::Delay { self.gap } else { self.pad };
+        }
+        (x, extent(slot))
+    }
+
+    /// The whole dock, as (width, height) on `edge`.
     pub fn size(&self, edge: Edge) -> (i32, i32) {
+        let (w, h) = self.bar;
         if edge.is_side() {
-            (self.depth, self.length)
+            (w + self.grip, h)
         } else {
-            (self.length, self.depth)
+            (w, h + self.grip)
         }
     }
 
-    /// The grip strip inside the panel: on the side away from the edge.
+    /// How far it reaches in from `edge`, open.
+    pub fn depth(&self, edge: Edge) -> i32 {
+        let (w, h) = self.size(edge);
+        if edge.is_side() { w } else { h }
+    }
+
+    /// Its extent along `edge`.
+    pub fn length(&self, edge: Edge) -> i32 {
+        let (w, h) = self.size(edge);
+        if edge.is_side() { h } else { w }
+    }
+
+    /// The grip strip: on the side away from the edge.
     pub fn grip_rect(&self, edge: Edge) -> Rect {
         let (w, h) = self.size(edge);
         match edge {
@@ -91,31 +160,30 @@ impl Layout {
         }
     }
 
-    /// How long button `i` is, along the strip.
-    fn extent(&self, i: usize) -> i32 {
-        if i + 1 == BUTTONS {
-            self.chevron
-        } else {
-            self.button
-        }
+    /// The bar: all of the dock but the grip.
+    pub fn bar_rect(&self, edge: Edge) -> Rect {
+        let (x, y) = match edge {
+            Edge::Right => (self.grip, 0),
+            Edge::Bottom => (0, self.grip),
+            Edge::Left | Edge::Top => (0, 0),
+        };
+        Rect::new(x, y, x + self.bar.0, y + self.bar.1)
     }
 
-    /// Button `i` inside the panel.
-    pub fn button_rect(&self, edge: Edge, i: usize) -> Rect {
-        let along = self.pad + (0..i).map(|j| self.extent(j) + self.pad).sum::<i32>();
-        // Past the grip when the grip comes first.
-        let across = self.pad
-            + if matches!(edge, Edge::Right | Edge::Bottom) {
-                self.grip
-            } else {
-                0
-            };
-        let (x, y, w, h) = if edge.is_side() {
-            (across, along, self.button, self.extent(i))
-        } else {
-            (along, across, self.extent(i), self.button)
-        };
-        Rect::new(x, y, x + w, y + h)
+    /// Where `slot` is in the dock.
+    pub fn slot_rect(&self, edge: Edge, slot: Slot) -> Rect {
+        let bar = self.bar_rect(edge);
+        let (x, w) = self.slot_at(slot);
+        let top = bar.top + self.pad;
+        Rect::new(bar.left + x, top, bar.left + x + w, top + self.button)
+    }
+
+    /// The hairline between the capture buttons and the stopwatch.
+    pub fn divider(&self, edge: Edge) -> Rect {
+        let delay = self.slot_rect(edge, Slot::Delay);
+        let x = delay.right + self.gap / 2;
+        let inset = self.button / 4;
+        Rect::new(x, delay.top + inset, x + 1, delay.bottom - inset)
     }
 }
 
@@ -225,11 +293,7 @@ pub fn default_spot(monitors: &[Monitor]) -> (usize, Edge, u16) {
 
 /// Where the dock goes when dropped with the pointer at `at`: the nearest
 /// edge of the monitor the pointer is on.
-pub fn snap(
-    at: Point,
-    monitors: &[Monitor],
-    length: impl Fn(u32) -> i32,
-) -> Option<(usize, Edge, u16)> {
+pub fn snap(at: Point, monitors: &[Monitor]) -> Option<(usize, Edge, u16)> {
     let distance = |r: Rect| {
         let (cx, cy) = r.clamp(at);
         (cx - at.0).abs() + (cy - at.1).abs()
@@ -246,7 +310,7 @@ pub fn snap(
         Edge::Bottom => (w.bottom - at.1).abs(),
     })?;
     // The pointer holds the dock by its middle.
-    let len = length(m.dpi);
+    let len = layout(m.dpi).length(edge);
     let (from, to, p) = if edge.is_side() {
         (w.top, w.bottom, at.1)
     } else {
@@ -290,44 +354,36 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_scales_and_buttons_fit_beside_the_grip() {
+    fn the_layout_scales_and_slots_fit_beside_the_grip() {
         let l = layout(96);
-        assert_eq!((l.depth, l.length, l.grip), (50, 142, 8));
-        assert_eq!(layout(192).depth, 100);
-        assert_eq!(layout(192).length, 284);
+        assert_eq!(l.bar, (379, 42));
+        assert_eq!((l.depth(Edge::Top), l.length(Edge::Top)), (50, 379));
+        assert_eq!((l.depth(Edge::Left), l.length(Edge::Left)), (387, 42));
+        let big = layout(192);
+        assert_eq!(big.bar, (758, 84));
+        assert_eq!(big.depth(Edge::Top), 100);
         for edge in Edge::ALL {
             let (w, h) = l.size(edge);
-            let panel = Rect::new(0, 0, w, h);
-            let grip = l.grip_rect(edge);
-            assert_eq!(grip.intersect(panel), grip);
-            for i in 0..BUTTONS {
-                let b = l.button_rect(edge, i);
-                assert_eq!(b.intersect(panel), b, "{edge:?} button {i}");
-                assert!(b.intersect(grip).is_empty(), "{edge:?} button {i}");
-                let along = if i + 1 == BUTTONS {
-                    l.chevron
-                } else {
-                    l.button
-                };
-                let size = if edge.is_side() {
-                    (l.button, along)
-                } else {
-                    (along, l.button)
-                };
-                assert_eq!((b.width(), b.height()), size, "{edge:?} button {i}");
-                for j in i + 1..BUTTONS {
-                    assert!(b.intersect(l.button_rect(edge, j)).is_empty());
-                }
+            let whole = Rect::new(0, 0, w, h);
+            let (grip, bar) = (l.grip_rect(edge), l.bar_rect(edge));
+            assert_eq!(grip.intersect(whole), grip, "{edge:?}");
+            assert_eq!(bar.intersect(whole), bar, "{edge:?}");
+            assert!(grip.intersect(bar).is_empty(), "{edge:?}");
+            // Left to right, inside the bar, none overlapping.
+            let mut left = bar.left;
+            for slot in Slot::ALL {
+                let r = l.slot_rect(edge, slot);
+                assert_eq!(r.intersect(bar), r, "{edge:?} {slot:?}");
+                assert!(r.left >= left + l.pad, "{edge:?} {slot:?}");
+                assert_eq!(r.height(), l.button);
+                left = r.right;
             }
-            // The last one ends a pad short of the end.
-            let last = l.button_rect(edge, BUTTONS - 1);
-            let end = if edge.is_side() {
-                last.bottom
-            } else {
-                last.right
-            };
-            assert_eq!(end + l.pad, l.length, "{edge:?}");
+            assert_eq!(left + l.pad, bar.right, "{edge:?}");
+            let d = l.divider(edge);
+            assert!(d.left >= l.slot_rect(edge, Slot::Delay).right);
+            assert!(d.right <= l.slot_rect(edge, Slot::Play).left);
         }
+        assert!(!Slot::Time.clickable() && Slot::Project.clickable());
     }
 
     #[test]
@@ -336,7 +392,7 @@ mod tests {
         let l = layout(96);
         assert_eq!(
             anchor(work, Edge::Left, 0, &l),
-            Rect::new(0, 0, l.depth, l.length)
+            Rect::new(0, 0, l.depth(Edge::Left), l.length(Edge::Left))
         );
         assert_eq!(anchor(work, Edge::Left, 1000, &l).bottom, 1392);
         assert_eq!(anchor(work, Edge::Right, 500, &l).right, 2560);
@@ -356,7 +412,7 @@ mod tests {
         let work = Rect::new(-1440, 0, 0, 2512);
         for edge in Edge::ALL {
             let a = anchor(work, edge, 500, &l);
-            let (open, src) = viewport(edge, a, l.depth);
+            let (open, src) = viewport(edge, a, l.depth(edge));
             assert_eq!((open, src), (a, (0, 0)), "{edge:?}");
 
             let (closed, src) = viewport(edge, a, l.grip);
@@ -437,20 +493,19 @@ mod tests {
     #[test]
     fn dropping_snaps_to_the_nearest_edge_of_that_monitor() {
         let m = three();
-        let len = |dpi| layout(dpi).length;
         // Near the top of the right-hand monitor.
-        let (i, edge, offset) = snap((3000, 30), &m, len).unwrap();
+        let (i, edge, offset) = snap((3000, 30), &m).unwrap();
         assert_eq!((i, edge), (1, Edge::Top));
         let a = anchor(m[1].work, edge, offset, &layout(96));
         assert!(a.contains((3000, 10)), "{a:?}");
         // Far down the portrait monitor's left edge.
-        let (i, edge, offset) = snap((-1430, 2000), &m, len).unwrap();
+        let (i, edge, offset) = snap((-1430, 2000), &m).unwrap();
         assert_eq!((i, edge), (2, Edge::Left));
         assert!(anchor(m[2].work, edge, offset, &layout(96)).contains((-1440, 2000)));
         // Past the end of an edge: as far along as it goes.
-        assert_eq!(snap((2550, 5000), &m, len).unwrap().2, 1000);
+        assert_eq!(snap((2550, 5000), &m).unwrap().2, 1000);
         // Off every monitor: the nearest one.
-        assert_eq!(snap((9000, 700), &m, len).unwrap().0, 1);
-        assert_eq!(snap((0, 0), &[], len), None);
+        assert_eq!(snap((9000, 700), &m).unwrap().0, 1);
+        assert_eq!(snap((0, 0), &[]), None);
     }
 }

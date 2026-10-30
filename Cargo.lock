@@ -657,6 +657,7 @@ dependencies = [
  "whir-image",
  "whir-platform",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]

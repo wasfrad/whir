@@ -14,3 +14,4 @@ whir-core.workspace = true
 whir-image.workspace = true
 whir-platform.workspace = true
 windows.workspace = true
+windows-numerics.workspace = true

@@ -15,13 +15,13 @@ mod grab;
 mod handoff;
 mod instance;
 mod monitors;
-mod note_edit;
 mod overlay;
 mod paint;
 mod panel;
 mod place;
 mod store;
 mod targets;
+mod text;
 mod tray;
 mod veil;
 
