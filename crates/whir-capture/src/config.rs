@@ -1,6 +1,6 @@
 //! What the dock remembers, in `%LOCALAPPDATA%\whir\dock.ini`: where it sits,
-//! the delay, and the capture hotkey. (Its own file: the main window owns
-//! `settings.ini`, and two processes must not write one file.)
+//! the delay, the capture hotkey, and whether it is hidden. (Its own file: the
+//! main window owns `settings.ini`, and two processes must not write one file.)
 
 use whir_core::settings::{IniFile, app_data_file};
 
@@ -100,6 +100,11 @@ pub struct DockConfig {
     pub delay: u32,
     /// `None`: switched off (`hotkey = off`).
     pub hotkey: Option<Hotkey>,
+    /// Hidden (from its own menu or the tray's): only the tray icon shows.
+    pub hidden: bool,
+    /// Starting with Windows was set up once (after that it is the user's
+    /// choice, and the Run entry itself says what it is).
+    pub autostart_set: bool,
 }
 
 /// Where the dock was last put.
@@ -142,10 +147,13 @@ impl DockConfig {
             Some(text) => Some(parse_hotkey(text).unwrap_or(Hotkey::DEFAULT)),
             None => Some(Hotkey::DEFAULT),
         };
+        let yes = |key| ini.get(key).is_some_and(|v| v == "yes");
         Self {
             spot,
             delay,
             hotkey,
+            hidden: yes("hidden"),
+            autostart_set: yes("autostart-set"),
         }
     }
 
@@ -158,6 +166,9 @@ impl DockConfig {
         ini.set("delay", &self.delay.to_string());
         let hotkey = self.hotkey.map(format_hotkey);
         ini.set("hotkey", hotkey.as_deref().unwrap_or("off"));
+        let yes_no = |b| if b { "yes" } else { "no" };
+        ini.set("hidden", yes_no(self.hidden));
+        ini.set("autostart-set", yes_no(self.autostart_set));
     }
 }
 
@@ -225,7 +236,9 @@ mod tests {
             DockConfig {
                 spot: None,
                 delay: 0,
-                hotkey: Some(Hotkey::DEFAULT)
+                hotkey: Some(Hotkey::DEFAULT),
+                hidden: false,
+                autostart_set: false,
             }
         );
     }
@@ -240,6 +253,8 @@ mod tests {
             }),
             delay: 5,
             hotkey: parse_hotkey("ctrl+alt+f9"),
+            hidden: true,
+            autostart_set: true,
         };
         let mut file = ini("# kept\nfuture = thing\n");
         c.write(&mut file);

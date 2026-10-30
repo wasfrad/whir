@@ -4,18 +4,20 @@
 
 use std::time::{Duration, Instant};
 
+use whir_platform::ipc;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, WAIT_ABANDONED,
-    WAIT_OBJECT_0, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WAIT_ABANDONED, WAIT_OBJECT_0,
+    WPARAM,
 };
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_APP,
+    AllowSetForegroundWindow, GetWindowThreadProcessId, PostMessageW, WM_APP,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::Command;
 
+/// [`ipc::DOCK_CLASS`], as `RegisterClassExW` wants it.
 pub const CLASS: PCWSTR = w!("whir.dock.v1");
 /// Posted to the dock by another launch; `wParam` is [`code`] of its command.
 pub const WM_LAUNCHED: u32 = WM_APP + 1;
@@ -25,13 +27,12 @@ pub fn code(cmd: Command) -> usize {
         Command::Reveal => 1,
         Command::Capture => 2,
         Command::Quit => 3,
+        Command::Start => 4,
     }
 }
 
 pub fn from_code(code: usize) -> Option<Command> {
-    [Command::Reveal, Command::Capture, Command::Quit]
-        .into_iter()
-        .find(|&c| self::code(c) == code)
+    Command::ALL.into_iter().find(|&c| self::code(c) == code)
 }
 
 pub enum Role {
@@ -52,12 +53,6 @@ impl Drop for Guard {
     }
 }
 
-fn find_dock() -> Option<HWND> {
-    unsafe { FindWindowW(CLASS, PCWSTR::null()) }
-        .ok()
-        .filter(|h| !h.is_invalid())
-}
-
 pub fn acquire(cmd: Command) -> Role {
     let mutex = match unsafe { CreateMutexW(None, true, w!("Local\\whir.dock.v1")) } {
         Ok(h) => h,
@@ -70,7 +65,7 @@ pub fn acquire(cmd: Command) -> Role {
     // A dock is running, or just starting, or just closing.
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if let Some(hwnd) = find_dock() {
+        if let Some(hwnd) = ipc::find_dock_window() {
             unsafe {
                 // We were started by the user: let the dock act for us.
                 let mut process = 0u32;
@@ -89,4 +84,22 @@ pub fn acquire(cmd: Command) -> Role {
     }
     // The other one is stuck: better a second dock than none.
     Role::Primary(Guard(mutex))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_is_the_one_others_look_for() {
+        assert_eq!(unsafe { CLASS.to_string() }.unwrap(), ipc::DOCK_CLASS);
+    }
+
+    #[test]
+    fn codes_round_trip() {
+        for c in Command::ALL {
+            assert_eq!(from_code(code(c)), Some(c));
+        }
+        assert_eq!(from_code(0), None);
+    }
 }

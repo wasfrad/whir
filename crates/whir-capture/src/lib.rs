@@ -18,6 +18,7 @@ mod paint;
 mod place;
 mod store;
 mod targets;
+mod tray;
 mod veil;
 
 use std::path::PathBuf;
@@ -37,6 +38,9 @@ use crate::overlay::Outcome;
 pub enum Command {
     /// Show it (starting it if needed).
     Reveal,
+    /// Make sure it is running, without showing it (at sign-in, and whenever
+    /// the main window starts).
+    Start,
     /// Take a capture now (starting it if needed).
     Capture,
     /// Close it.
@@ -44,15 +48,21 @@ pub enum Command {
 }
 
 impl Command {
+    pub const ALL: [Command; 4] = [
+        Command::Reveal,
+        Command::Start,
+        Command::Capture,
+        Command::Quit,
+    ];
+
     pub fn from_arg(arg: &str) -> Option<Command> {
-        [Command::Reveal, Command::Capture, Command::Quit]
-            .into_iter()
-            .find(|c| c.flag() == arg)
+        Command::ALL.into_iter().find(|c| c.flag() == arg)
     }
 
     pub fn flag(self) -> &'static str {
         match self {
             Command::Reveal => "--dock",
+            Command::Start => "--dock-start",
             Command::Capture => "--dock-capture",
             Command::Quit => "--dock-quit",
         }
@@ -61,6 +71,9 @@ impl Command {
 
 /// Start `whir.exe` with `cmd`'s flag (from the main window's capture button).
 pub fn launch(cmd: Command) -> std::io::Result<()> {
+    if cmd == Command::Start && whir_platform::ipc::find_dock_window().is_some() {
+        return Ok(());
+    }
     std::process::Command::new(std::env::current_exe()?)
         .arg(cmd.flag())
         .spawn()
@@ -132,7 +145,7 @@ mod tests {
 
     #[test]
     fn flags_round_trip_and_nothing_else_is_a_command() {
-        for c in [Command::Reveal, Command::Capture, Command::Quit] {
+        for c in Command::ALL {
             assert_eq!(Command::from_arg(c.flag()), Some(c));
         }
         assert_eq!(Command::from_arg("--dock-"), None);

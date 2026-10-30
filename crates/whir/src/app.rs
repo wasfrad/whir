@@ -1194,6 +1194,9 @@ impl Handler for App {
             // The notes list is read once the window is up (never on the startup path).
             self.library_scanned = true;
             self.open_cx.library.scan();
+            // whir lives on in its dock (the tray icon, timers, todos) when this
+            // window closes: make sure it is running.
+            let _ = whir_capture::launch(whir_capture::Command::Start);
         }
 
         out.commands.append(&mut self.pending);

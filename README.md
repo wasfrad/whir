@@ -18,8 +18,9 @@ and opens each one ready to highlight and label.
 3. Right-click a `.png`, `.pdf` and `.csv` → **Open with → Choose another app → whir → Always**.
    (Windows doesn't let programs make themselves the default; this click is required once per type.)
 
-`whir.exe --unregister` removes the entries. Deleting the folder removes the program
-(close the capture dock first, if it is running: it is `whir.exe` too).
+`whir.exe --unregister` removes the entries and stops whir starting with Windows.
+Deleting the folder removes the program (quit whir from its tray icon first: the dock
+is `whir.exe` too, and keeps running when the window is closed).
 
 If your PC blocks unsigned programs (AppLocker/WDAC), try running `whir.exe` from the
 folder first. If it's blocked there, it will be blocked everywhere.
@@ -93,11 +94,12 @@ clipboard, or Save a copy.
 
 ## Screenshots
 
-`whir.exe --dock` (or the camera button in the toolbar) starts the capture dock: a slim
-grip on a screen edge that slides out when the pointer rests on it. It stays on top of
-every other window, full-screen ones included (only the Start menu and Windows'
-notifications go over it). It is a small process of its own (about 2 MB) and stays when
-whir's window is closed.
+The capture dock is a slim grip on a screen edge that slides out when the pointer rests
+on it. It stays on top of every other window, full-screen ones included (only the Start
+menu and Windows' notifications go over it). It is a small process of its own (about
+2 MB) and is the part of whir that is always running: it starts with Windows and with
+whir's window, stays when the window is closed, and has an icon in the notification
+area. Quitting whir is done from that icon.
 
 | Capture dock | |
 |---|---|
@@ -106,12 +108,17 @@ whir's window is closed.
 | Esc · right-click | Cancel |
 | Stopwatch | Delay: off → 3 s → 5 s (time to open a menu or a tooltip before the freeze) |
 | Drag the dock | Move it to any edge of any monitor (remembered) |
-| Right-click the dock | Capture · delay · open whir · open the screenshots folder · close the dock |
+| Right-click the dock | Capture · delay · open whir · open the screenshots folder · hide the dock |
+| Click the tray icon · right-click it | Open whir · capture, show/hide the dock, start with Windows on/off, **Quit whir** |
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots` and opens in whir with the
 highlighter in hand; the drawer's Library lists them all. Their highlights and text are
 kept beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
-`whir.exe --dock-capture` captures at once; `whir.exe --dock-quit` closes the dock. The
+`whir.exe --dock` shows the dock (the camera button in the toolbar does the same, even
+when it is hidden); `--dock-start` starts it without showing it; `--dock-capture`
+captures at once; `--dock-quit` closes it. whir starts with Windows (a per-user entry
+under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, set the first time the
+dock runs; switch it off in the tray menu). The
 hotkey can be changed or switched off in `%LOCALAPPDATA%\whir\dock.ini`
 (`hotkey = ctrl+alt+f9`, `hotkey = off`).
 

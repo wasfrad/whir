@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use whir_core::theme::Theme;
-use whir_platform::ipc;
+use whir_platform::{ipc, shell};
 use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
@@ -33,15 +33,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-    IsIconic, KillTimer, LoadCursorW, MF_BYCOMMAND, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
-    PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG,
+    IsIconic, KillTimer, LoadCursorW, MF_BYCOMMAND, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG,
     SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync,
     SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL,
+    WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL,
     WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -54,6 +54,7 @@ use crate::instance::{self, Role, WM_LAUNCHED};
 use crate::monitors::{self, Monitor};
 use crate::paint::{Surface, icon_mask, text_mask};
 use crate::place::{self, Edge, Layout};
+use crate::tray::{self, Tray};
 
 const WM_MOUSEHOVER: u32 = 0x02A1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -117,6 +118,7 @@ struct Dock {
     capturing: bool,
     menu_open: bool,
     hotkey_registered: bool,
+    tray: Tray,
 }
 
 fn rgb(c: [u8; 4]) -> [u8; 3] {
@@ -152,6 +154,7 @@ impl Dock {
             capturing: false,
             menu_open: false,
             hotkey_registered: false,
+            tray: Tray::new(hwnd),
         };
         dock.relayout();
         dock
@@ -305,6 +308,27 @@ impl Dock {
     fn redraw(&mut self) {
         self.render();
         self.present();
+    }
+
+    /// On screen, unless hidden (then only the tray icon shows).
+    fn show(&self) {
+        let how = if self.config.hidden {
+            SW_HIDE
+        } else {
+            SW_SHOWNOACTIVATE
+        };
+        unsafe {
+            let _ = ShowWindow(self.hwnd, how);
+        }
+    }
+
+    fn set_hidden(&mut self, hidden: bool) {
+        if self.config.hidden != hidden {
+            self.config.hidden = hidden;
+            self.config.save();
+        }
+        self.show();
+        self.raise();
     }
 
     /// The button under a point of the window.
@@ -562,8 +586,11 @@ fn capture(dock: &RefCell<Dock>, hwnd: HWND) {
         let _ = DwmFlush();
         let _ = DwmFlush();
         let result = crate::capture();
-        dock.borrow().present();
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        {
+            let d = dock.borrow();
+            d.present();
+            d.show();
+        }
         // A hotkey pressed while selecting isn't a request for another.
         let mut stale = MSG::default();
         while PeekMessageW(&mut stale, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {}
@@ -589,7 +616,10 @@ const MENU_CAPTURE: usize = 1;
 const MENU_DELAY: usize = 10;
 const MENU_OPEN_WHIR: usize = 20;
 const MENU_OPEN_FOLDER: usize = 21;
-const MENU_CLOSE: usize = 30;
+const MENU_HIDE: usize = 30;
+const MENU_SHOW: usize = 31;
+const MENU_AUTOSTART: usize = 32;
+const MENU_QUIT: usize = 40;
 
 /// The right-click menu. Also not under a borrow: a menu is a message loop.
 fn menu(dock: &RefCell<Dock>, hwnd: HWND) {
@@ -638,7 +668,7 @@ fn menu(dock: &RefCell<Dock>, hwnd: HWND) {
         item(MF_STRING, MENU_OPEN_WHIR, "Open whir");
         item(MF_STRING, MENU_OPEN_FOLDER, "Open screenshots folder");
         item(MF_SEPARATOR, 0, "");
-        item(MF_STRING, MENU_CLOSE, "Close dock");
+        item(MF_STRING, MENU_HIDE, "Hide dock");
 
         let at = cursor();
         // So that a click elsewhere dismisses the menu.
@@ -663,14 +693,120 @@ fn menu(dock: &RefCell<Dock>, hwnd: HWND) {
         MENU_CAPTURE => d.capture_pressed(),
         MENU_OPEN_WHIR => open_whir(),
         MENU_OPEN_FOLDER => open_folder(),
-        MENU_CLOSE => unsafe {
-            drop(d);
-            let _ = DestroyWindow(hwnd);
-        },
+        MENU_HIDE => d.set_hidden(true),
         id if DELAYS.iter().any(|&s| MENU_DELAY + s as usize == id) => {
             d.set_delay((id - MENU_DELAY) as u32);
         }
         _ => {}
+    }
+}
+
+/// The tray icon's menu: the dock's way back when hidden, and whir's way out.
+fn tray_menu(dock: &RefCell<Dock>, hwnd: HWND) {
+    let (hidden, hotkey, registered) = {
+        let mut d = dock.borrow_mut();
+        d.register_hotkey();
+        d.menu_open = true;
+        (d.config.hidden, d.config.hotkey, d.hotkey_registered)
+    };
+    let autostart = shell::autostart().is_some();
+    let picked = unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            dock.borrow_mut().menu_open = false;
+            return;
+        };
+        let item = |flags, id: usize, text: &str| {
+            let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
+        };
+        match hotkey.map(format_hotkey) {
+            Some(keys) if registered => item(MF_STRING, MENU_CAPTURE, &format!("Capture\t{keys}")),
+            _ => item(MF_STRING, MENU_CAPTURE, "Capture"),
+        }
+        item(MF_STRING, MENU_OPEN_WHIR, "Open whir");
+        item(MF_SEPARATOR, 0, "");
+        if hidden {
+            item(MF_STRING, MENU_SHOW, "Show dock");
+        } else {
+            item(MF_STRING, MENU_HIDE, "Hide dock");
+        }
+        let checked = if autostart { MF_CHECKED } else { MF_STRING };
+        item(MF_STRING | checked, MENU_AUTOSTART, "Start with Windows");
+        item(MF_SEPARATOR, 0, "");
+        item(MF_STRING, MENU_QUIT, "Quit whir");
+
+        let at = cursor();
+        // So that a click elsewhere dismisses the menu.
+        let _ = SetForegroundWindow(hwnd);
+        let picked = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+            at.0,
+            at.1,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        picked.0 as usize
+    };
+    let mut d = dock.borrow_mut();
+    d.menu_open = false;
+    match picked {
+        MENU_CAPTURE => d.capture_pressed(),
+        MENU_OPEN_WHIR => open_whir(),
+        MENU_SHOW => {
+            d.set_hidden(false);
+            d.set_open(true);
+            d.linger(REVEAL_MS);
+        }
+        MENU_HIDE => d.set_hidden(true),
+        MENU_AUTOSTART => {
+            if let Err(e) = shell::set_autostart(!autostart) {
+                drop(d);
+                crate::report(&e);
+            }
+        }
+        MENU_QUIT => {
+            drop(d);
+            quit(hwnd);
+        }
+        _ => {}
+    }
+}
+
+/// Close whir altogether: its window (which still asks about unsaved work)
+/// and the dock.
+fn quit(hwnd: HWND) {
+    unsafe {
+        if let Some(main) = ipc::find_main_window() {
+            let _ = PostMessageW(Some(main), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// The first time the dock runs, whir starts with Windows from then on; after
+/// that, the Run entry is the user's to switch off. whir is a folder that can
+/// be moved, so an entry pointing at another copy is pointed at this one.
+fn autostart_once(config: &mut DockConfig) {
+    // A development build never claims the user's sign-in.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let wanted = shell::autostart_command();
+    match shell::autostart() {
+        None if !config.autostart_set => {
+            let _ = shell::set_autostart(true);
+        }
+        Some(now) if wanted.is_some_and(|w| !w.eq_ignore_ascii_case(&now)) => {
+            let _ = shell::set_autostart(true);
+        }
+        _ => {}
+    }
+    if !config.autostart_set {
+        config.autostart_set = true;
+        config.save();
     }
 }
 
@@ -732,6 +868,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 menu(dock, hwnd);
                 return LRESULT(0);
             }
+            tray::WM_TRAY => {
+                match (lparam.0 & 0xFFFF) as u32 {
+                    WM_CONTEXTMENU => tray_menu(dock, hwnd),
+                    tray::NIN_SELECT | tray::NIN_KEYSELECT => open_whir(),
+                    _ => {}
+                }
+                return LRESULT(0);
+            }
             WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE),
             WM_NCDESTROY => {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -790,9 +934,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_LAUNCHED => match instance::from_code(wparam.0) {
                 Some(Command::Reveal) => {
+                    d.set_hidden(false);
                     d.set_open(true);
                     d.linger(REVEAL_MS);
                 }
+                // Already running: that was all.
+                Some(Command::Start) => {}
                 Some(Command::Capture) => d.capture_now(),
                 Some(Command::Quit) => {
                     drop(d);
@@ -813,6 +960,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 PostQuitMessage(0);
             }
+            // Explorer restarted, with an empty notification area.
+            _ if d.tray.is_taskbar_created(msg) => d.tray.add(),
             _ => {
                 drop(d);
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -899,10 +1048,11 @@ pub fn run(cmd: Command) -> i32 {
         SetTimer(Some(hwnd), TIMER_KEEP_ON_TOP, KEEP_ON_TOP_MS, None);
         {
             let mut d = dock.borrow_mut();
+            autostart_once(&mut d.config);
             d.register_hotkey();
             d.present();
+            d.show();
         }
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         // Say hello, or get straight to it.
         let first = PostMessageW(
             Some(hwnd),

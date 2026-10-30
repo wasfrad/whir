@@ -131,7 +131,10 @@ fn main() {
     }
     if args.unregister {
         register::unregister();
-        message_box("whir's file associations were removed.", false);
+        message_box(
+            "whir's file associations were removed, and it no longer starts with Windows.",
+            false,
+        );
         return;
     }
 

@@ -160,6 +160,8 @@ pub fn unregister() {
         del_tree(r"Software\whir");
         del_value(r"Software\RegisteredApplications", "whir");
     }
+    // Starting with Windows goes too.
+    let _ = whir_platform::shell::set_autostart(false);
     notify();
 }
 
