@@ -226,11 +226,12 @@ fn edit_line(
     let mut text = ui
         .data_mut(|d| d.get_temp::<String>(id))
         .unwrap_or_else(|| current.to_owned());
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .id(id)
-            .desired_width(width)
-            .hint_text(hint),
+    // Its own width, not the grid column's of the frame before (which a
+    // field would otherwise never grow past).
+    let size = vec2(width, ui.spacing().interact_size.y);
+    let response = ui.add_sized(
+        size,
+        egui::TextEdit::singleline(&mut text).id(id).hint_text(hint),
     );
     let done = response.lost_focus();
     if response.has_focus() {

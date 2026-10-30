@@ -1030,6 +1030,7 @@ impl View {
         let mut change: Option<(Entry, Option<Span>)> = None;
         egui::Grid::new(("whir.entries", timer, date))
             .spacing(vec2(8.0, 4.0))
+            .min_col_width(0.0)
             .show(ui, |ui| {
                 for e in &entries {
                     let key = (e.timer, e.start.seconds(), e.end.seconds());
