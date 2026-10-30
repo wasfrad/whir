@@ -16,11 +16,13 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use whir_core::file::FileIdentity;
 use whir_core::texture::{Filter, PixelFormat, TextureDesc, TextureRegistry, UserTexture};
-use whir_core::{FileSource, Waker};
+use whir_core::{FileSource, Waker, views};
 
 use crate::ffi::{self, Api, TextApi};
 use crate::geom::{Affine, NO_BOX, PageGeom, build_lines, is_empty};
+use crate::prefs;
 use crate::text::PageText;
 
 /// One rendered piece of a page at one scale.
@@ -49,6 +51,10 @@ pub enum Event {
         pages: Vec<[f32; 2]>,
         /// pdfium.dll has the text API (selection and search work).
         text: bool,
+        /// Which file, at which version, was opened (to remember its view by).
+        identity: FileIdentity,
+        /// The view it was left with last time (see [`whir_core::views`]).
+        saved: Option<String>,
     },
     Failed(String),
     Tile {
@@ -400,10 +406,19 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
                 )),
             };
             match result {
-                Ok((d, pages)) => {
+                Ok((d, pages, identity)) => {
                     docs.insert(doc, d);
                     let text = api.is_ok_and(|a| a.text.is_some());
-                    let _ = events.send(Event::Opened { pages, text });
+                    // Here rather than on the UI thread: the first look reads views.txt.
+                    let saved = prefs::remember()
+                        .then(|| views::lookup(&path, &identity))
+                        .flatten();
+                    let _ = events.send(Event::Opened {
+                        pages,
+                        text,
+                        identity,
+                        saved,
+                    });
                 }
                 Err(e) => {
                     let _ = events.send(Event::Failed(e));
@@ -445,8 +460,9 @@ fn open_doc(
     events: Sender<Event>,
     waker: Waker,
     textures: Arc<dyn TextureRegistry>,
-) -> Result<(OpenDoc, Vec<[f32; 2]>), String> {
+) -> Result<(OpenDoc, Vec<[f32; 2]>, FileIdentity), String> {
     let file = FileSource::open(path).map_err(|e| format!("Couldn't open the file: {e}"))?;
+    let identity = file.identity();
     if file.len() > u32::MAX as u64 {
         return Err("PDFs larger than 4 GB aren't supported.".into());
     }
@@ -486,6 +502,7 @@ fn open_doc(
             last_wake: Instant::now(),
         },
         pages,
+        identity,
     ))
 }
 
@@ -1009,7 +1026,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("whir-pdf-text-{}.pdf", std::process::id()));
         std::fs::write(&path, test_pdf()).unwrap();
         let (tx, _rx) = channel();
-        let (mut d, sizes) =
+        let (mut d, sizes, _) =
             open_doc(&api, &path, tx, Waker::noop(), Arc::new(NoTextures)).expect("open");
         assert_eq!(sizes, vec![[612.0, 792.0], [792.0, 612.0]]);
 

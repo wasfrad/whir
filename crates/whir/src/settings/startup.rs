@@ -1,9 +1,10 @@
-//! How whir starts, the capture dock, and where its files are.
+//! How whir starts, where its window opens, the capture dock, and where its
+//! files are.
 
 use egui::RichText;
 use whir_core::DocCx;
 use whir_core::theme::Theme;
-use whir_platform::shell;
+use whir_platform::{placement, shell};
 
 use super::{heading, note, toast};
 
@@ -30,6 +31,25 @@ pub fn ui(ui: &mut egui::Ui, cx: &mut DocCx<'_>, theme: &Theme) {
     {
         toast(cx, format!("The capture dock couldn't be started: {e}"));
     }
+
+    ui.add_space(24.0);
+    heading(ui, "Window", theme);
+    let mut exact = placement::exact();
+    let before = exact;
+    ui.radio_value(
+        &mut exact,
+        false,
+        "Open where you left it, or on the monitor the mouse is on if that's another one",
+    );
+    ui.radio_value(&mut exact, true, "Always open exactly where you left it");
+    if exact != before {
+        placement::set_exact(exact);
+    }
+    note(
+        ui,
+        "Either way it keeps its size, and opens maximized if it was.",
+        theme,
+    );
 
     ui.add_space(24.0);
     heading(ui, "Folders", theme);
@@ -60,8 +80,8 @@ pub fn ui(ui: &mut egui::Ui, cx: &mut DocCx<'_>, theme: &Theme) {
     ui.add_space(4.0);
     note(
         ui,
-        "Settings of their own are kept in %LOCALAPPDATA%\\whir (settings.ini, and dock.ini \
-         for the dock: its place, delay and hotkey).",
+        "Settings of their own are kept in %LOCALAPPDATA%\\whir: settings.ini, views.txt \
+         (where each PDF was left), and dock.ini for the dock (its place, delay and hotkey).",
         theme,
     );
 }

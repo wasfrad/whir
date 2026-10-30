@@ -31,6 +31,7 @@ use crate::decode::Decoded;
 use crate::edit::{self, Editor};
 use crate::encode::{PixelLayout, encode_png};
 use crate::pool::{self, JobHandle, Priority};
+use crate::prefs::{self, ZoomPref};
 use crate::tiles::{self, Level};
 use crate::view::{self, Mode, View};
 use crate::{bake, decode, folder};
@@ -271,6 +272,9 @@ pub struct ImageDoc {
     full_failed: bool,
     visible: bool,
     view: View,
+    /// The current image is still to be put at the zoom it opens at
+    /// ([`prefs::initial`]), once it's on screen.
+    opening: bool,
     folder: Option<Vec<PathBuf>>,
     folder_requested: bool,
     /// The user has navigated with ←/→ at least once.
@@ -310,6 +314,14 @@ pub struct ImageDoc {
     marks_error: Option<String>,
 }
 
+/// The zoom `view` is at, as a choice to open the next image at.
+fn zoom_pref(view: &View, ppp: f32) -> ZoomPref {
+    match view.mode {
+        Mode::Fit => ZoomPref::Fit,
+        Mode::Manual { zoom, .. } => ZoomPref::Percent(zoom * ppp * 100.0),
+    }
+}
+
 /// Longest side of the fit level: the screen's longer side (physical px).
 fn fit_cap() -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
@@ -336,6 +348,7 @@ impl ImageDoc {
             full_failed: false,
             visible: false,
             view: View::default(),
+            opening: true,
             folder: None,
             folder_requested: false,
             browsing: false,
@@ -646,6 +659,7 @@ impl ImageDoc {
         self.title = file_title(&path);
         self.path = path;
         self.view = View::default();
+        self.opening = true;
         self.error = None;
         let cached = self
             .cache
@@ -1245,6 +1259,7 @@ impl ImageDoc {
         let vp = viewport.size();
         let time = ui.input(|i| i.time);
         let before = self.view.zoom(image, vp, ppp);
+        let picked_before = zoom_pref(&self.view, ppp);
 
         // A press anywhere but on the text being typed finishes it, and is
         // used up by that: it doesn't also select, draw or start more text.
@@ -1303,6 +1318,8 @@ impl ImageDoc {
         let mut history = None;
         let (mut escape, mut delete) = (false, false);
         let (mut copy, mut finish) = (false, false);
+        // From the context menu: fit (true) or actual size.
+        let mut fit_pick = None;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
             if typing {
@@ -1377,8 +1394,25 @@ impl ImageDoc {
                 turn = Some(true);
             }
         });
+        let fitted = self.view.mode == Mode::Fit;
+        let actual = (self.view.zoom(image, vp, ppp) * ppp - 1.0).abs() < 1e-3;
         resp.context_menu(|ui| {
             ui.set_min_width(190.0);
+            let item = egui::Button::new("Fit to window")
+                .shortcut_text("0")
+                .selected(fitted);
+            if ui.add(item).clicked() {
+                fit_pick = Some(true);
+                ui.close();
+            }
+            let item = egui::Button::new("Actual size")
+                .shortcut_text("1")
+                .selected(actual);
+            if ui.add(item).clicked() {
+                fit_pick = Some(false);
+                ui.close();
+            }
+            ui.separator();
             let item = egui::Button::new("Copy image").shortcut_text("Ctrl+C");
             if ui.add(item).clicked() {
                 copy = true;
@@ -1401,6 +1435,14 @@ impl ImageDoc {
                 ui.close();
             }
         });
+        match fit_pick {
+            Some(true) => self.view.mode = Mode::Fit,
+            Some(false) => {
+                let actual = view::actual_size_zoom(ppp);
+                self.view.set_zoom(actual, egui::Vec2::ZERO, image, vp, ppp);
+            }
+            None => {}
+        }
         if finish {
             self.commit_typing();
         }
@@ -1448,6 +1490,32 @@ impl ImageDoc {
         if (after - before).abs() > f32::EPSILON {
             let pct = (after * ppp * 100.0).round();
             self.toast = Some((format!("{} × {}  ·  {pct}%", image.x, image.y), time + 1.0));
+        }
+        let picked = zoom_pref(&self.view, ppp);
+        if picked != picked_before {
+            // Someone zoomed: with "the zoom I used last", what opens next follows.
+            prefs::used(picked);
+        }
+    }
+
+    /// Put the current image at the zoom it opens at, once it is the one on
+    /// screen (going ←/→, the last one stays up until the next is decoded).
+    fn apply_opening(&mut self, image: egui::Vec2, vp: egui::Vec2, ppp: f32) {
+        let on_screen = self
+            .shown
+            .as_ref()
+            .is_some_and(|s| folder::same_path(&s.path, &self.path));
+        if !self.opening || !on_screen {
+            return;
+        }
+        self.opening = false;
+        match prefs::initial() {
+            ZoomPref::Fit => self.view.mode = Mode::Fit,
+            ZoomPref::Percent(p) => {
+                let zoom = p / 100.0 * view::actual_size_zoom(ppp);
+                self.view = View::default();
+                self.view.set_zoom(zoom, egui::Vec2::ZERO, image, vp, ppp);
+            }
         }
     }
 
@@ -1580,6 +1648,7 @@ impl Document for ImageDoc {
     fn on_visibility(&mut self, visible: bool) {
         if !visible {
             self.commit_typing();
+            prefs::save_last();
         }
         self.visible = visible;
         let priority = if visible {
@@ -1636,11 +1705,13 @@ impl Document for ImageDoc {
     fn flush(&mut self) {
         self.commit_typing();
         self.autosave();
+        prefs::save_last();
     }
 
     fn flush_blocking(&mut self, deadline: Instant) -> Result<(), String> {
         self.commit_typing();
         self.autosave();
+        prefs::save_last();
         while self.marks_in_flight > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(left) {
@@ -1787,9 +1858,10 @@ impl Document for ImageDoc {
 
         if let Some(size) = self.shown.as_ref().map(Shown::full_size) {
             let image = view::turned(size, self.turns());
+            let ppp = ui.ctx().pixels_per_point();
+            self.apply_opening(image, viewport.size(), ppp);
             self.handle_input(ui, &resp, viewport, image, cx.requests);
             self.paint(ui, viewport, &theme);
-            let ppp = ui.ctx().pixels_per_point();
             if let Some(at) = self.placement(viewport, ppp) {
                 self.show_typing(ui, &at, viewport);
             }

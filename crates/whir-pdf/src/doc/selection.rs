@@ -7,7 +7,7 @@ use egui::{CursorIcon, Key, Modifiers, PointerButton, Stroke, StrokeKind, pos2};
 use whir_core::find_bar::fmt_int;
 use whir_core::theme::Theme;
 
-use super::{PdfDoc, minimap};
+use super::{PdfDoc, ZOOM_100, Zoom, minimap};
 use crate::geom;
 use crate::layout::Layout;
 use crate::select::{Gesture, PendingPress, Selection, TextPos, Unit};
@@ -463,6 +463,8 @@ impl PdfDoc {
         let has_text = self.text.available;
         let has_sel = self.sel.is_some_and(|s| !s.is_empty());
         let (mut copy, mut all) = (false, false);
+        let current = self.zoom;
+        let mut pick = None;
         resp.context_menu(|ui| {
             if has_text {
                 let c = egui::Button::new("Copy").shortcut_text("Ctrl+C");
@@ -477,6 +479,20 @@ impl PdfDoc {
                 }
                 ui.separator();
             }
+            for (zoom, label, key) in [
+                (Zoom::FitPage, "Fit page", "0"),
+                (Zoom::FitWidth, "Fit width", "2"),
+                (Zoom::Manual(ZOOM_100), "Actual size", "1"),
+            ] {
+                let b = egui::Button::new(label)
+                    .shortcut_text(key)
+                    .selected(current == zoom);
+                if ui.add(b).clicked() {
+                    pick = Some(zoom);
+                    ui.close();
+                }
+            }
+            ui.separator();
             let label = if minimap::enabled() {
                 "Hide minimap"
             } else {
@@ -492,6 +508,11 @@ impl PdfDoc {
         });
         if all {
             self.set_sel(Some(Selection::all(pages as u32)));
+        }
+        if pick.is_some() {
+            // The next frame zooms, as if its key was pressed.
+            self.menu_zoom = pick;
+            ctx.request_repaint();
         }
         if copy {
             self.copy(ctx, now);

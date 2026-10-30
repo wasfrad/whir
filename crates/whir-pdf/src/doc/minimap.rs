@@ -11,13 +11,13 @@ use egui::{
     Align2, Color32, FontId, Key, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
 };
 use whir_core::scroll::ScrollAxis;
-use whir_core::settings;
 use whir_core::theme::Theme;
 
 use super::{BAR, Cached, PdfDoc, page_px_at};
 use crate::engine::{Job, TileKey};
 use crate::layout::{Layout, MARGIN};
 use crate::mini_layout::MiniLayout;
+use crate::prefs;
 use crate::view::View;
 
 /// Column width (the scrollbar strip sits to its right).
@@ -34,14 +34,13 @@ const HEADER_H: f32 = 32.0;
 const AHEAD: usize = 2;
 /// Thumbnails asked for at once, at most.
 const MAX_JOBS: usize = 64;
-const SETTING: &str = "pdf.minimap";
 
 pub(super) fn enabled() -> bool {
-    settings::get_bool(SETTING, true)
+    prefs::minimap()
 }
 
 pub(super) fn toggle() {
-    settings::set_bool(SETTING, !enabled());
+    prefs::set_minimap(!enabled());
 }
 
 /// The document's rect → the page area, and the panel at its right (the

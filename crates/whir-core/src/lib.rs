@@ -19,6 +19,7 @@ pub mod timesheet;
 pub mod todos;
 pub mod toolbar;
 pub mod trace;
+pub mod views;
 pub mod waker;
 
 pub use captures::Captures;

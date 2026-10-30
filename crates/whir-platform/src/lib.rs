@@ -7,6 +7,7 @@ pub mod fonts;
 pub mod input;
 pub mod ipc;
 pub mod os;
+pub mod placement;
 pub mod shell;
 mod window;
 

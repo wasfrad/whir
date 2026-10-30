@@ -7,7 +7,8 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use crate::file::{WriteError, write_atomic};
 
@@ -113,23 +114,63 @@ pub fn set_str(key: &str, value: &str) {
 /// Write the current settings on a short-lived thread (writes are rare, but
 /// flushing to disk can take a while on a busy drive).
 fn save_soon() {
-    let _ = std::thread::Builder::new()
-        .name("settings".into())
-        .spawn(|| {
-            // One write at a time, each of the latest values.
-            static WRITE: Mutex<()> = Mutex::new(());
-            let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
-            let snapshot = {
-                let s = store();
-                s.path.clone().map(|p| (p, serialize(&s.entries)))
-            };
-            if let Some((path, text)) = snapshot {
-                let _ = save_to(&path, &text);
-            }
-        });
+    spawn_write("settings", || {
+        // One write at a time, each of the latest values.
+        static WRITE: Mutex<()> = Mutex::new(());
+        let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = {
+            let s = store();
+            s.path.clone().map(|p| (p, serialize(&s.entries)))
+        };
+        if let Some((path, text)) = snapshot {
+            let _ = save_to(&path, &text);
+        }
+    });
 }
 
-fn save_to(path: &Path, text: &str) -> Result<(), WriteError> {
+/// Writes of files in `%LOCALAPPDATA%\whir` still running, for [`wait_idle`].
+static IN_FLIGHT: Mutex<usize> = Mutex::new(0);
+static IDLE: Condvar = Condvar::new();
+
+/// Run `write` on a short-lived thread that [`wait_idle`] waits for.
+pub(crate) fn spawn_write(name: &str, write: impl FnOnce() + Send + 'static) {
+    let done = || {
+        let mut n = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            IDLE.notify_all();
+        }
+    };
+    *IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    let spawned = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            write();
+            done();
+        });
+    if spawned.is_err() {
+        done();
+    }
+}
+
+/// Wait until the settings (and the views of [`crate::views`]) are on disk,
+/// or `deadline`: before exiting, which would cut a write off. True if idle.
+pub fn wait_idle(deadline: Instant) -> bool {
+    let mut n = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    while *n > 0 {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        n = match IDLE.wait_timeout(n, deadline - now) {
+            Ok((guard, _)) => guard,
+            Err(e) => e.into_inner().0,
+        };
+    }
+    true
+}
+
+pub(crate) fn save_to(path: &Path, text: &str) -> Result<(), WriteError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

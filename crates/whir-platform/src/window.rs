@@ -45,6 +45,7 @@ use windows::core::{HSTRING, PCWSTR};
 
 use crate::input::InputCollector;
 use crate::ipc::{COPYDATA_OPEN, COPYDATA_SHOW, Changed, WINDOW_CLASS, decode_paths};
+use crate::placement::{self, Placement};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_OPEN: u32 = WM_APP + 2;
@@ -174,6 +175,9 @@ pub trait Handler {
     }
     /// The session is ending now: save what can be saved.
     fn end_session(&mut self) {}
+    /// The window was moved, resized, maximized or restored (reported when
+    /// that's done, and once more as it closes), to open there next time.
+    fn placement_changed(&mut self, _placement: Placement) {}
 }
 
 /// Results of native UI (dialogs, shell operations) and IPC, queued and handed
@@ -200,6 +204,10 @@ impl Pending {
 pub struct WindowOptions {
     pub title: String,
     pub dark: bool,
+    /// Where the window was left; `None`: centred on the mouse's monitor.
+    pub placement: Option<Placement>,
+    /// Back exactly there, even with the mouse on another monitor.
+    pub exact: bool,
 }
 
 /// Wake target that exists *before* the window, so documents can start loading
@@ -244,6 +252,9 @@ struct State {
     delivered_size: Cell<[u32; 2]>,
     in_size_move: Cell<bool>,
     minimized: Cell<bool>,
+    /// The window's rect when last neither maximized nor minimized.
+    normal_rect: Cell<[i32; 4]>,
+    maximized: Cell<bool>,
     cursor: Cell<CursorIcon>,
     pointer_in_client: Cell<bool>,
     tracking_client_leave: Cell<bool>,
@@ -271,6 +282,8 @@ impl Window {
             delivered_size: Cell::new([0, 0]),
             in_size_move: Cell::new(false),
             minimized: Cell::new(false),
+            normal_rect: Cell::new([0; 4]),
+            maximized: Cell::new(false),
             cursor: Cell::new(CursorIcon::Default),
             pointer_in_client: Cell::new(false),
             tracking_client_leave: Cell::new(false),
@@ -297,7 +310,20 @@ impl Window {
             RegisterClassExW(&wc);
             whir_core::trace::mark("window: class registered");
 
-            let (x, y, w, h) = initial_placement();
+            let chosen = opts.placement.and_then(|p| {
+                let (monitors, cursor) = placement::monitors()?;
+                Some((
+                    placement::choose(&p, opts.exact, &monitors, cursor),
+                    p.maximized,
+                ))
+            });
+            let (x, y, w, h, maximized) = match chosen {
+                Some(([l, t, r, b], maximized)) => (l, t, r - l, b - t, maximized),
+                None => {
+                    let (x, y, w, h) = initial_placement();
+                    (x, y, w, h, false)
+                }
+            };
             let raw = Rc::into_raw(state.clone());
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -341,9 +367,18 @@ impl Window {
             whir_core::trace::mark("window: frame changed");
             DragAcceptFiles(hwnd, true);
             whir_core::trace::mark("window: drag-drop registered");
+            if let Some(r) = placement::normal_rect(hwnd) {
+                state.normal_rect.set(r);
+            }
             // Shown while cloaked: DXGI can present to it and it can take the
             // foreground, but nothing is visible until WindowCommand::Show.
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            // Maximized, it is on the monitor its normal rect is on.
+            let show = if maximized {
+                SW_SHOWMAXIMIZED
+            } else {
+                SW_SHOWNORMAL
+            };
+            let _ = ShowWindow(hwnd, show);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             state.size_px.set([
@@ -530,6 +565,19 @@ impl State {
 
     fn is_maximized(&self) -> bool {
         unsafe { IsZoomed(self.hwnd()).as_bool() }
+    }
+
+    /// Keep the normal rect current (it's where a maximized window restores to).
+    fn track_normal_rect(&self) {
+        if let Some(r) = placement::normal_rect(self.hwnd()) {
+            self.normal_rect.set(r);
+        }
+    }
+
+    fn report_placement(&self) {
+        if let Some(p) = placement::capture(self.hwnd(), self.normal_rect.get()) {
+            self.with_handler(|h| h.placement_changed(p));
+        }
     }
 
     /// Run `f` on the handler unless it is already borrowed further up the stack.
@@ -1004,9 +1052,19 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 s.minimized.set(false);
                 let (w, h) = (loword(lparam.0), hiword(lparam.0));
                 s.size_px.set([w.max(1) as u32, h.max(1) as u32]);
+                s.track_normal_rect();
+                // Maximized or restored: a change of place, not part of a drag.
+                let maximized = wparam.0 as u32 == SIZE_MAXIMIZED;
+                if maximized != s.maximized.replace(maximized) {
+                    s.report_placement();
+                }
                 // Render right away: during a modal resize our loop isn't running.
                 s.do_frame();
                 LRESULT(0)
+            }
+            WM_MOVE => {
+                s.track_normal_rect();
+                def()
             }
             WM_ENTERSIZEMOVE => {
                 s.in_size_move.set(true);
@@ -1016,6 +1074,7 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_EXITSIZEMOVE => {
                 s.in_size_move.set(false);
                 let _ = KillTimer(Some(hwnd), SIZE_MOVE_TIMER);
+                s.report_placement();
                 s.request_repaint();
                 LRESULT(0)
             }
@@ -1283,6 +1342,8 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     return LRESULT(0);
                 }
                 if s.with_handler(|h| h.close_requested()).unwrap_or(true) {
+                    // Snapped with the keyboard, say: no drag reported it.
+                    s.report_placement();
                     let _ = DestroyWindow(hwnd);
                 } else {
                     // The app is asking the user first (or waiting for saves):
@@ -1305,6 +1366,7 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_ENDSESSION => {
                 if wparam.0 != 0 {
+                    s.report_placement();
                     s.with_handler(|h| h.end_session());
                 } else {
                     use windows::Win32::System::Shutdown::ShutdownBlockReasonDestroy;

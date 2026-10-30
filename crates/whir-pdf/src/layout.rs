@@ -11,17 +11,19 @@ pub struct Layout {
     tops: Vec<f64>,
     pub total_height: f64,
     pub max_width: f64,
+    pub max_height: f64,
 }
 
 impl Layout {
     pub fn new(sizes: Vec<[f32; 2]>) -> Self {
         let mut tops = Vec::with_capacity(sizes.len());
         let mut y = MARGIN;
-        let mut max_width: f64 = 0.0;
+        let (mut max_width, mut max_height): (f64, f64) = (0.0, 0.0);
         for s in &sizes {
             tops.push(y);
             y += s[1] as f64 + GAP;
             max_width = max_width.max(s[0] as f64);
+            max_height = max_height.max(s[1] as f64);
         }
         let total_height = if sizes.is_empty() {
             0.0
@@ -33,6 +35,7 @@ impl Layout {
             tops,
             total_height,
             max_width,
+            max_height,
         }
     }
 
@@ -127,6 +130,17 @@ impl Layout {
         }
         (viewport_width / self.content_width()).max(0.02)
     }
+
+    /// Zoom that fits the largest page whole into a `viewport_width` ×
+    /// `viewport_height` area, a margin above and below (the largest, so the
+    /// zoom stays put while scrolling through pages of different sizes).
+    pub fn fit_page_zoom(&self, viewport_width: f64, viewport_height: f64) -> f64 {
+        if self.max_height <= 0.0 {
+            return self.fit_width_zoom(viewport_width);
+        }
+        let tall = viewport_height / (self.max_height + 2.0 * MARGIN);
+        self.fit_width_zoom(viewport_width).min(tall.max(0.02))
+    }
 }
 
 /// Split a page raster (`page_px`) into tiles. Small pages are one tile.
@@ -168,6 +182,21 @@ mod tests {
         assert_eq!(l.visible(0.0, 100.0), 0..1);
         assert_eq!(l.visible(700.0, 900.0), 0..2);
         assert_eq!(l.total_height, 3.0 * 792.0 + 2.0 * GAP + 2.0 * MARGIN);
+    }
+
+    #[test]
+    fn fit_page_fits_the_largest_page_whole() {
+        let l = letter(3);
+        // Landscape window: the page's height decides; it fits width-wise too.
+        let z = l.fit_page_zoom(1600.0, 900.0);
+        assert!((z - 900.0 / (792.0 + 2.0 * MARGIN)).abs() < 1e-9);
+        assert!(z < l.fit_width_zoom(1600.0));
+        // A tall, narrow window: the width decides, as at fit width.
+        assert_eq!(l.fit_page_zoom(400.0, 2000.0), l.fit_width_zoom(400.0));
+        // Mixed sizes: the tallest page fits, wherever it is.
+        let mixed = Layout::new(vec![[612.0, 792.0], [612.0, 1008.0]]);
+        let z = mixed.fit_page_zoom(1600.0, 900.0);
+        assert!((z * (1008.0 + 2.0 * MARGIN) - 900.0).abs() < 1e-6);
     }
 
     #[test]

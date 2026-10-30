@@ -8,6 +8,7 @@ mod ffi;
 mod geom;
 mod layout;
 mod mini_layout;
+pub mod prefs;
 mod search;
 mod select;
 mod store;

@@ -1512,6 +1512,11 @@ impl Handler for App {
             let _ = t.doc.flush_blocking(deadline);
         }
         let _ = whir_notes::saver::wait_idle(deadline);
+        let _ = whir_core::settings::wait_idle(deadline);
         trace::flush();
+    }
+
+    fn placement_changed(&mut self, placement: whir_platform::placement::Placement) {
+        whir_platform::placement::save(&placement);
     }
 }

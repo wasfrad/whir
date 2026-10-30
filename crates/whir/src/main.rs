@@ -212,10 +212,16 @@ fn main() {
     }
     trace::mark("documents started");
 
+    // Where the window was left (settings.ini: a small file, likely cached).
+    let placement = whir_platform::placement::saved();
+    let exact = whir_platform::placement::exact();
+    trace::mark("window placement read");
     let window = match Window::create(
         &WindowOptions {
             title: "whir".to_owned(),
             dark,
+            placement,
+            exact,
         },
         wake,
     ) {
@@ -279,8 +285,11 @@ fn main() {
     trace::flush();
     // Release the single-instance mutex, then skip slow teardown of GPU/COM objects.
     drop(instance);
-    // Let the last note writes land (process::exit would cut them off).
-    whir_notes::saver::wait_idle(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    // Let the last writes land (process::exit would cut them off): notes, and
+    // the settings and views (the window's place, where each PDF was left).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    whir_notes::saver::wait_idle(deadline);
+    whir_core::settings::wait_idle(deadline);
     if let Some(paths) = restart.borrow_mut().take() {
         relaunch(&paths, &args);
     }

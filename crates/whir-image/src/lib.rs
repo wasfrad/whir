@@ -8,6 +8,7 @@ mod edit;
 mod encode;
 mod folder;
 mod pool;
+pub mod prefs;
 mod thumbs;
 mod tiles;
 mod view;

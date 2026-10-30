@@ -38,6 +38,35 @@ struct Harness {
     requests: Vec<DocRequest>,
     cx: OpenCx,
     dir: PathBuf,
+    _serial: Serial,
+}
+
+thread_local! {
+    static SERIAL_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests run one at a time: the settings (and the zoom used last) are the
+/// process's. A test's first harness holds the turn; any more it opens share it.
+struct Serial(Option<std::sync::MutexGuard<'static, ()>>);
+
+impl Serial {
+    fn take() -> Self {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        if SERIAL_HELD.get() {
+            return Serial(None);
+        }
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        SERIAL_HELD.set(true);
+        Serial(Some(guard))
+    }
+}
+
+impl Drop for Serial {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            SERIAL_HELD.set(false);
+        }
+    }
 }
 
 impl Harness {
@@ -54,8 +83,10 @@ impl Harness {
     }
 
     fn open_with(name: &str, stored: bool, marks: Option<&str>) -> Self {
+        let serial = Serial::take();
         // No settings file is read or written by the tests.
         whir_core::settings::memory_only();
+        prefs::reset_last();
         unsafe {
             use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -93,10 +124,38 @@ impl Harness {
             requests: Vec::new(),
             cx,
             dir,
+            _serial: serial,
         };
         h.frame(vec![]);
         h.frame(vec![]);
         h
+    }
+
+    /// A white `w` × `h` PNG called `name` beside the image.
+    fn write_image(&self, name: &str, w: u32, h: u32) -> PathBuf {
+        let pixels = vec![255u8; (w * h * 4) as usize];
+        let png = encode_png(&pixels, w, h, w as usize * 4, PixelLayout::Bgrx).unwrap();
+        let path = self.dir.join(name);
+        std::fs::write(&path, png).unwrap();
+        path
+    }
+
+    /// Open `path` in a new tab (this one).
+    fn show(&mut self, path: &Path) {
+        self.doc = Self::load(path, &self.cx);
+        self.frame(vec![]);
+    }
+
+    /// Go to `path` as ←/→ do, and draw it.
+    fn browse(&mut self, path: &Path) {
+        self.doc.go_to(path.to_owned());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.doc.is_loading() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(2));
+            self.doc.poll();
+        }
+        self.frame(vec![]);
     }
 
     fn load(path: &Path, cx: &OpenCx) -> ImageDoc {
@@ -280,6 +339,49 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn an_image_opens_fitted_at_actual_size_or_at_the_zoom_used_last() {
+    let mut h = Harness::open("opening");
+    // Larger than the window (1000 × 600), so 100% is not the fit.
+    let a = h.write_image("big-a.png", 1600, 1200);
+    let b = h.write_image("big-b.png", 1600, 1200);
+    let actual = Mode::Manual {
+        zoom: 1.0,
+        center: pos2(800.0, 600.0),
+    };
+    let none = Modifiers::NONE;
+
+    // Out of the box each image is fitted, however the last one was zoomed.
+    h.show(&a);
+    assert_eq!(h.doc.view.mode, Mode::Fit);
+    h.key(Key::Num1, none);
+    assert_eq!(h.doc.view.mode, actual);
+    assert_eq!(prefs::last(), ZoomPref::Percent(100.0));
+    h.browse(&b);
+    assert_eq!(h.doc.view.mode, Mode::Fit);
+
+    // The zoom used last: browsing keeps it, and so does a new tab.
+    prefs::set_opening(prefs::Opening::Last);
+    h.key(Key::Num1, none);
+    h.browse(&a);
+    assert_eq!(h.doc.view.mode, actual);
+    h.show(&b);
+    assert_eq!(h.doc.view.mode, actual);
+    h.key(Key::Num0, none);
+    assert_eq!(prefs::last(), ZoomPref::Fit);
+    h.browse(&a);
+    assert_eq!(h.doc.view.mode, Mode::Fit);
+
+    // Actual size: centred at 100%; an image smaller than the window is
+    // fitted anyway (fit is 100% there).
+    prefs::set_opening(prefs::Opening::Actual);
+    h.show(&b);
+    assert_eq!(h.doc.view.mode, actual);
+    let small = h.path();
+    h.browse(&small);
+    assert_eq!(h.doc.view.mode, Mode::Fit);
 }
 
 #[test]

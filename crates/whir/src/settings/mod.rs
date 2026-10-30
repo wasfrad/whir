@@ -1,10 +1,11 @@
 //! whir's Settings: a tab of its own. The timesheet (the week at a glance,
 //! its entries, closing it out), the timers (customers and their projects),
-//! and how whir starts.
+//! how PDFs and images open, and how whir starts.
 
 mod startup;
 mod timers;
 mod timesheet;
+mod viewing;
 
 use std::path::Path;
 
@@ -18,18 +19,25 @@ use whir_platform::ipc::{self, Changed};
 pub enum Section {
     Timesheet,
     Timers,
+    Viewing,
     Startup,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::Timesheet, Section::Timers, Section::Startup];
+    const ALL: [Section; 4] = [
+        Section::Timesheet,
+        Section::Timers,
+        Section::Viewing,
+        Section::Startup,
+    ];
 
     /// As `whir.exe --settings <name>` and the dock ask for it.
     pub fn from_name(name: &str) -> Option<Section> {
         match name.to_ascii_lowercase().as_str() {
             "timesheet" | "time" | "week" => Some(Section::Timesheet),
             "timers" | "projects" | "customers" => Some(Section::Timers),
-            "startup" | "dock" | "general" => Some(Section::Startup),
+            "viewing" | "pdf" | "pdfs" | "images" | "zoom" => Some(Section::Viewing),
+            "startup" | "dock" | "general" | "window" => Some(Section::Startup),
             _ => None,
         }
     }
@@ -38,7 +46,8 @@ impl Section {
         match self {
             Section::Timesheet => "Timesheet",
             Section::Timers => "Customers & projects",
-            Section::Startup => "Startup & folders",
+            Section::Viewing => "PDFs & images",
+            Section::Startup => "Startup & window",
         }
     }
 }
@@ -152,6 +161,7 @@ impl Document for SettingsDoc {
                                 self.sheet.ui(ui, self.store.as_mut(), cx, &theme)
                             }
                             Section::Timers => self.timers.ui(ui, self.store.as_mut(), cx, &theme),
+                            Section::Viewing => viewing::ui(ui, cx, &theme),
                             Section::Startup => startup::ui(ui, cx, &theme),
                         }
                     });
@@ -382,6 +392,7 @@ mod tests {
     #[test]
     fn every_section_draws_from_a_real_timesheet() {
         whir_core::settings::memory_only();
+        whir_core::views::memory_only();
         let dir = std::env::temp_dir().join(format!("whir-settings-ui-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut store = Store::open(dir.clone());
@@ -427,7 +438,7 @@ mod tests {
         h.frame();
         h.doc.sheet.confirm_close = true;
         h.frame();
-        for section in ["timers", "startup", "timesheet"] {
+        for section in ["timers", "viewing", "startup", "timesheet"] {
             h.doc.show_section(section);
             h.frame();
             h.frame();

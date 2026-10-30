@@ -1,4 +1,5 @@
-//! The PDF tab: continuous scroll, fit-width, zoom at the cursor, tiles at
+//! The PDF tab: continuous scroll, fit width / fit page, zoom at the cursor,
+//! each file reopening where it was left, tiles at
 //! exact device resolution (stretched while a zoom settles), LRU texture budget;
 //! text selection, copy and find over text streamed from the PDF thread; a
 //! minimap of page thumbnails with page controls.
@@ -15,14 +16,16 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use egui::{Color32, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use whir_core::file::FileIdentity;
 use whir_core::find_bar::FindBar;
 use whir_core::scroll::{ScrollAxis, scrollbar};
 use whir_core::theme::Theme;
-use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, UserTexture};
+use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, UserTexture, views};
 
 use crate::engine::{DocHandle, Event, Job, TileKey};
 use crate::layout::{self, Layout};
 use crate::mini_layout::MiniLayout;
+use crate::prefs::{self, ZoomPref};
 use crate::search::{Match, Search};
 use crate::select::{ClickCounter, Gesture, Selection};
 use crate::store::TextStore;
@@ -46,10 +49,63 @@ const WARM_MAX_PAGES: usize = 200;
 /// hasn't after this long, scroll to its page first and refine later.
 const REVEAL_WAIT: f64 = 0.25;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Zoom {
     FitWidth,
+    /// The largest page whole in the window.
+    FitPage,
     Manual(f64),
+}
+
+impl Zoom {
+    /// The fits follow the window's size; a manual zoom stays put.
+    fn is_fit(self) -> bool {
+        !matches!(self, Zoom::Manual(_))
+    }
+
+    fn pref(self) -> ZoomPref {
+        match self {
+            Zoom::FitWidth => ZoomPref::FitWidth,
+            Zoom::FitPage => ZoomPref::FitPage,
+            Zoom::Manual(z) => ZoomPref::Percent(z / ZOOM_100 * 100.0),
+        }
+    }
+
+    fn from_pref(p: ZoomPref) -> Self {
+        match p {
+            ZoomPref::FitWidth => Zoom::FitWidth,
+            ZoomPref::FitPage => Zoom::FitPage,
+            ZoomPref::Percent(p) => Zoom::Manual((p / 100.0 * ZOOM_100).clamp(MIN_ZOOM, MAX_ZOOM)),
+        }
+    }
+}
+
+/// Where a document is to be shown first: the zoom, and the top-left of the
+/// view in PDF points (independent of the zoom, and of the window at the fits).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    zoom: ZoomPref,
+    y: f64,
+    x: f64,
+}
+
+impl Place {
+    /// As kept in [`views`]: `fit-page 812.5 0`.
+    fn name(self) -> String {
+        format!("{} {:.1} {:.1}", self.zoom.name(), self.y, self.x)
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        let mut it = s.split_whitespace();
+        let zoom = ZoomPref::parse(it.next()?)?;
+        let y: f64 = it.next()?.parse().ok()?;
+        let x: f64 = it.next()?.parse().ok()?;
+        (y.is_finite() && x.is_finite()).then_some(Self {
+            zoom,
+            y: y.max(0.0),
+            x: x.max(0.0),
+        })
+    }
 }
 
 enum State {
@@ -91,6 +147,12 @@ pub struct PdfDoc {
     got_first_tile: bool,
     mini: Option<Arc<MiniLayout>>,
     zoom: Zoom,
+    /// Which file, at which version, is open: its view is remembered by it.
+    identity: Option<FileIdentity>,
+    /// Applied by the first frame drawn (it knows the window's size).
+    place: Option<Place>,
+    /// A zoom picked from the context menu, for the next frame.
+    menu_zoom: Option<Zoom>,
     sy: ScrollAxis,
     sx: ScrollAxis,
     /// Scale key tiles are currently requested at (lags zoom while it settles).
@@ -150,6 +212,9 @@ impl PdfDoc {
             got_first_tile: false,
             mini: None,
             zoom: Zoom::FitWidth,
+            identity: None,
+            place: None,
+            menu_zoom: None,
             sy: ScrollAxis::default(),
             sx: ScrollAxis::default(),
             settled_scale: None,
@@ -181,7 +246,19 @@ impl PdfDoc {
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Event::Opened { pages, text } => {
+                Event::Opened {
+                    pages,
+                    text,
+                    identity,
+                    saved,
+                } => {
+                    self.identity = Some(identity);
+                    // Where it was left, or the default (from the top).
+                    self.place = Some(saved.as_deref().and_then(Place::parse).unwrap_or(Place {
+                        zoom: prefs::initial(),
+                        y: 0.0,
+                        x: 0.0,
+                    }));
                     self.text = TextStore::new(pages.len(), text);
                     let layout = Layout::new(pages);
                     self.mini = Some(Arc::new(MiniLayout::new(&layout, minimap::THUMB_W)));
@@ -258,14 +335,17 @@ impl PdfDoc {
         self.find_keys(ui, typing, now);
 
         // --- zoom & scroll -----------------------------------------------------
-        let mut zoom = match self.zoom {
-            Zoom::FitWidth => fit_zoom(l, vw, panel.is_some()),
-            Zoom::Manual(z) => z,
-        };
-        // At fit width the zoom follows the page area's width (the window was
+        let column = panel.is_some();
+        // The first frame: where the document was left, or the default.
+        let first = self.place.take();
+        if let Some(p) = first {
+            self.zoom = Zoom::from_pref(p.zoom);
+        }
+        let mut zoom = zoom_at(self.zoom, l, vw, vh, column);
+        // At a fit the zoom follows the page area's size (the window was
         // resized, the minimap toggled): stay at the same place in the document.
         if let Some(prev) = self.shown_zoom
-            && self.zoom == Zoom::FitWidth
+            && self.zoom.is_fit()
             && (zoom - prev).abs() > 1e-9
         {
             self.sy.offset *= zoom / prev;
@@ -281,6 +361,10 @@ impl PdfDoc {
             sx.clamp();
         };
         set_axes(&mut self.sy, &mut self.sx, zoom);
+        if let Some(p) = first {
+            self.sy.scroll_to(p.y * zoom);
+            self.sx.scroll_to(p.x * zoom);
+        }
 
         let (scroll, zoom_delta, hover) = ui.input(|i| {
             (
@@ -289,10 +373,12 @@ impl PdfDoc {
                 i.pointer.hover_pos(),
             )
         });
-        let mut new_zoom = None;
+        // A new zoom: the target, the point to keep still (else the middle),
+        // and the fit it is (else it's manual).
+        let mut new_zoom: Option<(f64, Option<Pos2>, Option<Zoom>)> = None;
         if resp.hovered() {
             if zoom_delta != 1.0 {
-                new_zoom = Some((zoom * zoom_delta, hover));
+                new_zoom = Some((zoom * zoom_delta, hover, None));
             } else if scroll != egui::Vec2::ZERO {
                 self.sy.scroll_by(-scroll.y as f64);
                 self.sx.scroll_by(-scroll.x as f64);
@@ -306,7 +392,10 @@ impl PdfDoc {
             _ => None,
         };
         let page_step = (vh * 0.9).max(40.0);
-        let mut fit = false;
+        // A zoom picked by key or from the menu: a fit, or actual size.
+        let mut pick = self.menu_zoom.take();
+        // At fit page, the page keys go page by page.
+        let by_page = self.zoom == Zoom::FitPage;
         // Next (true) or previous page.
         let mut step = None;
         let (mut toggle_minimap, mut goto) = (false, false);
@@ -314,7 +403,9 @@ impl PdfDoc {
             let none = Modifiers::NONE;
             let ctrl = Modifiers::CTRL;
             // Ctrl shortcuts work even while typing in the find field.
-            fit |= i.consume_key(ctrl, Key::Num0);
+            if i.consume_key(ctrl, Key::Num0) {
+                pick = Some(Zoom::FitPage);
+            }
             let mut zoom_in = i.consume_key(ctrl, Key::Plus) || i.consume_key(ctrl, Key::Equals);
             let mut zoom_out = i.consume_key(ctrl, Key::Minus);
             toggle_minimap = i.consume_key(ctrl, Key::M);
@@ -328,10 +419,18 @@ impl PdfDoc {
                 }
                 // Shift+Space first: consume_key ignores extra Shift, so plain Space would eat it.
                 if i.consume_key(none, Key::PageUp) || i.consume_key(Modifiers::SHIFT, Key::Space) {
-                    self.sy.scroll_by(-page_step);
+                    if by_page {
+                        step = Some(false);
+                    } else {
+                        self.sy.scroll_by(-page_step);
+                    }
                 }
                 if i.consume_key(none, Key::PageDown) || i.consume_key(none, Key::Space) {
-                    self.sy.scroll_by(page_step);
+                    if by_page {
+                        step = Some(true);
+                    } else {
+                        self.sy.scroll_by(page_step);
+                    }
                 }
                 if i.consume_key(none, Key::ArrowDown) {
                     self.sy.scroll_by(48.0);
@@ -360,15 +459,23 @@ impl PdfDoc {
                 if i.consume_key(none, Key::End) || i.consume_key(ctrl, Key::End) {
                     self.sy.scroll_to(f64::MAX);
                 }
-                fit |= i.consume_key(none, Key::Num0);
+                for (key, z) in [
+                    (Key::Num0, Zoom::FitPage),
+                    (Key::Num1, Zoom::Manual(ZOOM_100)),
+                    (Key::Num2, Zoom::FitWidth),
+                ] {
+                    if i.consume_key(none, key) {
+                        pick = Some(z);
+                    }
+                }
                 zoom_in |= i.consume_key(none, Key::Plus) || i.consume_key(none, Key::Equals);
                 zoom_out |= i.consume_key(none, Key::Minus);
             }
             if zoom_in {
-                new_zoom = Some((zoom * 1.25, None));
+                new_zoom = Some((zoom * 1.25, None, None));
             }
             if zoom_out {
-                new_zoom = Some((zoom / 1.25, None));
+                new_zoom = Some((zoom / 1.25, None, None));
             }
         });
         if let Some(k) = sel_key {
@@ -400,14 +507,23 @@ impl PdfDoc {
                 self.copy(&ctx, now);
             }
         }
-        if fit && self.zoom != Zoom::FitWidth {
-            let target = fit_zoom(l, vw, panel.is_some());
-            new_zoom = Some((target, None));
-            self.zoom = Zoom::FitWidth;
+        // Fit page shows the page most in view whole, from its top.
+        let mut land = None;
+        if let Some(want) = pick
+            && want != self.zoom
+        {
+            if want == Zoom::FitPage {
+                land = Some(l.most_visible(self.sy.offset / zoom, (self.sy.offset + vh) / zoom));
+            }
+            let target = zoom_at(want, l, vw, vh, column);
+            new_zoom = Some((target, None, want.is_fit().then_some(want)));
         }
 
-        if let Some((target, anchor)) = new_zoom {
+        if let Some((target, anchor, fit)) = new_zoom {
             let target = target.clamp(MIN_ZOOM, MAX_ZOOM);
+            let mode = fit.unwrap_or(Zoom::Manual(target));
+            let changed = mode != self.zoom || (target - zoom).abs() > 1e-9;
+            self.zoom = mode;
             if (target - zoom).abs() > 1e-9 {
                 // Keep the document point under the anchor fixed.
                 let anchor = anchor.unwrap_or(vp.center());
@@ -415,15 +531,19 @@ impl PdfDoc {
                 let x_off = |z: f64| ((vw - l.content_width() * z) / 2.0).max(0.0);
                 let doc_x = (self.sx.offset + ax - x_off(zoom)) / zoom;
                 let doc_y = (self.sy.offset + ay) / zoom;
-                if !fit {
-                    self.zoom = Zoom::Manual(target);
-                }
                 zoom = target;
                 set_axes(&mut self.sy, &mut self.sx, zoom);
                 self.sy.scroll_to(doc_y * zoom - ay);
                 self.sx.scroll_to(doc_x * zoom + x_off(zoom) - ax);
                 self.zoom_changed_at = now;
-                self.toast = Some((format!("{:.0}%", zoom / ZOOM_100 * 100.0), now + 1.0));
+            }
+            if let Some(page) = land {
+                self.sy.scroll_to(l.landing(page) * zoom);
+            }
+            if changed {
+                // Someone chose this zoom: PDFs opened from now on follow it.
+                prefs::used(mode.pref());
+                self.toast = Some((zoom_label(mode, zoom), now + 1.0));
             }
         }
         self.shown_zoom = Some(zoom);
@@ -784,10 +904,24 @@ fn evict(cache: &mut HashMap<TileKey, Cached>, budget: u64, keep_frame: u64) {
     }
 }
 
-/// Fit-width zoom for a page area `vw` wide. Without the minimap's column
-/// the scrollbar overlays the page area: leave it room.
-fn fit_zoom(l: &Layout, vw: f64, column: bool) -> f64 {
-    l.fit_width_zoom(if column { vw } else { vw - 14.0 })
+/// The zoom `mode` comes to in a `vw` × `vh` page area. Without the
+/// minimap's column the scrollbar overlays the page area: the fits leave it room.
+fn zoom_at(mode: Zoom, l: &Layout, vw: f64, vh: f64, column: bool) -> f64 {
+    let vw = if column { vw } else { vw - 14.0 };
+    match mode {
+        Zoom::FitWidth => l.fit_width_zoom(vw),
+        Zoom::FitPage => l.fit_page_zoom(vw, vh),
+        Zoom::Manual(z) => z,
+    }
+}
+
+/// What the toast says after a zoom: "Fit page · 82%", "150%".
+fn zoom_label(mode: Zoom, zoom: f64) -> String {
+    let percent = format!("{:.0}%", zoom / ZOOM_100 * 100.0);
+    match mode {
+        Zoom::Manual(_) => percent,
+        fit => format!("{} · {percent}", fit.pref().label()),
+    }
 }
 
 /// Size of a page's raster at `scale` device pixels per PDF point.
@@ -845,6 +979,32 @@ fn paint_toast(
     ui.ctx().request_repaint_after(Duration::from_millis(30));
 }
 
+impl PdfDoc {
+    /// Where the document is now, once it has been drawn.
+    fn place_now(&self) -> Option<Place> {
+        let zoom = self.shown_zoom?;
+        if !matches!(self.state, State::Ready(_)) || self.place.is_some() {
+            return None;
+        }
+        Some(Place {
+            zoom: self.zoom.pref(),
+            y: self.sy.offset / zoom,
+            x: self.sx.offset / zoom,
+        })
+    }
+
+    /// The tab is closing or going out of sight: remember where this file
+    /// was left, and the zoom used last.
+    fn put_away(&mut self) {
+        prefs::save_last();
+        if prefs::remember()
+            && let (Some(id), Some(place)) = (self.identity, self.place_now())
+        {
+            views::remember(&self.path, &id, &place.name());
+        }
+    }
+}
+
 impl Document for PdfDoc {
     fn title(&self) -> &str {
         &self.title
@@ -870,8 +1030,18 @@ impl Document for PdfDoc {
         self.drain();
     }
 
+    fn flush(&mut self) {
+        self.put_away();
+    }
+
+    fn flush_blocking(&mut self, _deadline: std::time::Instant) -> Result<(), String> {
+        self.put_away();
+        Ok(())
+    }
+
     fn on_visibility(&mut self, visible: bool) {
         if !visible {
+            self.put_away();
             // Hidden tabs keep only tiles at the current scale…
             if let Some(s) = self.settled_scale {
                 self.tiles.retain(|k, _| k.scale == s);
@@ -944,7 +1114,17 @@ mod tests {
     }
 
     impl Harness {
+        /// Defaults (minimap on, fit width), and never the user's settings
+        /// or remembered views.
         fn new(path: PathBuf) -> Self {
+            whir_core::settings::memory_only();
+            whir_core::views::memory_only();
+            prefs::reset_last();
+            Self::open(path)
+        }
+
+        /// Another document, with the settings and views as they are now.
+        fn open(path: PathBuf) -> Self {
             let ctx = egui::Context::default();
             let mut fonts = egui::FontDefinitions::empty();
             let data = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf").expect("Segoe UI");
@@ -956,8 +1136,6 @@ mod tests {
             }
             ctx.set_fonts(fonts);
             let textures: Arc<dyn TextureRegistry> = Arc::new(NoTextures);
-            // Defaults (minimap on), and never the user's settings file.
-            whir_core::settings::memory_only();
             let cx = OpenCx {
                 textures: textures.clone(),
                 waker: Waker::noop(),
@@ -1298,5 +1476,159 @@ mod tests {
         drop(h);
         std::thread::sleep(Duration::from_millis(300));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Fit page, fit width and actual size; the zoom used last carrying over
+    /// to the next PDF; a PDF reopening where it was left.
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn zoom_modes_and_reopening() {
+        let _pdfium = pdfium_lock();
+        let dir = std::env::temp_dir();
+        let a = dir.join(format!("whir-pdf-zoom-a-{}.pdf", std::process::id()));
+        let b = dir.join(format!("whir-pdf-zoom-b-{}.pdf", std::process::id()));
+        std::fs::write(&a, pages_pdf(6)).unwrap();
+        std::fs::write(&b, pages_pdf(2)).unwrap();
+        let layout = |h: &Harness| match &h.doc.state {
+            State::Ready(l) => l.clone(),
+            _ => panic!("not open"),
+        };
+        // What `mode` comes to in the harness's page area (the minimap is on).
+        let expect = |h: &Harness, mode: Zoom| {
+            let vp = h.doc.shown_vp;
+            zoom_at(
+                mode,
+                &layout(h),
+                vp.width() as f64,
+                vp.height() as f64,
+                true,
+            )
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        let at_page = |h: &Harness, p: usize| {
+            let zoom = h.doc.shown_zoom.unwrap();
+            let want = (layout(h).landing(p) * zoom).min(h.doc.sy.max_offset());
+            near(h.doc.sy.offset, want)
+        };
+
+        // Out of the box: fit width, from the top.
+        let mut h = Harness::new(a.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        assert_eq!(h.doc.zoom, Zoom::FitWidth);
+        assert!(near(h.doc.shown_zoom.unwrap(), expect(&h, Zoom::FitWidth)));
+        assert_eq!(h.doc.sy.offset, 0.0);
+
+        // 0: fit page, the whole page; the page keys go page by page.
+        h.key(Key::Num0, NONE);
+        assert_eq!(h.doc.zoom, Zoom::FitPage);
+        let fit_page = h.doc.shown_zoom.unwrap();
+        assert!(near(fit_page, expect(&h, Zoom::FitPage)));
+        assert!(fit_page < expect(&h, Zoom::FitWidth));
+        assert_eq!(prefs::last(), ZoomPref::FitPage);
+        h.key(Key::PageDown, NONE);
+        assert!(at_page(&h, 1));
+        h.key(Key::Space, NONE);
+        assert!(at_page(&h, 2));
+        h.key(Key::PageUp, NONE);
+        assert!(at_page(&h, 1));
+        h.key(Key::PageDown, NONE);
+        // It follows the window, at the same place.
+        h.screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 500.0));
+        h.idle();
+        assert!(h.doc.shown_zoom.unwrap() < fit_page);
+        assert!(near(h.doc.shown_zoom.unwrap(), expect(&h, Zoom::FitPage)));
+        assert!(at_page(&h, 2));
+        h.screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0));
+        h.idle();
+        assert!(near(h.doc.shown_zoom.unwrap(), fit_page));
+        assert!(at_page(&h, 2));
+        // Put away (the tab closes): where it is goes into the views.
+        h.doc.flush();
+        assert_eq!(whir_core::views::len(), 1);
+        drop(h);
+
+        // Another PDF opens at the zoom used last: fit page. 1: actual size;
+        // 2: fit width; Ctrl+0: fit page again.
+        let mut h = Harness::open(b.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        assert_eq!(h.doc.zoom, Zoom::FitPage);
+        assert_eq!(h.doc.sy.offset, 0.0);
+        h.key(Key::Num1, NONE);
+        assert_eq!(h.doc.zoom, Zoom::Manual(ZOOM_100));
+        assert!(near(h.doc.shown_zoom.unwrap(), ZOOM_100));
+        assert_eq!(prefs::last(), ZoomPref::Percent(100.0));
+        h.key(Key::Num2, NONE);
+        assert_eq!(h.doc.zoom, Zoom::FitWidth);
+        h.key(Key::Num0, Modifiers::CTRL);
+        assert_eq!(h.doc.zoom, Zoom::FitPage);
+        // Zooming in by hand is a zoom picked too.
+        h.key(Key::Plus, NONE);
+        let z = h.doc.shown_zoom.unwrap();
+        assert!(near(z, fit_page * 1.25), "{z} vs {fit_page}");
+        assert_eq!(h.doc.zoom, Zoom::Manual(z));
+        assert_eq!(prefs::last(), Zoom::Manual(z).pref());
+        drop(h);
+
+        // The first one reopens where it was left (page 2, fit page), not at
+        // the zoom used last.
+        let mut h = Harness::open(a.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        assert_eq!(h.doc.zoom, Zoom::FitPage);
+        // (Kept to a tenth of a point.)
+        let y = h.doc.sy.offset / h.doc.shown_zoom.unwrap();
+        assert!((y - layout(&h).landing(2)).abs() < 0.1, "{y}");
+        drop(h);
+
+        // A fixed default from Settings.
+        prefs::set_opening(prefs::Opening::Actual);
+        let mut h = Harness::open(b.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        assert_eq!(h.doc.zoom, Zoom::Manual(ZOOM_100));
+        drop(h);
+
+        // Not remembering: the first one opens at the default too.
+        prefs::set_remember(false);
+        let mut h = Harness::open(a.clone());
+        h.until("the first frame", |h| h.doc.shown_zoom.is_some());
+        assert_eq!(h.doc.zoom, Zoom::Manual(ZOOM_100));
+        assert_eq!(h.doc.sy.offset, 0.0);
+
+        drop(h);
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn places_round_trip() {
+        let p = Place {
+            zoom: ZoomPref::FitPage,
+            y: 812.5,
+            x: 0.0,
+        };
+        assert_eq!(p.name(), "fit-page 812.5 0.0");
+        assert_eq!(Place::parse(&p.name()), Some(p));
+        let p = Place {
+            zoom: ZoomPref::Percent(150.0),
+            y: 3.25,
+            x: 40.0,
+        };
+        assert_eq!(Place::parse(&p.name()).map(|p| p.zoom), Some(p.zoom));
+        for bad in [
+            "",
+            "fit-page",
+            "fit-page 1",
+            "fit 1 2",
+            "150% x 2",
+            "150% NaN 0",
+        ] {
+            assert_eq!(Place::parse(bad), None, "{bad:?}");
+        }
+        // Never above the document.
+        assert_eq!(
+            Place::parse("fit-width -5 -1").map(|p| (p.y, p.x)),
+            Some((0.0, 0.0))
+        );
     }
 }
