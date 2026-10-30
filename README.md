@@ -7,7 +7,7 @@ it saves itself, no questions asked. A small capture dock takes screenshots, kee
 and opens each one ready to highlight and label.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~5.2 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
+- One portable folder: `whir.exe` (~5.5 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
 - No installer, no admin rights, no VC++ redistributable
 
 ## Using it on a work PC
@@ -113,7 +113,7 @@ clipboard, or Save a copy.
 The capture dock is a slim grip on a screen edge that slides out when the pointer rests
 on it. It stays on top of every other window, full-screen ones included (only the Start
 menu and Windows' notifications go over it). It is a small process of its own (about
-2 MB) and is the part of whir that is always running: it starts with Windows and with
+5 MB) and is the part of whir that is always running: it starts with Windows and with
 whir's window, stays when the window is closed, and has an icon in the notification
 area. Quitting whir is done from that icon.
 
@@ -285,7 +285,7 @@ Diagnostics:
 | 20 MB / 300k-row CSV | ~90 ms | ~150 ms | ~67 MB |
 | 66-page PDF | ~90 ms | ~160 ms | ~113 MB |
 | same CSV, `--warp` | — | ~72 ms | ~34 MB |
-| the capture dock (`--dock`), idle | — | — | ~2 MB (a frozen screen's worth more while selecting) |
+| the capture dock (`--dock`), idle | — | — | ~4.5 MB (a frozen screen's worth more while selecting) |
 
 On this machine the critical path is the GPU driver (`D3D11CreateDevice` ≈ 135 ms),
 which runs in parallel with everything else. If the device isn't ready ~40 ms after the
