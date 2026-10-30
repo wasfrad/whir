@@ -113,10 +113,9 @@ pub struct Metrics {
     pub note_line_factor: f32,
     pub note_code_size: f32,
 
-    /// Drawer: open width, peek strip width, edge trigger band, list row height.
-    pub drawer_width: f32,
-    pub drawer_strip: f32,
-    pub drawer_trigger: f32,
+    /// The drawer along the bottom: its header (all of it, folded), and a
+    /// row of its notes list.
+    pub drawer_header_h: f32,
     pub drawer_row_h: f32,
 }
 
@@ -140,10 +139,8 @@ impl Default for Metrics {
             note_body_size: 15.0,
             note_line_factor: 1.55,
             note_code_size: 13.5,
-            drawer_width: 300.0,
-            drawer_strip: 14.0,
-            drawer_trigger: 6.0,
-            drawer_row_h: 52.0,
+            drawer_header_h: 30.0,
+            drawer_row_h: 30.0,
         }
     }
 }

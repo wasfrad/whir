@@ -33,7 +33,7 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+Shift+N · right-click `+` | New table (CSV) |
 | Ctrl+O | Open files |
 | Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
-| Ctrl+E · rest the pointer on the right edge | The drawer: notes and screenshots |
+| Ctrl+E | The drawer along the bottom: take it to the keyboard · fold it away |
 | Camera button at the right of the toolbar | Open the capture dock |
 | Ctrl+, · the gear next to it | Settings: the timesheet, customers & projects, startup |
 | Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
@@ -60,12 +60,18 @@ Notes are plain Markdown files in `Documents\whir`, saved about a second after y
 typing (and whenever you switch away). Other `.md` / `.txt` files open in the same editor
 and are saved with Ctrl+S.
 
+The drawer along the bottom of the window shows what's near the open document: a note
+(or a table in the notes folder) has every note, newest first, wrapped into columns; a
+screenshot has the screenshots as a filmstrip, their highlights and text drawn on them.
+Other images and PDFs have no drawer (Ctrl+E brings up the notes there anyway, until you
+switch tabs).
+
 | Drawer | |
 |---|---|
-| Rest the pointer on the right edge, then on the strip | Peek, then open the list (newest first) |
-| Notes · Library at the top | Switch between notes and screenshots (thumbnails show their highlights and text) |
+| Click its header · drag its top edge | Fold it down to the header or unfold it · make it taller or shorter (bigger pictures, more notes); both are remembered for each kind |
 | Click · right-click | Open · Show in Explorer / Delete (to the Recycle Bin) |
-| Ctrl+E, then ↑ ↓ · ← → · Enter · Delete · Esc | Keyboard: move · Notes / Library · open · delete · close |
+| Wheel over the filmstrip | Scroll it sideways |
+| Ctrl+E, then ↑ ↓ ← → · Enter · Delete · Esc | Keyboard: move · open · delete · give the keyboard back |
 
 | Images | |
 |---|---|
@@ -88,7 +94,7 @@ and are saved with Ctrl+S.
 Highlights tint what is under them the way a marker does: white paper takes the colour,
 black text stays black. Text is drawn with a thin halo (white around dark colours, dark
 around white) so it reads on a busy screenshot; resizing it from a corner scales it.
-Neither is ever drawn into the file. On a screenshot in the Library they are saved as you
+Neither is ever drawn into the file. On a screenshot (in the screenshots folder) they are saved as you
 make them and can be moved, resized, changed or removed any time; on any other image
 they last as long as the tab. What leaves whir with the marks in it is a copy: the
 clipboard, or Save a copy.
@@ -113,7 +119,7 @@ area. Quitting whir is done from that icon.
 | Click the tray icon · right-click it | Open whir · capture, show/hide the dock, start with Windows on/off, **Quit whir** |
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots` and opens in whir with the
-highlighter in hand; the drawer's Library lists them all. Their highlights and text are
+highlighter in hand; its drawer is a filmstrip of them all. Their highlights and text are
 kept beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
 `whir.exe --dock` shows the dock (the camera button in the toolbar does the same, even
 when it is hidden); `--dock-start` starts it without showing it; `--dock-capture`
@@ -281,7 +287,7 @@ Much of the baseline memory is the GPU driver itself. On weak or remote machines
 ```
 crates/
   whir/           exe: startup ordering, single instance, tabs + title bar, toolbar, shortcuts,
-                  save/close prompts, the drawer, the Find in all tabs panel, --register
+                  save/close prompts, the bottom drawer, Settings, the Find in all tabs panel, --register
   whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer;
                   the tray icon, the timer and time drawer, noticing time away;
                   screen grab, the selection overlay, PNG into the screenshots folder

@@ -1,5 +1,5 @@
-//! The shell: tabs, shortcuts, saving and closing, the notes drawer,
-//! first-frame logic, and rendering.
+//! The shell: tabs, shortcuts, saving and closing, the drawer along the
+//! bottom, first-frame logic, and rendering.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -375,6 +375,12 @@ impl App {
         }
     }
 
+    /// The drawer the active tab has of its own (screenshots, notes).
+    fn own_drawer(&self) -> Option<drawer::Mode> {
+        let t = self.tabs.get(self.active)?;
+        drawer::mode_for(t.doc.kind(), t.doc.path(), &self.open_cx)
+    }
+
     /// Show the capture dock (a process of its own), starting it if needed.
     fn open_dock(&mut self) {
         if let Err(e) = whir_capture::launch(whir_capture::Command::Reveal) {
@@ -473,13 +479,9 @@ impl App {
             self.save_active_as();
         }
         if drawer {
-            self.drawer.toggle();
-            if self.drawer.phase() == drawer::Phase::Open {
-                self.open_cx.library.scan();
-                if self.drawer.view() == drawer::View::Library {
-                    self.open_cx.captures.scan();
-                }
-            }
+            let tab = self.tabs.get(self.active).map(|t| t.id);
+            let own = self.own_drawer();
+            self.drawer.toggle(tab, own);
         }
         if find_in_tabs {
             self.search.focus();
@@ -633,27 +635,16 @@ impl App {
     }
 
     fn handle_drawer(&mut self, out: drawer::Out) {
-        if out.peeked {
-            let stale = self
-                .open_cx
-                .library
-                .snapshot()
-                .scanned_at
-                .is_none_or(|t| t.elapsed() > Duration::from_secs(2));
-            if stale {
+        // A drawer came into view: its folder may have changed since it was read.
+        let stale = |t: Option<Instant>| t.is_none_or(|t| t.elapsed() > Duration::from_secs(2));
+        match out.rescan {
+            Some(drawer::Mode::Notes) if stale(self.open_cx.library.snapshot().scanned_at) => {
                 self.open_cx.library.scan();
             }
-        }
-        if out.rescan_library {
-            let stale = self
-                .open_cx
-                .captures
-                .snapshot()
-                .scanned_at
-                .is_none_or(|t| t.elapsed() > Duration::from_secs(2));
-            if stale {
+            Some(drawer::Mode::Shots) if stale(self.open_cx.captures.snapshot().scanned_at) => {
                 self.open_cx.captures.scan();
             }
+            _ => {}
         }
         if out.capture {
             self.open_dock();
@@ -686,10 +677,6 @@ impl App {
             }
             self.pending.push(WindowCommand::Recycle(path));
         }
-        if let Some(secs) = out.wake {
-            self.ctx
-                .request_repaint_after(Duration::from_secs_f64(secs.max(0.0)));
-        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, info: &FrameInfo, hit: &mut HitMap) {
@@ -703,16 +690,20 @@ impl App {
         }
         let mut drawer_out = drawer::Out::default();
         if self.close_flow.is_none() {
-            match self.drawer.view() {
-                drawer::View::Notes => {
-                    let notes = self.open_cx.library.snapshot().entries;
-                    let path_at = |i: usize| notes.get(i).map(|e| e.path.clone());
-                    self.drawer.keys(ui, notes.len(), path_at, &mut drawer_out);
-                }
-                drawer::View::Library => {
+            let tab = self.tabs.get(self.active).map(|t| t.id);
+            let mode = self.drawer.mode(tab, self.own_drawer());
+            match mode {
+                Some(drawer::Mode::Shots) => {
                     let shots = self.open_cx.captures.snapshot().entries;
                     let path_at = |i: usize| shots.get(i).map(|e| e.path.clone());
-                    self.drawer.keys(ui, shots.len(), path_at, &mut drawer_out);
+                    self.drawer
+                        .keys(ui, mode, shots.len(), path_at, &mut drawer_out);
+                }
+                _ => {
+                    let notes = self.open_cx.library.snapshot().entries;
+                    let path_at = |i: usize| notes.get(i).map(|e| e.path.clone());
+                    self.drawer
+                        .keys(ui, mode, notes.len(), path_at, &mut drawer_out);
                 }
             }
             self.handle_shortcuts(ui);
@@ -898,6 +889,29 @@ impl App {
             self.open_settings("");
         }
 
+        // The drawer along the bottom, for the kind of document that's open.
+        let tab = self.tabs.get(self.active).map(|t| t.id);
+        let mode = self.drawer.mode(tab, self.own_drawer());
+        let active_path = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.doc.path().map(Path::to_path_buf));
+        let out = self.drawer.show(
+            ui,
+            mode,
+            &self.open_cx.library.snapshot(),
+            &self.open_cx.captures.snapshot(),
+            &self.open_cx,
+            active_path.as_deref(),
+            &theme,
+        );
+        drawer_out.open = drawer_out.open.or(out.open);
+        drawer_out.capture |= out.capture;
+        drawer_out.new_note |= out.new_note;
+        drawer_out.reveal = drawer_out.reveal.or(out.reveal);
+        drawer_out.delete = drawer_out.delete.or(out.delete);
+        drawer_out.rescan = out.rescan;
+
         // Content.
         let mut open_requested = false;
         let content = CentralPanel::no_frame()
@@ -923,36 +937,6 @@ impl App {
             self.handle_requests(id, requests);
         }
 
-        // The notes drawer, over the document.
-        let snapshot = self.open_cx.library.snapshot();
-        let blocked = self.close_flow.is_some()
-            || info.in_size_move
-            || (self.drawer.phase() == drawer::Phase::Hidden
-                && egui::Popup::is_any_open(&self.ctx));
-        let active_path = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.doc.path().map(Path::to_path_buf));
-        let out = self.drawer.show(
-            &self.ctx,
-            content.response.rect,
-            &snapshot,
-            self.open_cx.library.dir(),
-            &self.open_cx.captures.snapshot(),
-            self.open_cx.captures.dir(),
-            &self.open_cx,
-            active_path.as_deref(),
-            blocked,
-            &theme,
-        );
-        drawer_out.open = drawer_out.open.or(out.open);
-        drawer_out.capture |= out.capture;
-        drawer_out.rescan_library |= out.rescan_library;
-        drawer_out.new_note |= out.new_note;
-        drawer_out.reveal = drawer_out.reveal.or(out.reveal);
-        drawer_out.delete = drawer_out.delete.or(out.delete);
-        drawer_out.peeked |= out.peeked;
-        drawer_out.wake = out.wake;
         self.handle_drawer(drawer_out);
 
         paint_toast(ui, content.response.rect, &mut self.toast, &theme);
