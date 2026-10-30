@@ -1,18 +1,30 @@
-//! The timesheet: a week at a glance (a row per project, a column per day,
-//! hours as they go on the timecard), the entries behind a day, adding and
-//! changing them, and closing the week out to CSV.
+//! The timesheet: the week at a glance and where its time is put down. A
+//! row per project, a column per day, hours as they go on the timecard;
+//! click a day and type its hours, or add a project from the last row. The
+//! entries behind a day are listed under it, and the week is closed out to
+//! CSV from here.
 
-use egui::{Align, Color32, Id, Layout, RichText, Sense, vec2};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
+use egui::{
+    Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, RichText, Sense, Stroke,
+    StrokeKind, UiBuilder, pos2, vec2,
+};
 use whir_core::theme::Theme;
-use whir_core::time::{Stamp, civil_from_days, format_date, format_duration, format_hm, monday_of};
-use whir_core::timesheet::{Entry, Grid, State, Store, Week, csv_paths, timesheet_tsv};
+use whir_core::time::{Stamp, civil_from_days, format_clock, format_date, format_hm, monday_of};
+use whir_core::timesheet::{Entry, Grid, Rounding, State, Store, Week, csv_paths, timesheet_tsv};
 use whir_core::{DocCx, DocRequest};
 
 use super::{clock_text, edit_line, heading, note, parse_clock, parse_duration, primary, toast};
 
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const PROJECT_W: f32 = 250.0;
-const CELL: egui::Vec2 = vec2(62.0, 26.0);
+const HEAD_H: f32 = 36.0;
+const ROW_H: f32 = 34.0;
+const CUSTOMER_H: f32 = 30.0;
+const DAY_W: f32 = 74.0;
+const TOTAL_W: f32 = 86.0;
+const PROJECT_MIN: f32 = 220.0;
+/// Inside a cell, from its edges to the hours.
+const CELL_PAD: f32 = 12.0;
 const MIDNIGHT: u32 = 24 * 3600;
 
 /// An entry's start, end and note, as changed.
@@ -23,7 +35,11 @@ pub struct View {
     monday: i64,
     /// The cell whose entries are listed: a timer, and a day (0 = Monday).
     pub(super) selected: Option<(u32, usize)>,
-    adding: Option<Draft>,
+    /// Hours being typed into the selected cell.
+    editing: Option<Editing>,
+    /// Projects added to the week from its last row (no time yet).
+    added: Vec<u32>,
+    adder: Adder,
     pub(super) confirm_close: bool,
     /// Closed weeks: Monday, when, rounded hours. Read when first shown.
     archive: Option<Vec<(i64, Stamp, f64)>>,
@@ -32,14 +48,44 @@ pub struct View {
     error: Option<String>,
 }
 
-/// Time being added by hand.
-struct Draft {
-    timer: u32,
-    day: usize,
-    start: String,
-    end: String,
-    length: String,
-    note: String,
+struct Editing {
+    text: String,
+    /// What the cell showed: unchanged text changes nothing (the exact time
+    /// isn't snapped to its rounding).
+    shown: String,
+    /// Take the keyboard (and select it all) when next drawn.
+    focus: bool,
+}
+
+/// The last row: a customer, then one of its projects; or a new one of
+/// either being named.
+#[derive(Default)]
+struct Adder {
+    customer: Option<u32>,
+    new_customer: Option<String>,
+    /// A new project's name and code.
+    new_project: Option<(String, String)>,
+    focus: bool,
+}
+
+/// What a frame of the table asks for, done once it's drawn.
+enum Act {
+    /// Type into this cell; it shows this.
+    Edit(u32, usize, String),
+    /// Put down what was typed, then perhaps go on to the cell beside it
+    /// (with what that one shows).
+    Commit {
+        timer: u32,
+        day: usize,
+        text: String,
+        shown: String,
+        next: Option<(usize, String)>,
+    },
+    Cancel,
+    /// A project's row, to put its hours in.
+    AddRow(u32),
+    NewCustomer(String),
+    NewProject(u32, String, String),
 }
 
 /// "October 26 – November 1, 2026".
@@ -60,49 +106,42 @@ fn hours(h: f64) -> String {
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// A day's cell: its hours, centred; clickable.
-fn cell(ui: &mut egui::Ui, text: &str, selected: bool, today: bool, theme: &Theme) -> bool {
-    let (rect, response) = ui.allocate_exact_size(CELL, Sense::CLICK);
-    let fill = if selected {
-        theme.drawer_item_active
-    } else if response.hovered() {
-        theme.drawer_item_hover
-    } else if today {
-        theme.accent.gamma_multiply(0.08)
-    } else {
-        Color32::TRANSPARENT
+/// A project's name, its code dimmed beside it; cut short to `width`.
+fn name_job(name: &str, code: &str, width: f32, theme: &Theme) -> LayoutJob {
+    let font = FontId::proportional(13.5);
+    let mut job = LayoutJob::default();
+    job.append(name, 0.0, TextFormat::simple(font.clone(), theme.text));
+    if !code.is_empty() {
+        job.append(code, 10.0, TextFormat::simple(font, theme.text_dim));
+    }
+    job.wrap = TextWrapping {
+        max_width: width.max(10.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
     };
-    ui.painter().rect_filled(rect.shrink(1.0), 4.0, fill);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        text,
-        egui::FontId::proportional(13.5),
-        theme.text,
-    );
-    response.clicked()
+    job
 }
 
-/// A fixed-width label in the grid.
-fn fixed(ui: &mut egui::Ui, text: RichText, width: f32) {
-    ui.allocate_ui_with_layout(
-        vec2(width, CELL.y),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.set_min_width(width);
-            ui.add(egui::Label::new(text).truncate());
-        },
-    );
+/// Give a text field the keyboard with all of its text selected.
+fn prime(ctx: &egui::Context, id: Id, text: &str) {
+    let mut state = egui::text_edit::TextEditState::default();
+    let n = text.chars().count();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(n))));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
 }
 
-fn centered(ui: &mut egui::Ui, text: RichText) {
-    ui.allocate_ui_with_layout(
-        CELL,
-        Layout::centered_and_justified(egui::Direction::TopDown),
-        |ui| {
-            ui.label(text);
-        },
-    );
+/// Seconds for hours as typed: "2", "1.5", "1:30", "90m"; "" or "0" for
+/// none. `None` if it isn't a length of time.
+fn typed_seconds(text: &str) -> Option<i64> {
+    let t = text.trim();
+    if t.chars().all(|c| matches!(c, '0' | ':' | '.' | ' ')) {
+        return Some(0);
+    }
+    parse_duration(t)
 }
 
 impl View {
@@ -110,7 +149,9 @@ impl View {
         View {
             monday: monday_of(Stamp::now().day),
             selected: None,
-            adding: None,
+            editing: None,
+            added: Vec::new(),
+            adder: Adder::default(),
             confirm_close: false,
             archive: None,
             open_before: None,
@@ -127,7 +168,9 @@ impl View {
     fn go(&mut self, monday: i64) {
         self.monday = monday;
         self.selected = None;
-        self.adding = None;
+        self.editing = None;
+        self.added.clear();
+        self.adder = Adder::default();
         self.error = None;
     }
 
@@ -145,6 +188,48 @@ impl View {
             Err(e) => {
                 self.error = Some(e);
                 None
+            }
+        }
+    }
+
+    /// Type into a cell, if it can be: not in a closed week, and not the
+    /// running project's today (its time is still going up).
+    fn edit(&mut self, timer: u32, day: usize, shown: String, closed: bool, live: bool) -> bool {
+        if closed || live {
+            return false;
+        }
+        self.selected = Some((timer, day));
+        self.editing = Some(Editing {
+            text: shown.clone(),
+            shown,
+            focus: true,
+        });
+        true
+    }
+
+    /// Put down `text` as `timer`'s hours on `day` (0 = Monday) of the week
+    /// shown, unless it's what the cell showed already.
+    pub(super) fn set_cell(
+        &mut self,
+        store: &mut Store,
+        timer: u32,
+        day: usize,
+        text: &str,
+        shown: &str,
+    ) {
+        if text.trim() == shown.trim() {
+            return;
+        }
+        match typed_seconds(text) {
+            Some(seconds) => {
+                let date = self.monday + day as i64;
+                self.change(store, |tx| tx.set_day(timer, date, seconds));
+            }
+            None => {
+                self.error = Some(format!(
+                    "“{}” isn't a length of time: try 2, 1.5, 1:30 or 90m.",
+                    text.trim()
+                ))
             }
         }
     }
@@ -176,7 +261,53 @@ impl View {
         let grid = Grid::of(&week, running, now);
         let rounding = state.options.rounding;
 
-        // The week, and what can be done with it.
+        self.header(ui, store, &state, &week, now, cx, theme);
+        ui.add_space(10.0);
+        self.banners(ui, store, &week, this_week, theme);
+        self.running_line(ui, store, &state, now, theme);
+
+        self.table(ui, store, &state, &week, &grid, now, theme);
+        ui.add_space(8.0);
+        note(
+            ui,
+            &format!(
+                "Exact {} · each day rounded to {} per project, as on the timecard. Click a day \
+                 to type its hours.",
+                format_clock(grid.total()),
+                rounding.label().to_lowercase()
+            ),
+            theme,
+        );
+        ui.add_space(16.0);
+
+        // The entries behind the chosen day.
+        if let Some((timer, day)) = self.selected {
+            self.entries(ui, store, &state, &week, timer, day, now, theme);
+            ui.add_space(16.0);
+        }
+
+        ui.add_space(8.0);
+        self.archive(ui, store, cx, theme);
+        self.close_dialog(ui, store, &state, &week, now, cx, theme);
+    }
+
+    /// The week, where it stands, and what can be done with it.
+    #[allow(clippy::too_many_arguments)]
+    fn header(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        state: &State,
+        week: &Week,
+        now: Stamp,
+        cx: &mut DocCx<'_>,
+        theme: &Theme,
+    ) {
+        let this_week = monday_of(now.day);
+        let running = state
+            .running
+            .as_ref()
+            .filter(|r| r.start < Stamp::midnight(self.monday + 7));
         ui.horizontal(|ui| {
             if ui
                 .button(RichText::new(" ‹ ").size(16.0))
@@ -192,18 +323,33 @@ impl View {
             {
                 self.go(self.monday + 7);
             }
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.label(
                 RichText::new(week_title(self.monday))
-                    .size(17.0)
+                    .size(18.0)
                     .color(theme.text),
             );
+            ui.add_space(6.0);
+            let (status, color) = match week.closed {
+                Some(at) => (
+                    format!("Closed {}", format_date(&at.local(), false)),
+                    theme.text_dim,
+                ),
+                None => ("Open".to_owned(), theme.accent),
+            };
+            egui::Frame::NONE
+                .fill(color.gamma_multiply(0.14))
+                .corner_radius(10.0)
+                .inner_margin(egui::Margin::symmetric(8, 2))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(status).size(12.0).color(color));
+                });
             if self.monday != this_week && ui.button("This week").clicked() {
                 self.go(this_week);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 match week.closed {
-                    Some(at) => {
+                    Some(_) => {
                         if ui.button("Reopen").clicked() {
                             let monday = self.monday;
                             self.change(store, |tx| tx.reopen_week(monday));
@@ -212,8 +358,6 @@ impl View {
                         if sheet.exists() && ui.button("Open timesheet").clicked() {
                             cx.requests.push(DocRequest::Open(vec![sheet]));
                         }
-                        let when = format_date(&at.local(), false);
-                        ui.label(RichText::new(format!("Closed {when}")).color(theme.text_dim));
                     }
                     None => {
                         if primary(ui, "Close week…", theme) {
@@ -224,17 +368,25 @@ impl View {
                             .on_hover_text("The week as a table, to paste into Excel or an email")
                             .clicked()
                         {
-                            ui.ctx()
-                                .copy_text(timesheet_tsv(&state, &week, running, now));
+                            ui.ctx().copy_text(timesheet_tsv(state, week, running, now));
                             toast(cx, "Copied the week");
                         }
                     }
                 }
             });
         });
-        ui.add_space(6.0);
+    }
 
-        // An earlier week left open (Monday morning, last week's timecard).
+    /// An earlier week left open, a problem, or a closed week changed since.
+    fn banners(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        week: &Week,
+        this_week: i64,
+        theme: &Theme,
+    ) {
+        // Monday morning: last week's timecard.
         if self.monday == this_week {
             let open_before = self.open_before.get_or_insert_with(|| {
                 store
@@ -266,12 +418,12 @@ impl View {
                             }
                         });
                     });
-                ui.add_space(8.0);
+                ui.add_space(10.0);
             }
         }
         if let Some(e) = &self.error {
             ui.label(RichText::new(e).color(theme.danger));
-            ui.add_space(6.0);
+            ui.add_space(8.0);
         }
         if week.closed.is_some() && week.changed_since_closed() > 0 {
             ui.horizontal(|ui| {
@@ -286,130 +438,566 @@ impl View {
                     self.confirm_close = true;
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
         }
-
-        self.grid(ui, &state, &grid, now, theme);
-        ui.add_space(6.0);
-        note(
-            ui,
-            &format!(
-                "Exact time {} · each day rounded to {} per project, as on the timecard.",
-                format_duration(grid.total()),
-                rounding.label().to_lowercase()
-            ),
-            theme,
-        );
-        ui.add_space(12.0);
-
-        // The entries behind the chosen day, and adding time.
-        if let Some((timer, day)) = self.selected {
-            self.entries(ui, store, &state, &week, timer, day, now, theme);
-            ui.add_space(12.0);
-        }
-        if self.adding.is_some() {
-            self.add_form(ui, store, &state, theme);
-        } else if !state.by_customer(false, false).is_empty() && ui.button("+ Add time").clicked() {
-            let today = (now.day - self.monday).clamp(0, 6) as usize;
-            let (timer, day) = self.selected.unwrap_or((
-                state
-                    .last
-                    .or(state.timers.first().map(|t| t.id))
-                    .unwrap_or(0),
-                today,
-            ));
-            self.adding = Some(Draft {
-                timer,
-                day,
-                start: String::new(),
-                end: String::new(),
-                length: String::new(),
-                note: String::new(),
-            });
-        }
-
-        ui.add_space(24.0);
-        self.archive(ui, store, cx, theme);
-        self.close_dialog(ui, store, &state, &week, now, cx, theme);
     }
 
-    fn grid(&mut self, ui: &mut egui::Ui, state: &State, grid: &Grid, now: Stamp, theme: &Theme) {
-        if grid.rows.is_empty() {
-            note(ui, "No time this week yet.", theme);
-            return;
+    /// What is being timed now, to the second (the dock's stopwatch).
+    fn running_line(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        state: &State,
+        now: Stamp,
+        theme: &Theme,
+    ) {
+        let Some(r) = &state.running else { return };
+        let monday = monday_of(now.day);
+        let week = store.week(monday).clone();
+        let today = Grid::of(&week, Some(r), now).cell(r.timer, (now.day - monday) as usize);
+        let mut pause = false;
+        egui::Frame::NONE
+            .fill(theme.accent.gamma_multiply(0.08))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 4.0, theme.accent);
+                    ui.label(RichText::new(state.label(r.timer)).color(theme.text));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format_clock(today))
+                            .size(15.0)
+                            .strong()
+                            .color(theme.accent),
+                    );
+                    ui.label(RichText::new("today").color(theme.text_dim));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        pause = ui.button("Pause").clicked();
+                    });
+                });
+            });
+        ui.add_space(12.0);
+        if pause {
+            self.change(store, |tx| tx.toggle(now));
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn table(
+        &mut self,
+        ui: &mut egui::Ui,
+        store: &mut Store,
+        state: &State,
+        week: &Week,
+        grid: &Grid,
+        now: Stamp,
+        theme: &Theme,
+    ) {
         let rounding = state.options.rounding;
-        let today = (now.day - self.monday) as usize;
+        let closed = week.closed.is_some();
+        let today = (0..7).find(|&d| self.monday + d as i64 == now.day);
+        // The running project's today: still going up, so not typed into.
+        let live = state.running.as_ref().map(|r| r.timer).zip(today);
         let mut rows: Vec<u32> = grid.rows.iter().map(|(t, _)| *t).collect();
+        for &t in &self.added {
+            if !rows.contains(&t) {
+                rows.push(t);
+            }
+        }
         rows.sort_by_key(|&t| {
             let (c, p) = state.names(t);
             (c.to_lowercase(), p.to_lowercase())
         });
-        egui::Grid::new(("whir.timesheet", self.monday))
-            .spacing(vec2(2.0, 2.0))
-            .show(ui, |ui| {
-                fixed(ui, RichText::new(""), PROJECT_W);
-                for (d, name) in DAYS.iter().enumerate() {
-                    let (_, _, day) = civil_from_days(self.monday + d as i64);
-                    let color = if d == today {
-                        theme.accent
-                    } else {
-                        theme.text_dim
-                    };
-                    centered(ui, RichText::new(format!("{name} {day}")).color(color));
-                }
-                centered(ui, RichText::new("Total").color(theme.text_dim));
-                ui.end_row();
 
-                let mut customer = None;
-                for t in rows {
-                    let (c, p) = state.names(t);
-                    if customer != Some(c) {
-                        customer = Some(c);
-                        fixed(ui, RichText::new(c).strong().color(theme.text), PROJECT_W);
-                        ui.end_row();
+        let mut acts = Vec::new();
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let width = ui
+                .available_width()
+                .max(PROJECT_MIN + 7.0 * DAY_W + TOTAL_W);
+            let left = ui.cursor().left();
+            let project_w = width - 7.0 * DAY_W - TOTAL_W;
+            // Where day `d` starts (7: the total's column).
+            let x = |d: usize| left + project_w + d as f32 * DAY_W;
+            let right = left + width;
+            let painter = ui.painter().clone();
+            // The card and today's column go under everything: drawn last,
+            // once the table's height is known, in this place.
+            let back = painter.add(egui::Shape::Noop);
+            let top = ui.cursor().top();
+            let small = FontId::proportional(12.5);
+            let body = FontId::proportional(14.0);
+
+            let (head, _) = ui.allocate_exact_size(vec2(width, HEAD_H), Sense::hover());
+            let radius = CornerRadius {
+                nw: 8,
+                ne: 8,
+                sw: 0,
+                se: 0,
+            };
+            painter.rect_filled(head, radius, theme.header_bg);
+            let y = head.center().y;
+            painter.text(
+                pos2(left + 14.0, y),
+                Align2::LEFT_CENTER,
+                "Project",
+                small.clone(),
+                theme.text_dim,
+            );
+            for (d, name) in DAYS.iter().enumerate() {
+                let (_, _, date) = civil_from_days(self.monday + d as i64);
+                let color = if today == Some(d) {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                };
+                painter.text(
+                    pos2(x(d + 1) - CELL_PAD, y),
+                    Align2::RIGHT_CENTER,
+                    format!("{name} {date}"),
+                    small.clone(),
+                    color,
+                );
+            }
+            painter.text(
+                pos2(right - 14.0, y),
+                Align2::RIGHT_CENTER,
+                "Total",
+                small.clone(),
+                theme.text_dim,
+            );
+
+            if rows.is_empty() {
+                let (r, _) = ui.allocate_exact_size(vec2(width, ROW_H + 8.0), Sense::hover());
+                painter.text(
+                    pos2(left + 14.0, r.center().y),
+                    Align2::LEFT_CENTER,
+                    "No time this week yet.",
+                    body.clone(),
+                    theme.text_dim,
+                );
+            }
+            let mut customer = None;
+            for &t in &rows {
+                let (c, p) = state.names(t);
+                if customer != Some(c) {
+                    let (r, _) = ui.allocate_exact_size(vec2(width, CUSTOMER_H), Sense::hover());
+                    if customer.is_some() {
+                        let line = egui::Rect::from_min_max(
+                            pos2(left + 1.0, r.top()),
+                            pos2(right - 1.0, r.top() + 1.0),
+                        );
+                        painter.rect_filled(line, 0.0, theme.separator.gamma_multiply(0.6));
                     }
-                    let code = state.timer(t).map_or("", |t| t.code.as_str());
-                    let label = if code.is_empty() {
-                        RichText::new(format!("   {p}")).color(theme.text)
-                    } else {
-                        RichText::new(format!("   {p}  ·  {code}")).color(theme.text)
-                    };
-                    fixed(ui, label, PROJECT_W);
-                    for d in 0..7 {
-                        let text = rounding.format(grid.cell(t, d));
-                        let on = self.selected == Some((t, d));
-                        if cell(ui, &text, on, d == today, theme) {
-                            self.selected = if on { None } else { Some((t, d)) };
-                            self.adding = None;
-                        }
-                    }
-                    centered(
-                        ui,
-                        RichText::new(hours(grid.rounded_row(t, rounding)))
-                            .strong()
-                            .color(theme.text),
+                    customer = Some(c);
+                    painter.text(
+                        pos2(left + 14.0, r.center().y + 2.0),
+                        Align2::LEFT_CENTER,
+                        c,
+                        FontId::proportional(13.0),
+                        theme.text_dim,
                     );
-                    ui.end_row();
                 }
-
-                fixed(
-                    ui,
-                    RichText::new("Total").strong().color(theme.text),
-                    PROJECT_W,
-                );
+                let (row, row_resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
+                if row_resp.contains_pointer() {
+                    let inner = row.shrink2(vec2(1.0, 0.0));
+                    painter.rect_filled(inner, 0.0, theme.drawer_item_hover.gamma_multiply(0.6));
+                }
+                let code = state.timer(t).map_or("", |t| t.code.as_str());
+                let job = name_job(p, code, project_w - 40.0, theme);
+                let galley = painter.layout_job(job);
+                let at = pos2(left + 28.0, row.center().y - galley.size().y / 2.0);
+                painter.galley(at, galley, theme.text);
                 for d in 0..7 {
-                    let h = grid.rounded_day(d, rounding);
-                    centered(ui, RichText::new(hours(h)).strong().color(theme.text));
+                    let cell = egui::Rect::from_min_max(
+                        pos2(x(d), row.top()),
+                        pos2(x(d + 1), row.bottom()),
+                    );
+                    let shown = rounding.format(grid.cell(t, d));
+                    let is_live = live == Some((t, d));
+                    if let Some(act) = self.cell(
+                        ui, cell, t, d, shown, rounding, grid, is_live, closed, theme,
+                    ) {
+                        acts.push(act);
+                    }
                 }
-                centered(
-                    ui,
-                    RichText::new(hours(grid.rounded_total(rounding)))
-                        .strong()
-                        .color(theme.accent),
+                painter.text(
+                    pos2(right - 14.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    hours(grid.rounded_row(t, rounding)),
+                    FontId::proportional(14.5),
+                    theme.text,
                 );
-                ui.end_row();
-            });
+            }
+
+            // The last row: another project for the week.
+            if !closed {
+                let (r, _) = ui.allocate_exact_size(vec2(width, ROW_H + 10.0), Sense::hover());
+                let line = egui::Rect::from_min_max(
+                    pos2(left + 1.0, r.top()),
+                    pos2(right - 1.0, r.top() + 1.0),
+                );
+                painter.rect_filled(line, 0.0, theme.separator.gamma_multiply(0.6));
+                let area = egui::Rect::from_min_max(
+                    pos2(left + 10.0, r.top() + 5.0),
+                    pos2(right - 10.0, r.bottom() - 5.0),
+                );
+                if let Some(act) = self.adder(ui, area, state, &rows, theme) {
+                    acts.push(act);
+                }
+            }
+
+            // Totals.
+            let (r, _) = ui.allocate_exact_size(vec2(width, ROW_H + 2.0), Sense::hover());
+            let radius = CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: 8,
+                se: 8,
+            };
+            painter.rect_filled(r, radius, theme.header_bg);
+            let y = r.center().y;
+            painter.text(
+                pos2(left + 14.0, y),
+                Align2::LEFT_CENTER,
+                "Total",
+                body.clone(),
+                theme.text,
+            );
+            for d in 0..7 {
+                painter.text(
+                    pos2(x(d + 1) - CELL_PAD, y),
+                    Align2::RIGHT_CENTER,
+                    hours(grid.rounded_day(d, rounding)),
+                    body.clone(),
+                    theme.text,
+                );
+            }
+            painter.text(
+                pos2(right - 14.0, y),
+                Align2::RIGHT_CENTER,
+                hours(grid.rounded_total(rounding)),
+                FontId::proportional(15.0),
+                theme.accent,
+            );
+
+            let card = egui::Rect::from_min_max(pos2(left, top), pos2(right, r.bottom()));
+            let mut under = vec![egui::Shape::rect_filled(card, 8.0, theme.content_bg)];
+            if let Some(d) = today {
+                let column = egui::Rect::from_min_max(pos2(x(d), top), pos2(x(d + 1), r.bottom()));
+                under.push(egui::Shape::rect_filled(
+                    column,
+                    0.0,
+                    theme.accent.gamma_multiply(0.06),
+                ));
+            }
+            under.push(egui::Shape::rect_stroke(
+                card,
+                8.0,
+                Stroke::new(1.0, theme.separator),
+                StrokeKind::Inside,
+            ));
+            painter.set(back, egui::Shape::Vec(under));
+        });
+
+        for act in acts {
+            self.act(ui.ctx(), store, act);
+        }
+    }
+
+    /// A day's cell: its hours, or the field they're typed in.
+    #[allow(clippy::too_many_arguments)]
+    fn cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        cell: egui::Rect,
+        timer: u32,
+        day: usize,
+        shown: String,
+        rounding: Rounding,
+        grid: &Grid,
+        live: bool,
+        closed: bool,
+        theme: &Theme,
+    ) -> Option<Act> {
+        let inner = cell.shrink2(vec2(5.0, 4.0));
+        let id = Id::new(("whir.timesheet.cell", timer, day));
+        let selected = self.selected == Some((timer, day));
+        if let Some(ed) = self.editing.as_mut().filter(|_| selected) {
+            if ed.focus {
+                prime(ui.ctx(), id, &ed.text);
+                ed.focus = false;
+            }
+            // Keys the cell acts on, before the field sees them.
+            let key = if ui.memory(|m| m.has_focus(id)) {
+                ui.input_mut(|i| {
+                    [
+                        (Modifiers::NONE, Key::Escape),
+                        (Modifiers::SHIFT, Key::Tab),
+                        (Modifiers::NONE, Key::Tab),
+                        (Modifiers::NONE, Key::Enter),
+                    ]
+                    .into_iter()
+                    .find(|&(m, k)| i.consume_key(m, k))
+                })
+            } else {
+                None
+            };
+            let response = ui.put(
+                inner,
+                egui::TextEdit::singleline(&mut ed.text)
+                    .id(id)
+                    .font(FontId::proportional(14.0))
+                    .horizontal_align(Align::Max)
+                    .margin(vec2(6.0, 2.0)),
+            );
+            // The cell beside this one, along the row, and what it shows.
+            let beside = |d: Option<usize>| {
+                d.filter(|&d| d < 7)
+                    .map(|d| (d, rounding.format(grid.cell(timer, d))))
+            };
+            let commit = |next| Act::Commit {
+                timer,
+                day,
+                text: ed.text.clone(),
+                shown: ed.shown.clone(),
+                next,
+            };
+            return match key {
+                Some((_, Key::Escape)) => Some(Act::Cancel),
+                Some((m, Key::Tab)) if m.shift => Some(commit(beside(day.checked_sub(1)))),
+                Some((_, Key::Tab)) => Some(commit(beside(Some(day + 1)))),
+                Some(_) => Some(commit(None)),
+                None if response.lost_focus() => Some(commit(None)),
+                None => None,
+            };
+        }
+
+        let editable = !closed && !live;
+        let sense = if editable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let response = ui.interact(inner, id, sense);
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(inner, 5.0, theme.drawer_item_active);
+        } else if editable && response.hovered() {
+            painter.rect_filled(inner, 5.0, theme.content_bg);
+            painter.rect_stroke(
+                inner,
+                5.0,
+                Stroke::new(1.0, theme.separator),
+                StrokeKind::Inside,
+            );
+        }
+        if live {
+            painter.circle_filled(
+                pos2(inner.left() + 8.0, inner.center().y),
+                3.5,
+                theme.accent,
+            );
+        }
+        painter.text(
+            pos2(cell.right() - CELL_PAD, cell.center().y),
+            Align2::RIGHT_CENTER,
+            &shown,
+            FontId::proportional(14.0),
+            if live { theme.accent } else { theme.text },
+        );
+        let response = match (live, closed) {
+            (true, _) => response.on_hover_text("Running: pause it to change today's hours"),
+            (_, true) => response.on_hover_text("Reopen the week to change it"),
+            _ => response,
+        };
+        if response.clicked() {
+            return Some(Act::Edit(timer, day, shown));
+        }
+        // Read-only, it still shows its entries.
+        if !editable && ui.input(|i| i.pointer.primary_clicked()) && response.hovered() {
+            self.selected = if selected { None } else { Some((timer, day)) };
+        }
+        None
+    }
+
+    /// The last row's pickers: a customer, then one of its projects (or a
+    /// new one of either).
+    fn adder(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: egui::Rect,
+        state: &State,
+        rows: &[u32],
+        theme: &Theme,
+    ) -> Option<Act> {
+        let mut act = None;
+        let builder = UiBuilder::new()
+            .max_rect(area)
+            .layout(Layout::left_to_right(Align::Center));
+        ui.scope_builder(builder, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+            let a = &mut self.adder;
+            let enter = |ui: &egui::Ui| ui.input(|i| i.key_pressed(Key::Enter));
+            match &mut a.new_customer {
+                Some(name) => {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("New customer's name")
+                            .desired_width(170.0),
+                    );
+                    if std::mem::take(&mut a.focus) {
+                        r.request_focus();
+                    }
+                    if r.lost_focus() {
+                        if enter(ui) && !name.trim().is_empty() {
+                            act = Some(Act::NewCustomer(name.trim().to_owned()));
+                        }
+                        a.new_customer = None;
+                    }
+                }
+                None => {
+                    let chosen = a.customer.and_then(|c| state.customer(c));
+                    let text = match chosen {
+                        Some(c) => RichText::new(&c.name).color(theme.text),
+                        None => RichText::new("Customer…").color(theme.text_dim),
+                    };
+                    egui::ComboBox::from_id_salt("whir.timesheet.customer")
+                        .width(170.0)
+                        .selected_text(text)
+                        .show_ui(ui, |ui| {
+                            for (c, _) in state.by_customer(false, true) {
+                                let on = a.customer == Some(c.id);
+                                if ui.selectable_label(on, c.name.as_str()).clicked() {
+                                    a.customer = Some(c.id);
+                                    a.new_project = None;
+                                }
+                            }
+                            ui.separator();
+                            if ui.selectable_label(false, "New customer…").clicked() {
+                                a.new_customer = Some(String::new());
+                                a.focus = true;
+                            }
+                        });
+                }
+            }
+            let Some(cid) = a.customer.filter(|_| a.new_customer.is_none()) else {
+                ui.label(
+                    RichText::new("then a project, and type its hours in a day")
+                        .color(theme.text_dim),
+                );
+                return;
+            };
+            match &mut a.new_project {
+                Some((name, code)) => {
+                    let n = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("New project's name")
+                            .desired_width(190.0),
+                    );
+                    let c = ui.add(
+                        egui::TextEdit::singleline(code)
+                            .hint_text("Code (optional)")
+                            .desired_width(120.0),
+                    );
+                    let cancel = ui.button("Cancel").clicked();
+                    if std::mem::take(&mut a.focus) {
+                        n.request_focus();
+                    }
+                    // Enter in either field adds it; Esc or Cancel doesn't.
+                    let done = (n.lost_focus() || c.lost_focus()) && enter(ui);
+                    if done && !name.trim().is_empty() {
+                        act = Some(Act::NewProject(
+                            cid,
+                            name.trim().to_owned(),
+                            code.trim().to_owned(),
+                        ));
+                        a.new_project = None;
+                    } else if cancel || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        a.new_project = None;
+                    }
+                }
+                None => {
+                    let mut projects: Vec<_> = state
+                        .timers
+                        .iter()
+                        .filter(|t| t.customer == cid && !t.archived && !rows.contains(&t.id))
+                        .collect();
+                    projects.sort_by_key(|t| t.name.to_lowercase());
+                    egui::ComboBox::from_id_salt(("whir.timesheet.project", cid))
+                        .width(190.0)
+                        .selected_text(RichText::new("Project…").color(theme.text_dim))
+                        .show_ui(ui, |ui| {
+                            for t in projects {
+                                if ui.selectable_label(false, t.name.as_str()).clicked() {
+                                    act = Some(Act::AddRow(t.id));
+                                }
+                            }
+                            ui.separator();
+                            if ui.selectable_label(false, "New project…").clicked() {
+                                a.new_project = Some((String::new(), String::new()));
+                                a.focus = true;
+                            }
+                        });
+                }
+            }
+        });
+        act
+    }
+
+    /// Do what the table asked for.
+    fn act(&mut self, ctx: &egui::Context, store: &mut Store, act: Act) {
+        let today = (0..7).find(|&d| self.monday + d as i64 == Stamp::now().day);
+        match act {
+            Act::Edit(timer, day, shown) => {
+                // A click on another cell came with this one's commit.
+                self.edit(timer, day, shown, false, false);
+            }
+            Act::Commit {
+                timer,
+                day,
+                text,
+                shown,
+                next,
+            } => {
+                self.editing = None;
+                ctx.memory_mut(|m| m.surrender_focus(Id::new(("whir.timesheet.cell", timer, day))));
+                self.set_cell(store, timer, day, &text, &shown);
+                if let Some((d, shown)) = next {
+                    let live = store
+                        .state()
+                        .running
+                        .as_ref()
+                        .is_some_and(|r| r.timer == timer && Some(d) == today);
+                    self.edit(timer, d, shown, false, live);
+                }
+            }
+            Act::Cancel => {
+                self.editing = None;
+            }
+            Act::AddRow(timer) => {
+                self.added.push(timer);
+                self.adder = Adder::default();
+                self.edit(timer, today.unwrap_or(0), String::new(), false, false);
+            }
+            Act::NewCustomer(name) => {
+                if let Some(id) = self.change(store, |tx| tx.state.add_customer(&name)) {
+                    self.adder = Adder {
+                        customer: Some(id),
+                        ..Adder::default()
+                    };
+                }
+            }
+            Act::NewProject(customer, name, code) => {
+                if let Some(id) =
+                    self.change(store, |tx| tx.state.add_timer(customer, &name, &code))
+                {
+                    self.act(ctx, store, Act::AddRow(id));
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -438,6 +1026,7 @@ impl View {
             .filter(|e| e.timer == timer && e.day() == date)
             .cloned()
             .collect();
+        let closed = week.closed.is_some();
         let mut change: Option<(Entry, Option<Span>)> = None;
         egui::Grid::new(("whir.entries", timer, date))
             .spacing(vec2(8.0, 4.0))
@@ -450,10 +1039,19 @@ impl View {
                     } else {
                         e.end.secs
                     };
+                    if closed {
+                        ui.label(clock_text(e.start.secs));
+                        ui.label("–");
+                        ui.label(clock_text(end_secs));
+                        ui.label(RichText::new(format_clock(e.seconds())).color(theme.text_dim));
+                        ui.label(RichText::new(&e.note).color(theme.text));
+                        ui.end_row();
+                        continue;
+                    }
                     let start = edit_line(ui, id("start"), &clock_text(e.start.secs), 54.0, "");
                     ui.label("–");
                     let end = edit_line(ui, id("end"), &clock_text(end_secs), 54.0, "");
-                    ui.label(RichText::new(format_duration(e.seconds())).color(theme.text_dim));
+                    ui.label(RichText::new(format_clock(e.seconds())).color(theme.text_dim));
                     let note = edit_line(ui, id("note"), &e.note, 340.0, "What was it for?");
                     if ui.button("Delete").clicked() {
                         change = Some((e.clone(), None));
@@ -485,10 +1083,13 @@ impl View {
                     ui.label(clock_text(from));
                     ui.label("–");
                     ui.label(RichText::new("now").color(theme.accent));
-                    ui.label(
-                        RichText::new(format_duration((to - from) as i64)).color(theme.text_dim),
-                    );
-                    ui.label(RichText::new(format!("{} (running)", r.note)).color(theme.text_dim));
+                    ui.label(RichText::new(format_clock((to - from) as i64)).color(theme.accent));
+                    let what = if r.note.is_empty() {
+                        "(running)".to_owned()
+                    } else {
+                        format!("{} (running)", r.note)
+                    };
+                    ui.label(RichText::new(what).color(theme.text_dim));
                     ui.end_row();
                 }
             });
@@ -511,103 +1112,6 @@ impl View {
             if result == Some(false) {
                 self.error = Some("That entry was changed meanwhile; try again.".into());
             }
-        }
-    }
-
-    fn add_form(&mut self, ui: &mut egui::Ui, store: &mut Store, state: &State, theme: &Theme) {
-        let Some(draft) = &mut self.adding else {
-            return;
-        };
-        ui.label(RichText::new("Add time").size(14.5).color(theme.text));
-        ui.add_space(4.0);
-        let mut add = false;
-        let mut cancel = false;
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("whir.add.timer")
-                .width(240.0)
-                .selected_text(state.label(draft.timer))
-                .show_ui(ui, |ui| {
-                    for (c, timers) in state.by_customer(false, false) {
-                        for t in timers {
-                            let label = format!("{} · {}", c.name, t.name);
-                            ui.selectable_value(&mut draft.timer, t.id, label);
-                        }
-                    }
-                });
-            egui::ComboBox::from_id_salt("whir.add.day")
-                .width(110.0)
-                .selected_text(day_label(self.monday, draft.day))
-                .show_ui(ui, |ui| {
-                    for d in 0..7 {
-                        ui.selectable_value(&mut draft.day, d, day_label(self.monday, d));
-                    }
-                });
-            for (text, width, hint) in [
-                (&mut draft.start, 54.0, "From"),
-                (&mut draft.end, 54.0, "To"),
-                (&mut draft.length, 64.0, "or 1:30"),
-            ] {
-                ui.add(
-                    egui::TextEdit::singleline(text)
-                        .desired_width(width)
-                        .hint_text(hint),
-                );
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut draft.note)
-                    .desired_width(300.0)
-                    .hint_text("What was it for?"),
-            );
-            add = primary(ui, "Add", theme);
-            cancel = ui.button("Cancel").clicked();
-        });
-        if cancel {
-            self.adding = None;
-            return;
-        }
-        if !add {
-            return;
-        }
-        let date = self.monday + draft.day as i64;
-        let midnight = Stamp::midnight(date);
-        let start = parse_clock(&draft.start);
-        let end = parse_end(&draft.end);
-        let length = parse_duration(&draft.length);
-        let (timer, note) = (draft.timer, draft.note.clone());
-        let monday = self.monday;
-        let span = match (start, end, length) {
-            (Some(s), Some(e), _) if s < e => Some((s, e)),
-            (Some(s), None, Some(l)) => Some((s, (s as i64 + l).min(MIDNIGHT as i64) as u32)),
-            (None, Some(e), Some(l)) => Some(((e as i64 - l).max(0) as u32, e)),
-            (None, None, Some(l)) => {
-                // After the day's last entry (or from nine).
-                let week = store.week(monday);
-                let from = week
-                    .entries
-                    .iter()
-                    .filter(|e| e.day() == date)
-                    .map(|e| e.end.since(midnight) as u32)
-                    .max()
-                    .unwrap_or(9 * 3600);
-                Some((from, (from as i64 + l).min(MIDNIGHT as i64) as u32))
-            }
-            _ => None,
-        };
-        let Some((s, e)) = span.filter(|(s, e)| s < e) else {
-            self.error = Some("Give a start and an end (9:05, 10:30), or a length (1:30).".into());
-            return;
-        };
-        if state.timer(timer).is_none() {
-            self.error = Some("Choose a project.".into());
-            return;
-        }
-        let (start, end) = (midnight.plus(s as i64), midnight.plus(e as i64));
-        if self
-            .change(store, |tx| tx.add(timer, start, end, &note))
-            .is_some()
-        {
-            self.adding = None;
-            self.selected = Some((timer, (date - monday) as usize));
         }
     }
 
@@ -762,7 +1266,59 @@ fn parse_end(text: &str) -> Option<u32> {
     }
 }
 
-fn day_label(monday: i64, d: usize) -> String {
-    let (_, _, day) = civil_from_days(monday + d as i64);
-    format!("{} {day}", DAYS[d])
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hours_are_read_as_typed_into_a_cell() {
+        assert_eq!(typed_seconds("2"), Some(7200));
+        assert_eq!(typed_seconds("1.5"), Some(5400));
+        assert_eq!(typed_seconds("1:30"), Some(5400));
+        assert_eq!(typed_seconds("90m"), Some(5400));
+        for none in ["", " ", "0", "0:00", "0.0"] {
+            assert_eq!(typed_seconds(none), Some(0), "{none:?}");
+        }
+        assert_eq!(typed_seconds("lots"), None);
+    }
+
+    #[test]
+    fn a_cell_takes_the_hours_typed_and_a_closed_week_none() {
+        let dir = std::env::temp_dir().join(format!("whir-sheet-cells-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::open(dir.clone());
+        let t = store
+            .update(|tx| {
+                let c = tx.state.add_customer("Contoso");
+                tx.state.add_timer(c, "Automation", "")
+            })
+            .unwrap();
+        let mut view = View::new();
+        let monday = view.monday;
+        let tuesday = |store: &mut Store| {
+            let week = store.week(monday).clone();
+            Grid::of(&week, None, Stamp::now()).cell(t, 1)
+        };
+        view.set_cell(&mut store, t, 1, "2", "");
+        assert_eq!(tuesday(&mut store), 7200);
+        view.set_cell(&mut store, t, 1, "1:30", "2");
+        assert_eq!(tuesday(&mut store), 5400);
+        // As it was shown: nothing changes (the exact time stays exact).
+        view.set_cell(&mut store, t, 1, " 1.5 ", "1.5");
+        assert_eq!(tuesday(&mut store), 5400);
+        view.set_cell(&mut store, t, 1, "", "1.5");
+        assert_eq!(tuesday(&mut store), 0);
+        // Not a length of time: said so, and nothing written.
+        view.set_cell(&mut store, t, 1, "soon", "");
+        assert!(view.error.is_some());
+        assert_eq!(tuesday(&mut store), 0);
+
+        // Closed, or the running project's today: not typed into.
+        assert!(!view.edit(t, 1, String::new(), true, false));
+        assert!(!view.edit(t, 1, String::new(), false, true));
+        assert!(view.editing.is_none());
+        assert!(view.edit(t, 1, "2".into(), false, false));
+        assert_eq!(view.selected, Some((t, 1)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

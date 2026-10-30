@@ -157,14 +157,19 @@ impl Document for SettingsDoc {
                     });
             });
 
-        // A running timer's time goes on.
+        // A running timer's time goes on: the timesheet shows its seconds.
         let running = self
             .store
             .as_ref()
             .is_some_and(|s| s.state().running.is_some());
         if running {
+            let every = if self.section == Section::Timesheet {
+                1
+            } else {
+                30
+            };
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs(30));
+                .request_repaint_after(std::time::Duration::from_secs(every));
         }
     }
 }
@@ -414,7 +419,7 @@ mod tests {
         whir_core::theme::Theme::set_current(Theme::light());
         h.frame();
         h.frame();
-        // A day's entries, adding time, and the close-out question.
+        // A day's entries, and the close-out question.
         h.doc.sheet.selected = Some((timer, 0));
         h.frame();
         h.doc.show_section("timesheet");

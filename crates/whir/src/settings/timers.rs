@@ -55,8 +55,9 @@ impl View {
         };
         note(
             ui,
-            "Each project is a timer in the dock's time drawer. The code (a project or \
-             assignment ID) goes on the timesheet beside it.",
+            "Each project can be picked on the capture dock and timed, or have its hours \
+             typed into the timesheet. The code (a project or assignment ID) goes on the \
+             timesheet beside it.",
             theme,
         );
         ui.add_space(10.0);
