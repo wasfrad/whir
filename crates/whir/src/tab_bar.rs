@@ -454,7 +454,7 @@ pub(crate) fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, 
         DocKind::Pdf => Color32::from_rgb(0xf0, 0x55, 0x4a),
         DocKind::Csv => Color32::from_rgb(0x3c, 0xb3, 0x71),
         DocKind::Note => theme.note_glyph,
-        DocKind::Error => theme.text_dim,
+        DocKind::Error | DocKind::Settings => theme.text_dim,
     };
     let s = Stroke::new(1.3, color);
     match kind {
@@ -580,6 +580,7 @@ pub(crate) fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, 
                 );
             }
         }
+        DocKind::Settings => whir_core::toolbar::paint_gear(painter, c, 6.5, color),
         DocKind::Error => {
             painter.circle_stroke(c, 6.0, s);
             painter.text(

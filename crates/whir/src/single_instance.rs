@@ -33,7 +33,9 @@ impl Drop for PrimaryGuard {
     }
 }
 
-pub fn acquire(paths: &[PathBuf]) -> Instance {
+/// `show`: a Settings page to open (`--settings`), as well as (or instead
+/// of) `paths`.
+pub fn acquire(paths: &[PathBuf], show: Option<&str>) -> Instance {
     let mutex = match unsafe { CreateMutexW(None, true, w!("Local\\whir.instance.v1")) } {
         Ok(h) => h,
         // Can't coordinate: just run standalone.
@@ -46,8 +48,15 @@ pub fn acquire(paths: &[PathBuf]) -> Instance {
     // Someone else is (or is becoming) the primary.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
+        // No files and no page is a bare launch: an empty list says so.
+        let forward = |hwnd| match show {
+            Some(page) => {
+                (paths.is_empty() || ipc::send_paths(hwnd, paths)) && ipc::send_show(hwnd, page)
+            }
+            None => ipc::send_paths(hwnd, paths),
+        };
         if let Some(hwnd) = ipc::find_main_window()
-            && ipc::send_paths(hwnd, paths)
+            && forward(hwnd)
         {
             unsafe {
                 let _ = CloseHandle(mutex);

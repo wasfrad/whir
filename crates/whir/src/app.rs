@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use egui::{CentralPanel, Event, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
 use whir_core::theme::{self, Theme};
 use whir_core::{
-    DocCx, DocRequest, Document, FindQuery, OpenCx, SaveAsSpec, SaveResult, TextureRegistry,
-    needs_attention, trace,
+    DocCx, DocKind, DocRequest, Document, FindQuery, OpenCx, SaveAsSpec, SaveResult,
+    TextureRegistry, needs_attention, trace,
 };
 use whir_gfx::{GpuTextures, PresentResult, Renderer};
+use whir_platform::ipc::Changed;
 use whir_platform::{
     FrameInfo, FrameOutput, Handler, HitMap, RectPx, SaveDialogSpec, WindowCommand,
 };
@@ -23,6 +24,7 @@ use crate::dispatch;
 use crate::drawer::{self, Drawer};
 use crate::keys::consume_exact;
 use crate::search_panel::{self, SearchPanel};
+use crate::settings::{Section, SettingsDoc};
 use crate::tab_bar::{self, TabInfo};
 
 /// How long the first frame may wait for the active document's content, so a
@@ -206,6 +208,27 @@ impl App {
         self.active = self.push_tab(doc);
     }
 
+    /// Settings, at `page` ("timesheet", "timers", "startup"): a tab of its
+    /// own, the one already open if there is one.
+    pub fn open_settings(&mut self, page: &str) {
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.doc.kind() == DocKind::Settings)
+        {
+            self.active = i;
+            self.tabs[i].doc.show_section(page);
+            return;
+        }
+        // A lone untouched blank note gives way, as it does to opened files.
+        if self.tabs.len() == 1 && self.tabs[0].doc.is_pristine() {
+            self.tabs.clear();
+            self.visible_tab = None;
+        }
+        let section = Section::from_name(page).unwrap_or(Section::Timesheet);
+        self.active = self.push_tab(SettingsDoc::new(section).boxed());
+    }
+
     /// Ctrl+Shift+N: a blank table.
     fn new_table(&mut self) {
         let doc = whir_csv::new_blank(&self.open_cx);
@@ -381,6 +404,7 @@ impl App {
         let mut open = false;
         let (mut new_note, mut new_table, mut save, mut save_as, mut drawer) =
             (false, false, false, false, false);
+        let mut settings = false;
         let (mut find_in_tabs, mut result_step) = (false, None);
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
@@ -405,6 +429,7 @@ impl App {
             save_as = consume_exact(i, ctrl_shift, Key::S);
             save = consume_exact(i, ctrl, Key::S);
             drawer = consume_exact(i, ctrl, Key::E);
+            settings = consume_exact(i, ctrl, Key::Comma);
             find_in_tabs = consume_exact(i, ctrl_shift, Key::F);
             if consume_exact(i, Modifiers::SHIFT, Key::F4) {
                 result_step = Some(false);
@@ -458,6 +483,9 @@ impl App {
         }
         if find_in_tabs {
             self.search.focus();
+        }
+        if settings {
+            self.open_settings("");
         }
         if let Some(forward) = result_step
             && let Some(id) = self.search.step(&mut self.tabs, forward)
@@ -598,6 +626,8 @@ impl App {
                 DocRequest::CopyImage(image) => {
                     self.pending.push(WindowCommand::CopyImage(image.0));
                 }
+                DocRequest::Reveal(path) => self.pending.push(WindowCommand::Reveal(path)),
+                DocRequest::Toast(text) => self.show_toast(text),
             }
         }
     }
@@ -809,7 +839,7 @@ impl App {
         let mut requests = Vec::new();
 
         // The toolbar: one surface with the active tab, which pours into it.
-        let mut dock = false;
+        let (mut dock, mut settings) = (false, false);
         Panel::top("toolbar")
             .exact_size(m.toolbar_height)
             .resizable(false)
@@ -850,9 +880,22 @@ impl App {
                 capture
                     .response
                     .on_hover_text("Screenshots: open the capture dock");
+                let gear = whir_core::toolbar::Glyph::Gear;
+                let on = self
+                    .tabs
+                    .get(active)
+                    .is_some_and(|t| t.doc.kind() == DocKind::Settings);
+                let open =
+                    whir_core::toolbar::tool_button(&mut ours, gear, on, None, false, &theme);
+                settings = open.clicked;
+                open.response
+                    .on_hover_text("Settings: the timesheet, timers, startup (Ctrl+,)");
             });
         if dock {
             self.open_dock();
+        }
+        if settings {
+            self.open_settings("");
         }
 
         // Content.
@@ -1215,6 +1258,18 @@ impl Handler for App {
 
     fn bare_launch(&mut self) {
         self.new_note();
+    }
+
+    fn show_page(&mut self, page: &str) {
+        self.open_settings(page);
+    }
+
+    fn shared_changed(&mut self, what: Changed) {
+        match what {
+            Changed::Time => whir_core::timesheet::changed_elsewhere(),
+            Changed::Todos => {}
+        }
+        self.ctx.request_repaint();
     }
 
     fn close_requested(&mut self) -> bool {

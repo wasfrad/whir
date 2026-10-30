@@ -16,6 +16,7 @@ mod keys;
 mod register;
 mod reltime;
 mod search_panel;
+mod settings;
 mod single_instance;
 mod tab_bar;
 
@@ -34,6 +35,8 @@ struct Args {
     restarted: bool,
     /// `--dock` and friends: this process is the capture dock, not a window.
     dock: Option<whir_capture::Command>,
+    /// `--settings [page]`: open Settings (at that page).
+    settings: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -44,13 +47,25 @@ fn parse_args() -> Args {
         warp: false,
         restarted: false,
         dock: None,
+        settings: None,
     };
-    for a in std::env::args_os().skip(1) {
+    let mut all = std::env::args_os().skip(1).peekable();
+    while let Some(a) = all.next() {
         match a.to_str() {
             Some("--register") => args.register = true,
             Some("--unregister") => args.unregister = true,
             Some("--warp") => args.warp = true,
             Some("--restarted") => args.restarted = true,
+            Some("--settings") => {
+                // The page, if one is named.
+                let page = all
+                    .next_if(|p| {
+                        p.to_str()
+                            .is_some_and(|p| settings::Section::from_name(p).is_some())
+                    })
+                    .and_then(|p| p.into_string().ok());
+                args.settings = Some(page.unwrap_or_default());
+            }
             Some(s) if whir_capture::Command::from_arg(s).is_some() => {
                 args.dock = whir_capture::Command::from_arg(s);
             }
@@ -143,7 +158,7 @@ fn main() {
         .iter()
         .map(|p| whir_platform::ipc::canonicalize(p))
         .collect();
-    let instance = match single_instance::acquire(&paths) {
+    let instance = match single_instance::acquire(&paths, args.settings.as_deref()) {
         single_instance::Instance::Forwarded => {
             trace::mark("forwarded to running instance");
             trace::flush();
@@ -181,11 +196,14 @@ fn main() {
     let restart = std::rc::Rc::new(std::cell::RefCell::new(None));
     let mut app = app::App::new(textures.clone(), wake.waker(), dark, restart.clone());
     use whir_platform::Handler as _;
-    if paths.is_empty() {
+    if !paths.is_empty() {
+        app.open_files(paths);
+    }
+    if let Some(page) = &args.settings {
+        app.open_settings(page);
+    } else if args.files.is_empty() {
         // A bare launch is a blank note, ready to type into (no disk access).
         app.bare_launch();
-    } else {
-        app.open_files(paths);
     }
     trace::mark("documents started");
 

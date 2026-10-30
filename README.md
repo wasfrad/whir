@@ -35,6 +35,7 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
 | Ctrl+E · rest the pointer on the right edge | The drawer: notes and screenshots |
 | Camera button at the right of the toolbar | Open the capture dock |
+| Ctrl+, · the gear next to it | Settings: the timesheet, customers & projects, startup |
 | Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
 | Right-click a tab | Close others · close tabs to the right · close all (leaves a blank note) · copy path · show in Explorer |
@@ -210,6 +211,28 @@ minutes, a locked screen, sleep, or whir not running at all) and the dock asks, 
 back, whether that time counts: **Keep it**, or **Drop it** to stop the timer when you left
 and start it again from when you came back. A start that's switched away within half a
 minute leaves nothing behind.
+
+### The timesheet
+
+Settings (Ctrl+, or the gear in the toolbar) opens on the week at a glance: a row per
+project, grouped by customer with its code, a column per day, in hours rounded the way
+they go on the timecard (to 0.25 h per project per day by default; 0.1 h or exact in
+**Customers & projects**), the running timer included as it goes.
+
+| Timesheet | |
+|---|---|
+| ‹ › · This week | Previous / next week · back to this one |
+| Click a day's hours | Its entries: change a start or an end (`9:05`, `1:20 pm`, `1320`), the note, or delete it |
+| + Add time | By start and end, or a length (`1:30`, `1.5`, `90m`) after the day's last entry |
+| Copy | The week as a table, to paste into Excel or an email |
+| Close week… | Close it out: writes `<Monday> timesheet.csv` (the hours per project per day, with each day's notes) and `<Monday> entries.csv` (every entry, to the second) to the Time folder |
+| Reopen · Closed weeks | Open a closed week again · every closed week with its hours, its CSV a click away (it opens in whir as a table) |
+
+On Monday the timesheet says when last week is still open, with a way straight to it.
+**Customers & projects** is where timers are set up: customers, their projects and codes,
+renamed in place; a project with time in it is archived (no longer offered in the dock,
+its time kept) rather than deleted. `whir.exe --settings timesheet` (or `timers`,
+`startup`) opens a page directly; the dock's **Timesheet** button does that.
 
 The timesheet is kept in `Documents\whir\Time` (`WHIR_TIME_DIR` elsewhere): the data in a
 hidden `.whir` folder, one small text file for the projects and what's running and one

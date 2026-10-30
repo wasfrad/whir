@@ -44,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR};
 
 use crate::input::InputCollector;
-use crate::ipc::{COPYDATA_OPEN, WINDOW_CLASS, decode_paths};
+use crate::ipc::{COPYDATA_OPEN, COPYDATA_SHOW, Changed, WINDOW_CLASS, decode_paths};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_OPEN: u32 = WM_APP + 2;
@@ -155,6 +155,10 @@ pub trait Handler {
     fn open_files(&mut self, paths: Vec<PathBuf>);
     /// whir was launched again with no files while running.
     fn bare_launch(&mut self) {}
+    /// Show a page of Settings (`whir.exe --settings timesheet`, or the dock).
+    fn show_page(&mut self, _page: &str) {}
+    /// The other process (the dock) changed data both of them keep.
+    fn shared_changed(&mut self, _what: Changed) {}
     fn activated(&mut self, _active: bool) {}
     fn close_requested(&mut self) -> bool {
         true
@@ -178,13 +182,18 @@ pub trait Handler {
 struct Pending {
     files: Vec<PathBuf>,
     bare: bool,
+    show: Option<String>,
     saves: Vec<(u64, Option<PathBuf>)>,
     recycled: Vec<(PathBuf, Result<(), String>)>,
 }
 
 impl Pending {
     fn is_empty(&self) -> bool {
-        self.files.is_empty() && !self.bare && self.saves.is_empty() && self.recycled.is_empty()
+        self.files.is_empty()
+            && !self.bare
+            && self.show.is_none()
+            && self.saves.is_empty()
+            && self.recycled.is_empty()
     }
 }
 
@@ -552,6 +561,7 @@ impl State {
         let Pending {
             files,
             bare,
+            show,
             saves,
             recycled,
         } = pending;
@@ -560,6 +570,11 @@ impl State {
         }
         if bare && self.with_handler(|h| h.bare_launch()).is_none() {
             undelivered.bare = true;
+        }
+        if let Some(page) = show
+            && self.with_handler(|h| h.show_page(&page)).is_none()
+        {
+            undelivered.show = Some(page);
         }
         for (token, path) in saves {
             if self
@@ -581,6 +596,7 @@ impl State {
             let mut p = self.pending.borrow_mut();
             p.files.extend(undelivered.files);
             p.bare |= undelivered.bare;
+            p.show = p.show.take().or(undelivered.show);
             p.saves.extend(undelivered.saves);
             p.recycled.extend(undelivered.recycled);
         }
@@ -1203,19 +1219,22 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             // --- files ---
             WM_COPYDATA => {
                 let cds = &*(lparam.0 as *const COPYDATASTRUCT);
-                if cds.dwData != COPYDATA_OPEN {
+                if cds.dwData != COPYDATA_OPEN && cds.dwData != COPYDATA_SHOW {
                     return LRESULT(0);
                 }
                 // Copy out and return quickly so the sender isn't held up.
-                let paths = if !cds.lpData.is_null() && cds.cbData >= 2 {
-                    let units = std::slice::from_raw_parts(
-                        cds.lpData as *const u16,
-                        cds.cbData as usize / 2,
-                    );
-                    decode_paths(units)
+                let units = if !cds.lpData.is_null() && cds.cbData >= 2 {
+                    std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2)
                 } else {
-                    Vec::new()
+                    &[]
                 };
+                if cds.dwData == COPYDATA_SHOW {
+                    let page = String::from_utf16_lossy(units);
+                    s.queue(|p| p.show = Some(page));
+                    s.execute(WindowCommand::Focus);
+                    return LRESULT(1);
+                }
+                let paths = decode_paths(units);
                 if paths.is_empty() {
                     // whir.exe launched again without files.
                     s.queue(|p| p.bare = true);
@@ -1295,6 +1314,13 @@ unsafe fn handle(s: &State, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             WM_DESTROY => {
                 PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ if msg == crate::ipc::changed_message() => {
+                if let Some(what) = Changed::from_code(wparam.0) {
+                    s.with_handler(|h| h.shared_changed(what));
+                    s.request_repaint();
+                }
                 LRESULT(0)
             }
             _ => def(),

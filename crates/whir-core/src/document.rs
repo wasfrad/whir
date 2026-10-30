@@ -15,6 +15,8 @@ pub enum DocKind {
     Csv,
     Note,
     Error,
+    /// whir's own Settings page (the timesheet, the timers, startup).
+    Settings,
 }
 
 /// How a document's changes reach the disk.
@@ -76,6 +78,10 @@ pub enum DocRequest {
     FindInTabs(FindQuery),
     /// Put this image on the clipboard.
     CopyImage(ClipImage),
+    /// Show this file in Explorer.
+    Reveal(PathBuf),
+    /// Say this briefly, at the bottom of the window.
+    Toast(String),
 }
 
 /// Where a document's search stands, for the Find in all tabs panel.
@@ -158,6 +164,9 @@ pub trait Document {
 
     /// The tab became visible / hidden. Hook for later texture eviction.
     fn on_visibility(&mut self, _visible: bool) {}
+
+    /// Go to a part of the document by name (a Settings page's section).
+    fn show_section(&mut self, _name: &str) {}
 
     // --- saving -------------------------------------------------------------
 

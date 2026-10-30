@@ -70,6 +70,14 @@ const HEAD_BYTES: usize = 2048;
 /// Our own temp files older than this are leftovers from a crash.
 const STALE_TEMP: Duration = Duration::from_secs(60 * 60);
 
+/// Where notes are kept: `WHIR_NOTES_DIR`, else `Documents\whir`. `None` if
+/// the Documents folder can't be resolved.
+pub fn resolve_dir() -> Option<PathBuf> {
+    std::env::var_os("WHIR_NOTES_DIR")
+        .map(PathBuf::from)
+        .or_else(|| documents_dir().map(|d| d.join("whir")))
+}
+
 impl Library {
     /// No I/O: the folder is resolved on first use.
     pub fn new(waker: Waker) -> Arc<Self> {

@@ -17,6 +17,7 @@ pub enum Glyph {
     Highlighter,
     Text,
     Camera,
+    Gear,
 }
 
 /// What happened to a [`tool_button`] this frame.
@@ -157,7 +158,25 @@ fn paint_glyph(painter: &egui::Painter, c: Pos2, glyph: Glyph, color: Color32) {
             ));
             painter.circle_stroke(at(0.0, 1.0), 2.8, s);
         }
+        Glyph::Gear => paint_gear(painter, c, 7.0, color),
     }
+}
+
+/// A cog with eight teeth, `radius` to their tips (Settings).
+pub fn paint_gear(painter: &egui::Painter, c: Pos2, radius: f32, color: Color32) {
+    let s = Stroke::new(1.3, color);
+    let teeth = 8;
+    let inner = radius * 0.72;
+    let points: Vec<Pos2> = (0..teeth * 4)
+        .map(|i| {
+            // Each tooth: up, across the top, down, across the gap.
+            let a = (i as f32 + 0.5) / (teeth * 4) as f32 * std::f32::consts::TAU;
+            let r = if i % 4 < 2 { radius } else { inner };
+            c + r * vec2(a.cos(), a.sin())
+        })
+        .collect();
+    painter.add(Shape::closed_line(points, s));
+    painter.circle_stroke(c, radius * 0.32, s);
 }
 
 /// A row of colour swatches, `current` ringed. Returns the one clicked.
