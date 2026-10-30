@@ -6,7 +6,8 @@
 //!
 //! It folds down to its header and is dragged taller or shorter by its top
 //! edge: a taller filmstrip has bigger pictures, a taller notes list more
-//! rows. Both are remembered, for each kind.
+//! rows. Both are remembered, for each kind. Notes flagged as todos are
+//! marked (⚑ to do, ✓ done) and the open ones come first.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -19,6 +20,8 @@ use whir_core::captures::{CaptureEntry, CapturesSnapshot};
 use whir_core::library::{EntryKind, LibraryEntry, LibrarySnapshot};
 use whir_core::marks::{self, Kind};
 use whir_core::theme::Theme;
+use whir_core::todos::State as Todo;
+use whir_core::toolbar::{paint_check, paint_flag};
 use whir_core::{DocKind, OpenCx, settings};
 use whir_image::{Thumb, Thumbs};
 
@@ -103,6 +106,18 @@ pub struct Out {
     pub capture: bool,
     /// A drawer came into view: rescan its folder if the list is old.
     pub rescan: Option<Mode>,
+    /// Flag a note as a todo, mark it done, or not.
+    pub flag: Option<(PathBuf, Flag)>,
+}
+
+/// What to do with a note's todo flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flag {
+    Open,
+    Done,
+    Clear,
+    /// Open if it isn't; done if it is.
+    Toggle,
 }
 
 fn load_pane(mode: Mode) -> Pane {
@@ -204,6 +219,7 @@ impl Drawer {
             .data(|d| d.get_temp::<usize>(Id::new("whir.drawer.columns")))
             .unwrap_or(1);
         let (mut open, mut delete, mut close, mut step) = (false, false, false, 0isize);
+        let mut flag = false;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
             let (across, down) = match mode {
@@ -227,6 +243,7 @@ impl Drawer {
             open = consume_exact(i, none, Key::Enter);
             delete = consume_exact(i, none, Key::Delete);
             close = consume_exact(i, none, Key::Escape);
+            flag = mode == Mode::Notes && consume_exact(i, none, Key::F);
         });
         if n > 0 && step != 0 {
             let pane = self.pane(mode);
@@ -240,6 +257,8 @@ impl Drawer {
                 self.focused = false;
             } else if delete {
                 out.delete = Some(path);
+            } else if flag {
+                out.flag = Some((path, Flag::Toggle));
             }
         }
         if close {
@@ -421,7 +440,10 @@ impl Drawer {
             painter.text(
                 pos2(rect.left() + 60.0 + name_w, rect.center().y),
                 Align2::LEFT_CENTER,
-                "↑ ↓ ← → · Enter · Delete · Esc",
+                match mode {
+                    Mode::Notes => "↑ ↓ ← → · Enter · F to flag · Delete · Esc",
+                    Mode::Shots => "← → · Enter · Delete · Esc",
+                },
                 FontId::proportional(theme.metrics.small_text_size),
                 theme.text_dim,
             );
@@ -722,12 +744,13 @@ fn note_row(
         EntryKind::Note => DocKind::Note,
         EntryKind::Table => DocKind::Csv,
     };
-    paint_kind_glyph(
-        painter,
-        pos2(rect.left() + 14.0, rect.center().y),
-        kind,
-        theme,
-    );
+    let mark = pos2(rect.left() + 14.0, rect.center().y);
+    match e.todo {
+        Some(Todo::Open { .. }) => paint_flag(painter, mark, theme.note_glyph, true),
+        Some(Todo::Done { .. }) => paint_check(painter, mark, theme.text_dim),
+        None => paint_kind_glyph(painter, mark, kind, theme),
+    }
+    let done = matches!(e.todo, Some(Todo::Done { .. }));
     let small = FontId::proportional(theme.metrics.small_text_size);
     let age = painter.layout_no_wrap(when(now, now_sys, e.modified), small, theme.text_dim);
     let age_w = age.size().x;
@@ -747,10 +770,11 @@ fn note_row(
         FontId::proportional(13.5),
         rect.right() - 16.0 - age_w - left,
     );
+    let color = if done { theme.text_dim } else { theme.text };
     painter.galley(
         pos2(left, rect.center().y - title.size().y / 2.0),
         title,
-        theme.text,
+        color,
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -763,7 +787,7 @@ fn note_row(
     if clicked {
         out.open = Some(e.path.clone());
     }
-    row_menu(&resp, id.with("menu"), &e.path, theme, out);
+    row_menu(&resp, id.with("menu"), &e.path, Some(e.todo), theme, out);
     clicked
 }
 
@@ -866,16 +890,40 @@ fn shot_card(
     if clicked {
         out.open = Some(e.path.clone());
     }
-    row_menu(&resp, id.with("menu"), &e.path, theme, out);
+    row_menu(&resp, id.with("menu"), &e.path, None, theme, out);
     clicked
 }
 
-/// Right-click on a note or a screenshot.
-fn row_menu(resp: &egui::Response, id: Id, path: &Path, theme: &Theme, out: &mut Out) {
+/// Right-click on a note (`todo`: its flag) or a screenshot (`None`).
+fn row_menu(
+    resp: &egui::Response,
+    id: Id,
+    path: &Path,
+    todo: Option<Option<Todo>>,
+    theme: &Theme,
+    out: &mut Out,
+) {
     egui::Popup::context_menu(resp).id(id).show(|ui| {
         if ui.button("Open").clicked() {
             out.open = Some(path.to_owned());
             ui.close();
+        }
+        if let Some(todo) = todo {
+            let choices: &[(&str, Flag)] = match todo {
+                None => &[("Flag as todo", Flag::Open)],
+                Some(Todo::Open { .. }) => {
+                    &[("Mark done", Flag::Done), ("Remove flag", Flag::Clear)]
+                }
+                Some(Todo::Done { .. }) => {
+                    &[("Flag again", Flag::Open), ("Remove flag", Flag::Clear)]
+                }
+            };
+            for &(label, flag) in choices {
+                if ui.button(label).clicked() {
+                    out.flag = Some((path.to_owned(), flag));
+                    ui.close();
+                }
+            }
         }
         if ui.button("Show in Explorer").clicked() {
             out.reveal = Some(path.to_owned());

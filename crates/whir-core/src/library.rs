@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::Waker;
 use crate::file::{self, FileIdentity};
 use crate::time::LocalTime;
+use crate::todos;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -32,13 +33,15 @@ pub struct LibraryEntry {
     pub size: u64,
     /// A OneDrive placeholder: never read by the scan (that would download it).
     pub cloud_only: bool,
+    /// Flagged as a todo (open, or done).
+    pub todo: Option<todos::State>,
 }
 
 #[derive(Clone, Default)]
 pub struct LibrarySnapshot {
     /// Bumped on every change.
     pub generation: u64,
-    /// Newest first.
+    /// Open todos first (the most recently flagged first), then newest first.
     pub entries: Arc<[LibraryEntry]>,
     pub scanning: bool,
     /// At least one scan has completed.
@@ -51,6 +54,8 @@ pub struct LibrarySnapshot {
 enum Work {
     Scan,
     Refresh(Vec<PathBuf>),
+    /// Which notes are todos changed: the same list, sorted again.
+    Todos,
 }
 
 type Shared = Arc<Mutex<LibrarySnapshot>>;
@@ -150,6 +155,11 @@ impl Library {
         }
     }
 
+    /// Notes were flagged or done (here or by the dock): list them again.
+    pub fn todos_changed(&self) {
+        self.send(Work::Todos);
+    }
+
     fn send(&self, work: Work) {
         let Ok(mut guard) = self.worker.lock() else {
             return;
@@ -190,6 +200,7 @@ impl Worker {
         match work {
             Work::Scan => self.scan(),
             Work::Refresh(paths) => self.refresh(&paths),
+            Work::Todos => self.publish(self.previous().to_vec(), false, None),
         }
         self.waker.wake();
     }
@@ -203,9 +214,20 @@ impl Worker {
 
     fn publish(&self, entries: Vec<LibraryEntry>, full_scan: bool, error: Option<String>) {
         let mut entries = entries;
+        let todos = self.dir.as_deref().map(todos::load).unwrap_or_default();
+        for e in &mut entries {
+            let name = e.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            e.todo = todos.get(name);
+        }
+        // Open todos first, the most recently flagged first; then by age.
+        let open_since = |e: &LibraryEntry| match e.todo {
+            Some(todos::State::Open { since }) => Some(since),
+            _ => None,
+        };
         entries.sort_by(|a, b| {
-            b.modified
-                .cmp(&a.modified)
+            open_since(b)
+                .cmp(&open_since(a))
+                .then_with(|| b.modified.cmp(&a.modified))
                 .then_with(|| a.title.cmp(&b.title))
         });
         if let Ok(mut s) = self.shared.lock() {
@@ -352,6 +374,7 @@ fn read_entry(
         modified,
         size,
         cloud_only,
+        todo: None,
     }
 }
 
@@ -578,11 +601,14 @@ pub fn rename_to_stem(current: &Path, stem: &str) -> io::Result<PathBuf> {
         // Case-only change: the "existing" target is this very file.
         let target = dir.join(format!("{stem}.{ext}"));
         std::fs::rename(current, &target)?;
+        todos::renamed(current, &target);
         return Ok(target);
     }
     for name in candidates(stem, &ext) {
         let target = dir.join(&name);
         if file::move_no_replace(current, &target)? {
+            // A flagged note stays flagged under its new name.
+            todos::renamed(current, &target);
             return Ok(target);
         }
     }
@@ -868,6 +894,49 @@ mod tests {
         assert_eq!(snap.entries[1].title, "Old");
         assert!(lib.contains(&dir.join("x.md")));
         assert!(!lib.contains(&dir.join("sub").join("x.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_todos_come_first_and_follow_their_flags() {
+        use crate::time::Stamp;
+        use crate::todos::{self, State};
+        let dir = test_dir("todos");
+        for name in ["oldest.md", "older.md", "newest.md"] {
+            std::fs::write(dir.join(name), "# x").unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let at = |m: i64| Stamp::at(20_000, 9, 0, 0).plus(m * 60);
+        todos::set(&dir.join("oldest.md"), Some(State::Open { since: at(0) })).unwrap();
+        todos::set(&dir.join("older.md"), Some(State::Open { since: at(5) })).unwrap();
+        let lib = Library::at(dir.clone(), Waker::noop());
+        let names = |want_generation: u64| {
+            lib.scan();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let s = lib.snapshot();
+                if (s.scanned && s.generation > want_generation) || Instant::now() > deadline {
+                    let names: Vec<String> = s
+                        .entries
+                        .iter()
+                        .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+                        .collect();
+                    return (names, s.generation);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Most recently flagged first, then the rest newest first.
+        let (n, g) = names(0);
+        assert_eq!(n, ["older.md", "oldest.md", "newest.md"]);
+        // Done: back among the rest by age.
+        let done = State::Done {
+            since: at(5),
+            done: at(9),
+        };
+        todos::set(&dir.join("older.md"), Some(done)).unwrap();
+        let (n, _) = names(g);
+        assert_eq!(n, ["oldest.md", "newest.md", "older.md"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

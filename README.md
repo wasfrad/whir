@@ -55,10 +55,19 @@ A ● on a tab means unsaved changes; closing it (or whir) asks whether to save.
 | Ctrl+B · Ctrl+I · Ctrl+K | Bold · italic · link |
 | Ctrl+click a link | Open it |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+Shift+D · the flag in the toolbar | Flag the note as a todo · mark it done |
 
 Notes are plain Markdown files in `Documents\whir`, saved about a second after you stop
 typing (and whenever you switch away). Other `.md` / `.txt` files open in the same editor
 and are saved with Ctrl+S.
+
+A note flagged as a todo comes first in the notes drawer (⚑), the most recently flagged
+first, and stays in sight on the capture dock: while any todo is open the dock stays out
+with a card listing them (click one to open it in whir, ✓ to mark it done). Done ones go
+back among the rest with a ✓. Flag, mark done or unflag from the toolbar, Ctrl+Shift+D,
+right-clicking a note in the drawer, or F in the drawer. The flags are kept beside the
+notes, in `Documents\whir\.whir\todos.txt`, so the notes stay plain Markdown; a renamed
+note keeps its flag, and a deleted one takes it along.
 
 The drawer along the bottom of the window shows what's near the open document: a note
 (or a table in the notes folder) has every note, newest first, wrapped into columns; a
@@ -296,7 +305,8 @@ crates/
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
                   replace, the notes library, the screenshots store, marks, toolbar widgets,
-                  find bar, f64 scrolling, theme tokens, tracing, the timesheet (shared with the dock)
+                  find bar, f64 scrolling, theme tokens, tracing, the timesheet and the todos
+                  (shared with the dock)
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
                   marks (highlights multiply-blended, text in egui's own glyphs, baked the same way
@@ -321,8 +331,8 @@ Principles:
   - Images keep a screen-sized level and decode full resolution only when you zoom in.
   - The CSV index costs about 1.25 MB per 10M rows.
   - PDF tiles live in an LRU with a 96 MB budget.
-- **Two processes, one timesheet.** The dock and the window both change the timesheet (and
-  the todos): each change is made under a named mutex from a fresh read of the files, written
+- **Two processes, one timesheet.** The dock and the window both change the timesheet and
+  the todos: each change is made under a named mutex from a fresh read of the files, written
   atomically, and announced to the other process with a registered window message.
 
 ### Theming / re_ui

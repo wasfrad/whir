@@ -4,9 +4,10 @@
 //! opens the time drawer. It can be dragged to any edge of any monitor, and
 //! remembers where.
 //!
-//! Beside it, a panel (a second window) shows what must be seen: the todos,
-//! the "were you away?" question, and the time drawer when it is open. While
-//! there is something to show, or a timer runs, the dock stays out.
+//! Beside it, a panel (a second window) shows what must be seen: the todos
+//! (notes flagged in whir), the "were you away?" question, and the time
+//! drawer when it is open. While there is something to show, or a timer
+//! runs, the dock stays out.
 //!
 //! It never takes the keyboard or becomes the active window: clicking it must
 //! not disturb whatever is about to be captured (an open menu, a tooltip).
@@ -22,8 +23,11 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use std::path::PathBuf;
+
 use whir_core::theme::Theme;
 use whir_core::time::Stamp;
+use whir_core::todos;
 use whir_platform::ipc::{self, Changed};
 use whir_platform::shell;
 use windows::Win32::Foundation::{
@@ -108,6 +112,8 @@ const RAISE_AGAIN_MS: u32 = 250;
 /// (notifications, floating toolbars).
 const KEEP_ON_TOP_MS: u32 = 2000;
 const TICK_MS: u32 = 15_000;
+/// Todos listed on the panel (the rest are counted).
+const TODOS_SHOWN: usize = 3;
 
 /// The dock's window, for the foreground hook (it has no other way to it).
 static DOCK: AtomicIsize = AtomicIsize::new(0);
@@ -153,6 +159,8 @@ struct Dock {
     clock: Clock,
     /// Typing the running timer's note.
     note: Option<NoteEdit>,
+    /// The open todos: title, note, flagged since. Newest first.
+    todos: Vec<(String, PathBuf, Stamp)>,
 }
 
 /// The panel's window and what is on it.
@@ -256,9 +264,30 @@ impl Dock {
             expanded: false,
             clock: Clock::new(),
             note: None,
+            todos: Vec::new(),
         };
+        dock.load_todos();
         dock.relayout();
         dock
+    }
+
+    /// Which notes are todos (whir's window flags them).
+    fn load_todos(&mut self) {
+        let Some(dir) = whir_core::library::resolve_dir() else {
+            self.todos.clear();
+            return;
+        };
+        let all = todos::load(&dir);
+        self.todos = all
+            .open()
+            .into_iter()
+            .filter_map(|t| match t.state {
+                todos::State::Open { since } => {
+                    Some((t.title().to_owned(), dir.join(&t.name), since))
+                }
+                todos::State::Done { .. } => None,
+            })
+            .collect();
     }
 
     /// Find our place on the desktop as it is now, and redraw for it.
@@ -423,7 +452,10 @@ impl Dock {
     /// dock is to stay out for it.
     fn pinned_out(&self) -> bool {
         !self.config.hidden
-            && (self.expanded || self.clock.away.is_some() || self.clock.keeps_out())
+            && (self.expanded
+                || self.clock.away.is_some()
+                || self.clock.keeps_out()
+                || !self.todos.is_empty())
     }
 
     /// After whatever changed what the dock shows: the timer ticking (or
@@ -452,7 +484,14 @@ impl Dock {
     /// Lay out, draw and place the panel, or hide it if there's nothing on
     /// it (or the strip isn't out).
     fn update_panel(&mut self) {
-        let model = self.clock.model(Stamp::now(), self.expanded);
+        let mut model = self.clock.model(Stamp::now(), self.expanded);
+        model.todos = self
+            .todos
+            .iter()
+            .take(TODOS_SHOWN)
+            .map(|(title, ..)| title.clone())
+            .collect();
+        model.more_todos = self.todos.len().saturating_sub(TODOS_SHOWN);
         let fully_out = self.open && self.visible == self.layout.depth;
         let shown = fully_out
             && !model.is_empty()
@@ -812,10 +851,14 @@ impl Dock {
 
     /// The window (or another dock) wrote the timesheet.
     fn shared_changed(&mut self, what: Option<Changed>) {
-        if what == Some(Changed::Time) {
-            self.clock.refresh();
-            self.settle();
+        match what {
+            Some(Changed::Time) => {
+                self.clock.refresh();
+            }
+            Some(Changed::Todos) => self.load_todos(),
+            None => return,
         }
+        self.settle();
     }
 
     // --- the panel ---
@@ -863,9 +906,31 @@ impl Dock {
             Hit::Drop => self.clock.drop_away(),
             Hit::Timesheet => open_settings("timesheet"),
             Hit::AddTimer => open_settings("timers"),
-            Hit::Todo(_) | Hit::TodoDone(_) | Hit::MoreTodos => open_whir(),
+            // The note, in whir; the first not listed for "more".
+            Hit::Todo(i) => self.open_todo(i),
+            Hit::MoreTodos => self.open_todo(TODOS_SHOWN),
+            Hit::TodoDone(i) => {
+                if let Some((_, path, since)) = self.todos.get(i).cloned() {
+                    let done = todos::State::Done {
+                        since,
+                        done: Stamp::now(),
+                    };
+                    if let Err(e) = todos::set(&path, Some(done)) {
+                        crate::report(&e);
+                    }
+                    self.load_todos();
+                }
+            }
         }
         self.settle();
+    }
+
+    fn open_todo(&self, i: usize) {
+        if let Some((_, path, _)) = self.todos.get(i)
+            && let Err(e) = crate::handoff::open_in_whir(path)
+        {
+            crate::report(&e);
+        }
     }
 
     /// Type the running timer's note, in a box over its line.
@@ -1418,6 +1483,8 @@ pub fn run(cmd: Command) -> i32 {
     if cmd == Command::Quit {
         return 0;
     }
+    // Marking a todo done tells the window (it lists them).
+    todos::on_change(|| ipc::notify_changed(Changed::Todos));
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(PCWSTR::null())
             .map(Into::into)

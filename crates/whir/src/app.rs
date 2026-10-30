@@ -68,6 +68,8 @@ pub struct App {
 
     /// Closed tabs whose last save is still being written.
     zombies: Vec<Tab>,
+    /// A note flagged before it had a file: flagged once it's saved.
+    flag_when_saved: Option<u64>,
     close_flow: Option<CloseFlow>,
     /// The user settled every unsaved document: the window may close.
     close_confirmed: bool,
@@ -142,6 +144,7 @@ impl App {
             restart,
             closing_because_empty: false,
             zombies: Vec::new(),
+            flag_when_saved: None,
             close_flow: None,
             close_confirmed: false,
             close_when_idle: false,
@@ -375,6 +378,85 @@ impl App {
         }
     }
 
+    /// Flag the note at `path` as a todo, mark it done, or not.
+    fn set_flag(&mut self, path: PathBuf, flag: drawer::Flag) {
+        use drawer::Flag;
+        use whir_core::todos::State;
+        let now = whir_core::time::Stamp::now();
+        let current = self
+            .open_cx
+            .library
+            .snapshot()
+            .entries
+            .iter()
+            .find(|e| whir_core::library::paths_equal(&e.path, &path))
+            .and_then(|e| e.todo);
+        let next = match (flag, current) {
+            (Flag::Clear, _) => None,
+            (Flag::Open, _) | (Flag::Toggle, None | Some(State::Done { .. })) => {
+                Some(State::Open { since: now })
+            }
+            (Flag::Done | Flag::Toggle, Some(State::Open { since })) => {
+                Some(State::Done { since, done: now })
+            }
+            (Flag::Done, other) => other,
+        };
+        match whir_core::todos::set(&path, next) {
+            Ok(()) => {
+                self.open_cx.library.todos_changed();
+                let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                match next {
+                    Some(State::Open { .. }) => self.show_toast(format!("To do: {name}")),
+                    Some(State::Done { .. }) => self.show_toast(format!("Done: {name}")),
+                    None => {}
+                }
+            }
+            Err(e) => self.show_toast(e),
+        }
+    }
+
+    /// The flag button and Ctrl+Shift+D: the active note's todo flag, on or
+    /// done. A note not saved yet is flagged as soon as it is.
+    fn flag_active(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        match tab.doc.path() {
+            Some(p) if self.open_cx.library.contains(p) => {
+                let path = p.to_owned();
+                self.set_flag(path, drawer::Flag::Toggle);
+            }
+            Some(_) => self.show_toast("Only notes in the notes folder can be todos."),
+            None if tab.doc.is_pristine() => {
+                self.show_toast("Write something first: then it can be a todo.")
+            }
+            None => {
+                self.flag_when_saved = Some(tab.id);
+                tab.doc.flush();
+            }
+        }
+    }
+
+    /// The todo flag of the active tab's note (`None`: it can't have one).
+    fn active_flag(&self) -> Option<Option<whir_core::todos::State>> {
+        let tab = self.tabs.get(self.active)?;
+        if self.own_drawer() != Some(drawer::Mode::Notes) {
+            return None;
+        }
+        let Some(path) = tab.doc.path() else {
+            return Some(None);
+        };
+        Some(
+            self.open_cx
+                .library
+                .snapshot()
+                .entries
+                .iter()
+                .find(|e| whir_core::library::paths_equal(&e.path, path))
+                .and_then(|e| e.todo),
+        )
+    }
+
     /// The drawer the active tab has of its own (screenshots, notes).
     fn own_drawer(&self) -> Option<drawer::Mode> {
         let t = self.tabs.get(self.active)?;
@@ -410,7 +492,7 @@ impl App {
         let mut open = false;
         let (mut new_note, mut new_table, mut save, mut save_as, mut drawer) =
             (false, false, false, false, false);
-        let mut settings = false;
+        let (mut settings, mut flag) = (false, false);
         let (mut find_in_tabs, mut result_step) = (false, None);
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
@@ -436,6 +518,7 @@ impl App {
             save = consume_exact(i, ctrl, Key::S);
             drawer = consume_exact(i, ctrl, Key::E);
             settings = consume_exact(i, ctrl, Key::Comma);
+            flag = consume_exact(i, ctrl_shift, Key::D);
             find_in_tabs = consume_exact(i, ctrl_shift, Key::F);
             if consume_exact(i, Modifiers::SHIFT, Key::F4) {
                 result_step = Some(false);
@@ -488,6 +571,9 @@ impl App {
         }
         if settings {
             self.open_settings("");
+        }
+        if flag {
+            self.flag_active();
         }
         if let Some(forward) = result_step
             && let Some(id) = self.search.step(&mut self.tabs, forward)
@@ -677,6 +763,9 @@ impl App {
             }
             self.pending.push(WindowCommand::Recycle(path));
         }
+        if let Some((path, flag)) = out.flag {
+            self.set_flag(path, flag);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, info: &FrameInfo, hit: &mut HitMap) {
@@ -830,7 +919,8 @@ impl App {
         let mut requests = Vec::new();
 
         // The toolbar: one surface with the active tab, which pours into it.
-        let (mut dock, mut settings) = (false, false);
+        let (mut dock, mut settings, mut flag) = (false, false, false);
+        let todo = self.active_flag();
         Panel::top("toolbar")
             .exact_size(m.toolbar_height)
             .resizable(false)
@@ -881,12 +971,40 @@ impl App {
                 settings = open.clicked;
                 open.response
                     .on_hover_text("Settings: the timesheet, timers, startup (Ctrl+,)");
+                // A note: its todo flag.
+                if let Some(todo) = todo {
+                    let glyph = whir_core::toolbar::Glyph::Flag;
+                    let on = todo.is_some_and(|t| t.is_open());
+                    let ink = on.then_some(theme.note_glyph);
+                    let b =
+                        whir_core::toolbar::tool_button(&mut ours, glyph, on, ink, false, &theme);
+                    flag = b.clicked;
+                    b.response.on_hover_text(match todo {
+                        Some(t) if t.is_open() => "To do: mark it done (Ctrl+Shift+D)",
+                        _ => "Flag as a todo: first in the notes, and on the dock (Ctrl+Shift+D)",
+                    });
+                }
             });
         if dock {
             self.open_dock();
         }
         if settings {
             self.open_settings("");
+        }
+        if flag {
+            self.flag_active();
+        }
+        // A note flagged before it had a file has one now.
+        if let Some(id) = self.flag_when_saved {
+            match self.tabs.iter().find(|t| t.id == id).map(|t| t.doc.path()) {
+                Some(Some(p)) => {
+                    let path = p.to_owned();
+                    self.flag_when_saved = None;
+                    self.set_flag(path, drawer::Flag::Open);
+                }
+                Some(None) => {}
+                None => self.flag_when_saved = None,
+            }
         }
 
         // The drawer along the bottom, for the kind of document that's open.
@@ -910,6 +1028,7 @@ impl App {
         drawer_out.new_note |= out.new_note;
         drawer_out.reveal = drawer_out.reveal.or(out.reveal);
         drawer_out.delete = drawer_out.delete.or(out.delete);
+        drawer_out.flag = drawer_out.flag.or(out.flag);
         drawer_out.rescan = out.rescan;
 
         // Content.
@@ -1251,7 +1370,7 @@ impl Handler for App {
     fn shared_changed(&mut self, what: Changed) {
         match what {
             Changed::Time => whir_core::timesheet::changed_elsewhere(),
-            Changed::Todos => {}
+            Changed::Todos => self.open_cx.library.todos_changed(),
         }
         self.ctx.request_repaint();
     }
@@ -1350,8 +1469,9 @@ impl Handler for App {
         match result {
             Ok(()) => {
                 self.show_toast("Moved to the Recycle Bin");
-                // A capture's highlights go with it.
+                // A capture's highlights go with it, as does a note's todo flag.
                 self.open_cx.captures.forget(path.clone());
+                whir_core::todos::removed(&path);
             }
             Err(e) => self.show_toast(e),
         }

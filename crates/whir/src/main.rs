@@ -153,6 +153,11 @@ fn main() {
         return;
     }
 
+    // Flagging a note tells the dock (it shows the todos).
+    whir_core::todos::on_change(|| {
+        whir_platform::ipc::notify_changed(whir_platform::ipc::Changed::Todos)
+    });
+
     let paths: Vec<PathBuf> = args
         .files
         .iter()

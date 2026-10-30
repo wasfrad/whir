@@ -16,6 +16,7 @@ pub mod texture;
 pub mod theme;
 pub mod time;
 pub mod timesheet;
+pub mod todos;
 pub mod toolbar;
 pub mod trace;
 pub mod waker;

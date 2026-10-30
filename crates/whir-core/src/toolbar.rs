@@ -18,6 +18,7 @@ pub enum Glyph {
     Text,
     Camera,
     Gear,
+    Flag,
 }
 
 /// What happened to a [`tool_button`] this frame.
@@ -159,7 +160,31 @@ fn paint_glyph(painter: &egui::Painter, c: Pos2, glyph: Glyph, color: Color32) {
             painter.circle_stroke(at(0.0, 1.0), 2.8, s);
         }
         Glyph::Gear => paint_gear(painter, c, 7.0, color),
+        Glyph::Flag => paint_flag(painter, c, color, false),
     }
+}
+
+/// A pennant on a pole (a todo), filled when `solid`.
+pub fn paint_flag(painter: &egui::Painter, c: Pos2, color: Color32, solid: bool) {
+    let s = Stroke::new(1.3, color);
+    let at = |x: f32, y: f32| c + vec2(x, y);
+    painter.line_segment([at(-4.5, -6.5), at(-4.5, 7.0)], s);
+    let cloth = vec![at(-4.5, -6.0), at(5.5, -3.0), at(-4.5, 0.5)];
+    if solid {
+        painter.add(Shape::convex_polygon(cloth, color, Stroke::NONE));
+    } else {
+        painter.add(Shape::closed_line(cloth, s));
+    }
+}
+
+/// A tick (done).
+pub fn paint_check(painter: &egui::Painter, c: Pos2, color: Color32) {
+    let s = Stroke::new(1.5, color);
+    let at = |x: f32, y: f32| c + vec2(x, y);
+    painter.add(Shape::line(
+        vec![at(-5.0, 0.5), at(-1.5, 4.0), at(5.5, -4.0)],
+        s,
+    ));
 }
 
 /// A cog with eight teeth, `radius` to their tips (Settings).
