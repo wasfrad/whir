@@ -83,6 +83,8 @@ pub struct Theme {
     pub danger: Color32,
     /// Tab / drawer glyph for notes.
     pub note_glyph: Color32,
+    /// A project's name beside its customer's (the capture dock's time).
+    pub project: Color32,
 
     pub metrics: Metrics,
 }
@@ -201,6 +203,7 @@ impl Theme {
             modal_backdrop: Color32::from_black_alpha(0x80),
             danger: Color32::from_rgb(0xff, 0x6b, 0x6b),
             note_glyph: Color32::from_rgb(0xe8, 0xa3, 0x3d),
+            project: Color32::from_rgb(0xe8, 0xa3, 0x3d),
             metrics: Metrics::default(),
         }
     }
@@ -260,6 +263,8 @@ impl Theme {
             modal_backdrop: Color32::from_black_alpha(0x50),
             danger: Color32::from_rgb(0xc0, 0x1c, 0x28),
             note_glyph: Color32::from_rgb(0xd9, 0x8a, 0x1c),
+            // Darker than the glyph: small text on white needs the contrast.
+            project: Color32::from_rgb(0xa8, 0x5f, 0x00),
             metrics: Metrics::default(),
         }
     }

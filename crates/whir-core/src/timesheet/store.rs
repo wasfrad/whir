@@ -27,8 +27,9 @@ const STATE_FILE: &str = "timers.txt";
 /// How long a change waits for the other process to finish one of its own.
 const LOCK_WAIT_MS: u32 = 3000;
 /// A timer stopped (or switched) within this many seconds of starting leaves
-/// nothing behind: a slip of the mouse, not work.
-const MIN_ENTRY_SECS: i64 = 30;
+/// nothing behind. Only nothing at all: the dock shows a running stopwatch,
+/// and pausing must never take back seconds it has shown.
+const MIN_ENTRY_SECS: i64 = 1;
 
 /// A file as last read, and which version of it that was.
 struct Cached<T> {
@@ -338,6 +339,57 @@ impl Txn<'_> {
         }
     }
 
+    /// Make `timer`'s finished time on `day` exactly `seconds`, as typed into
+    /// the timesheet: more is one entry added after the day's last one (or
+    /// from nine), kept before midnight; less is cut from its latest entries
+    /// back. The running timer's time isn't touched.
+    pub fn set_day(&mut self, timer: u32, day: i64, seconds: i64) {
+        let seconds = seconds.clamp(0, 24 * 3600);
+        let week = self.week_mut(week_of(Stamp::midnight(day)));
+        let mine = |e: &Entry| e.timer == timer && e.day() == day;
+        let has: i64 = week
+            .entries
+            .iter()
+            .filter(|e| mine(e))
+            .map(Entry::seconds)
+            .sum();
+        if seconds > has {
+            let length = seconds - has;
+            let after = week
+                .entries
+                .iter()
+                .filter(|e| e.day() == day)
+                .map(|e| e.end)
+                .max()
+                .unwrap_or(Stamp::at(day, 9, 0, 0));
+            let start = after
+                .min(Stamp::midnight(day + 1).plus(-length))
+                .max(Stamp::midnight(day));
+            week.insert(Entry {
+                timer,
+                start,
+                end: start.plus(length),
+                note: String::new(),
+            });
+        } else {
+            let mut cut = has - seconds;
+            // Entries are in order of start: the latest is the last.
+            while cut > 0 {
+                let Some(i) = week.entries.iter().rposition(mine) else {
+                    break;
+                };
+                let e = &mut week.entries[i];
+                if e.seconds() <= cut {
+                    cut -= e.seconds();
+                    week.entries.remove(i);
+                } else {
+                    e.end = e.end.plus(-cut);
+                    cut = 0;
+                }
+            }
+        }
+    }
+
     /// Take out the `index`th entry of the week starting `monday`.
     pub fn remove(&mut self, monday: i64, index: usize) -> Option<Entry> {
         let week = self.week_mut(monday);
@@ -456,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn starting_another_stops_the_first_and_slips_leave_nothing() {
+    fn starting_another_stops_the_first_and_keeps_every_second() {
         let mut store = temp_store("switch");
         let m = monday();
         let (a, b) = store
@@ -471,10 +523,14 @@ mod tests {
         store
             .update(|tx| {
                 tx.start(a, Stamp::at(m, 9, 0, 0));
-                // A slip: B for ten seconds.
+                // B for ten seconds; then A, and A again (no change).
                 tx.start(b, Stamp::at(m, 10, 0, 0));
                 tx.start(a, Stamp::at(m, 10, 0, 10));
+                tx.start(a, Stamp::at(m, 10, 30, 0));
                 tx.toggle(Stamp::at(m, 11, 0, 0));
+                // Started and stopped in the same second: nothing.
+                tx.start(b, Stamp::at(m, 11, 5, 0));
+                tx.stop(Stamp::at(m, 11, 5, 0));
             })
             .unwrap();
         let week = store.week(m).clone();
@@ -483,13 +539,84 @@ mod tests {
             .iter()
             .map(|e| (e.timer, e.seconds()))
             .collect();
-        assert_eq!(spans, [(a, 3600), (a, 3590)]);
+        assert_eq!(spans, [(a, 3600), (b, 10), (a, 3590)]);
         // Resume starts the last one again.
         store
             .update(|tx| tx.toggle(Stamp::at(m, 12, 0, 0)))
             .unwrap();
-        assert_eq!(store.state().running.as_ref().unwrap().timer, a);
+        assert_eq!(store.state().running.as_ref().unwrap().timer, b);
         let _ = std::fs::remove_dir_all(store.dir());
+    }
+
+    #[test]
+    fn a_day_is_set_to_the_hours_typed() {
+        let mut store = temp_store("set-day");
+        let (m, tue) = (monday(), monday() + 1);
+        let at = |h, min| Stamp::at(tue, h, min, 0);
+        store
+            .update(|tx| {
+                tx.add(1, at(9, 0), at(10, 0), "one");
+                tx.add(2, at(10, 0), at(11, 30), "other project");
+                tx.add(1, at(13, 0), at(13, 45), "two");
+            })
+            .unwrap();
+        let day = |store: &mut Store, timer: u32| -> Vec<(Stamp, Stamp)> {
+            let week = store.week(m).clone();
+            week.entries
+                .iter()
+                .filter(|e| e.timer == timer && e.day() == tue)
+                .map(|e| (e.start, e.end))
+                .collect()
+        };
+        // More: the difference goes after the day's last entry.
+        store.update(|tx| tx.set_day(1, tue, 2 * 3600)).unwrap();
+        assert_eq!(
+            day(&mut store, 1),
+            [
+                (at(9, 0), at(10, 0)),
+                (at(13, 0), at(13, 45)),
+                (at(13, 45), at(14, 0))
+            ]
+        );
+        // Less: cut from the latest back, across entries.
+        store.update(|tx| tx.set_day(1, tue, 3000)).unwrap();
+        assert_eq!(day(&mut store, 1), [(at(9, 0), at(9, 50))]);
+        // The other project is untouched throughout.
+        assert_eq!(day(&mut store, 2), [(at(10, 0), at(11, 30))]);
+        // Nothing: all gone.
+        store.update(|tx| tx.set_day(1, tue, 0)).unwrap();
+        assert!(day(&mut store, 1).is_empty());
+        // A day with nothing yet: from nine. Late in the day: before midnight.
+        store.update(|tx| tx.set_day(3, m, 1800)).unwrap();
+        assert_eq!(
+            day_of(&mut store, 3, m),
+            [(Stamp::at(m, 9, 0, 0), Stamp::at(m, 9, 30, 0))]
+        );
+        store
+            .update(|tx| {
+                tx.add(
+                    4,
+                    Stamp::at(m + 2, 20, 0, 0),
+                    Stamp::at(m + 2, 23, 0, 0),
+                    "",
+                );
+                tx.set_day(5, m + 2, 2 * 3600);
+            })
+            .unwrap();
+        assert_eq!(
+            day_of(&mut store, 5, m + 2),
+            [(Stamp::at(m + 2, 22, 0, 0), Stamp::midnight(m + 3))]
+        );
+        let _ = std::fs::remove_dir_all(store.dir());
+    }
+
+    fn day_of(store: &mut Store, timer: u32, d: i64) -> Vec<(Stamp, Stamp)> {
+        let week = store.week(week_of(Stamp::midnight(d))).clone();
+        week.entries
+            .iter()
+            .filter(|e| e.timer == timer && e.day() == d)
+            .map(|e| (e.start, e.end))
+            .collect()
     }
 
     #[test]

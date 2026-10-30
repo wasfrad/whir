@@ -211,6 +211,12 @@ pub fn format_duration(seconds: i64) -> String {
     format!("{}:{:02}", minutes / 60, minutes % 60)
 }
 
+/// "1:02:33" (a stopwatch: hours, minutes and seconds); negative is "0:00:00".
+pub fn format_clock(seconds: i64) -> String {
+    let s = seconds.max(0);
+    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
 /// Convert a file timestamp to local time (daylight saving rules of that date).
 pub fn to_local(t: SystemTime) -> Option<LocalTime> {
     // FILETIME: 100 ns ticks since 1601-01-01.
@@ -291,9 +297,21 @@ pub fn format_date(t: &LocalTime, with_year: bool) -> String {
 
 /// Abbreviated weekday name ("Mon") in the user's locale.
 pub fn format_weekday(t: &LocalTime) -> String {
+    date_picture(t, "ddd").unwrap_or_else(|| {
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][t.weekday as usize % 7].to_owned()
+    })
+}
+
+/// "Thursday, October 29": a day, spelled out (names in the user's language).
+pub fn format_long_day(t: &LocalTime) -> String {
+    date_picture(t, "dddd, MMMM d").unwrap_or_else(|| format_date(t, false))
+}
+
+/// `t` as a `GetDateFormatEx` picture ("ddd", "MMMM d").
+fn date_picture(t: &LocalTime, picture: &str) -> Option<String> {
     let st = t.to_system();
-    let mut buf = [0u16; 32];
-    let fmt: Vec<u16> = "ddd".encode_utf16().chain(Some(0)).collect();
+    let mut buf = [0u16; 96];
+    let fmt: Vec<u16> = picture.encode_utf16().chain(Some(0)).collect();
     let n = unsafe {
         GetDateFormatEx(
             PCWSTR::null(),
@@ -304,9 +322,7 @@ pub fn format_weekday(t: &LocalTime) -> String {
             PCWSTR::null(),
         )
     };
-    wide_to_string(&buf, n).unwrap_or_else(|| {
-        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][t.weekday as usize % 7].to_owned()
-    })
+    wide_to_string(&buf, n)
 }
 
 #[cfg(test)]
@@ -389,6 +405,11 @@ mod tests {
         assert_eq!(format_duration(65 * 60), "1:05");
         assert_eq!(format_duration(12 * 3600 + 30 * 60), "12:30");
         assert_eq!(format_duration(-5), "0:00");
+        assert_eq!(format_clock(0), "0:00:00");
+        assert_eq!(format_clock(59), "0:00:59");
+        assert_eq!(format_clock(3600 + 2 * 60 + 33), "1:02:33");
+        assert_eq!(format_clock(36 * 3600), "36:00:00");
+        assert_eq!(format_clock(-5), "0:00:00");
     }
 
     #[test]
