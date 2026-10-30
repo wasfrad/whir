@@ -35,7 +35,7 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Ctrl+S · Ctrl+Shift+S | Save · Save as / export a copy |
 | Ctrl+E | The drawer along the bottom: take it to the keyboard · fold it away |
 | Camera button at the right of the toolbar | Open the capture dock |
-| Ctrl+, · the gear next to it | Settings: the timesheet, customers & projects, startup |
+| Ctrl+, · the gear next to it | Settings: the timesheet, customers & projects, PDFs & images, startup & window |
 | Ctrl+Shift+F · F4 / Shift+F4 | Find in all tabs · next / previous result, in any file |
 | Ctrl+W / Ctrl+F4 / middle-click tab | Close tab (closing the last one closes whir) |
 | Right-click a tab | Close others · close tabs to the right · close all (leaves a blank note) · copy path · show in Explorer |
@@ -45,6 +45,11 @@ folder first. If it's blocked there, it will be blocked everywhere.
 | Drag files onto the window | Open them |
 
 A ● on a tab means unsaved changes; closing it (or whir) asks whether to save.
+
+The window opens where it was left: the same size and place, maximized if it was. If
+the mouse is on another monitor, it opens there instead, centred, at the same size.
+**Settings › Startup & window** can keep it exactly where it was instead. It is never
+left off-screen when monitors change.
 
 | Notes | |
 |---|---|
@@ -100,6 +105,11 @@ switch tabs).
 | Ctrl+C · right-click → Copy image | Copy the image as it is on screen, marks and rotation included |
 | Ctrl+Shift+S · right-click → Save a copy… | Save that as a new PNG (Ctrl+S offers the same once there are marks) |
 
+An image opens fitted: a large one shrinks to the window, a small one stays at 100%.
+**Settings › PDFs & images** can open each one at actual size instead, or at the zoom
+used last on any image (← → through a folder too). The right-click menu has Fit to
+window (0) and Actual size (1).
+
 Highlights tint what is under them the way a marker does: white paper takes the colour,
 black text stays black. Text is drawn with a thin halo (white around dark colours, dark
 around white) so it reads on a busy screenshot; resizing it from a corner scales it.
@@ -149,12 +159,20 @@ protected video is black, and the mouse pointer is never in the picture.
 | Ctrl+A · Ctrl+C · right-click | Select all · copy · Copy / Select all / minimap menu |
 | Ctrl+F · Enter / F3 · Shift+Enter / Shift+F3 · Esc | Find · next · previous · close (the match stays selected) |
 | Ctrl+wheel, pinch, Ctrl+= / Ctrl+− | Zoom at the cursor |
-| Ctrl+0 or 0 | Fit width |
+| 0 or Ctrl+0 · 2 · 1 | Fit page (the whole page) · fit width · actual size; also on the right-click menu |
 | Ctrl+↑ Ctrl+↓ · ← → (when nothing to pan) · ˄ ˅ in the minimap | Previous / next page |
 | Ctrl+G · click the page number | Go to page |
 | Click / drag in the minimap | Go to that page / scroll |
 | Ctrl+M | Show / hide the minimap |
-| PgUp PgDn · Space / Shift+Space · Home End · arrows | Scroll by a screen / scroll |
+| PgUp PgDn · Space / Shift+Space · Home End · arrows | Scroll by a screen (by a page at fit page) / scroll |
+
+A PDF opens at the zoom used last on any PDF: pick fit page once (0), and every PDF
+after opens with the whole page in view. Fit width is the starting point until a zoom
+is picked. **Settings › PDFs & images** can fix the zoom instead: fit page, fit width or
+actual size. A PDF opened before goes back to the page and zoom it was left at. These are
+kept for the last 500 files, in `%LOCALAPPDATA%\whir\views.txt`. Each is kept only for
+that same file: another file later saved at the same path, such as a mail attachment's
+temporary copy, opens afresh. Settings can switch this off or forget them all.
 
 The minimap is the document in miniature beside the scrollbar: page thumbnails with a
 slider over what's on screen, the page number and previous/next buttons above them.
@@ -249,7 +267,7 @@ closed week can be read but not changed until it's reopened.
 **Customers & projects** is where timers are set up: customers, their projects and codes,
 renamed in place; a project with time in it is archived (no longer offered in the dock,
 its time kept) rather than deleted. `whir.exe --settings timesheet` (or `timers`,
-`startup`) opens a page directly; the day's total in the dock's ⌄ does that.
+`pdfs`, `startup`) opens a page directly; the day's total in the dock's ⌄ does that.
 
 The timesheet is kept in `Documents\whir\Time` (`WHIR_TIME_DIR` elsewhere): the data in a
 hidden `.whir` folder, one small text file for the projects and what's running and one
@@ -304,17 +322,18 @@ crates/
                   the project picker and today's times, noticing time away;
                   screen grab, the selection overlay, PNG into the screenshots folder
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
-                  input → egui, Open/Save dialogs, Recycle Bin, session end
+                  input → egui, Open/Save dialogs, Recycle Bin, session end, where the window opens
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
                   replace, the notes library, the screenshots store, marks, toolbar widgets,
                   find bar, f64 scrolling, theme tokens, tracing, the timesheet and the todos
-                  (shared with the dock)
+                  (shared with the dock), settings.ini, where each file was left (views.txt)
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
                   marks (highlights multiply-blended, text in egui's own glyphs, baked the same way
                   into copies), PNG encoding, thumbnails
-  whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution
+  whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution;
+                  fit page / fit width, opening at the zoom used last or where the file was left
   whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background
                   sort and a find that parses only rows containing the query,
                   an edit overlay (row piece table + cell overrides) and a streaming save
