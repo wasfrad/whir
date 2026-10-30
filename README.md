@@ -191,6 +191,31 @@ Click a file to fold it; drag the panel's top edge to resize it; Esc closes it. 
 own find shows the same search, so F3 steps through that file's matches. Right-click a
 cell → **Find "…" in all tabs** searches for its value as a whole cell.
 
+## Time tracking
+
+Time is tracked against projects, each a customer's, from the capture dock: its third
+button is the timer, and the ▾ next to it opens the time drawer.
+
+| Dock | |
+|---|---|
+| Timer button | Pause the running timer · resume the last one (it shows the time so far, h:mm) |
+| ▾ | The time drawer: what's running and its note, every project with today's time, today's and this week's totals |
+| A project in the drawer | Start it (whatever was running stops; one runs at a time) |
+| ■ · the note line | Stop · say what the time is for (Enter keeps it, Esc doesn't) |
+| Timesheet · + | Open the week in whir · add customers and projects |
+
+While a timer runs the dock stays out, so the time is always in sight (an option), and the
+tray icon's tooltip says what's running. Leave the PC (no keyboard or mouse for ten
+minutes, a locked screen, sleep, or whir not running at all) and the dock asks, once you're
+back, whether that time counts: **Keep it**, or **Drop it** to stop the timer when you left
+and start it again from when you came back. A start that's switched away within half a
+minute leaves nothing behind.
+
+The timesheet is kept in `Documents\whir\Time` (`WHIR_TIME_DIR` elsewhere): the data in a
+hidden `.whir` folder, one small text file for the projects and what's running and one
+per week (Monday to Sunday) for its entries. Entries are kept to the second and never
+span midnight (they're cut there), so every day's total is the sum of its entries.
+
 ## Building
 
 Requirements: Rust (MSVC toolchain), Visual Studio Build Tools with the Windows SDK.
@@ -235,13 +260,14 @@ crates/
   whir/           exe: startup ordering, single instance, tabs + title bar, toolbar, shortcuts,
                   save/close prompts, the drawer, the Find in all tabs panel, --register
   whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer;
+                  the tray icon, the timer and time drawer, noticing time away;
                   screen grab, the selection overlay, PNG into the screenshots folder
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
                   input → egui, Open/Save dialogs, Recycle Bin, session end
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
                   replace, the notes library, the screenshots store, marks, toolbar widgets,
-                  find bar, f64 scrolling, theme tokens, tracing
+                  find bar, f64 scrolling, theme tokens, tracing, the timesheet (shared with the dock)
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
                   marks (highlights multiply-blended, text in egui's own glyphs, baked the same way
@@ -266,6 +292,9 @@ Principles:
   - Images keep a screen-sized level and decode full resolution only when you zoom in.
   - The CSV index costs about 1.25 MB per 10M rows.
   - PDF tiles live in an LRU with a 96 MB budget.
+- **Two processes, one timesheet.** The dock and the window both change the timesheet (and
+  the todos): each change is made under a named mutex from a fresh read of the files, written
+  atomically, and announced to the other process with a registered window message.
 
 ### Theming / re_ui
 

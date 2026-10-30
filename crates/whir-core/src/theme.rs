@@ -3,7 +3,7 @@
 //! Everything visual that isn't egui's own widget styling lives here, so a future
 //! vendored design system only has to replace this module.
 
-use egui::Color32;
+pub use egui::Color32;
 
 #[derive(Clone, Debug)]
 pub struct Theme {

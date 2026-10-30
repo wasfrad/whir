@@ -5,7 +5,7 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -86,6 +86,16 @@ impl Tray {
             let _ = Shell_NotifyIconW(NIM_DELETE, &data);
             if Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
                 let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
+            }
+        }
+    }
+
+    /// The text shown when the pointer rests on the icon.
+    pub fn set_tip(&mut self, tip: &str) {
+        if self.tip != tip {
+            self.tip = tip.to_owned();
+            unsafe {
+                let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
             }
         }
     }

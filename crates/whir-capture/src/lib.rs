@@ -6,6 +6,8 @@
 //! from the main window: plain Win32 and GDI, no renderer, so it can sit on
 //! the desktop all day for a few megabytes.
 
+mod away;
+mod clock;
 mod config;
 mod dock;
 mod geom;
@@ -13,8 +15,10 @@ mod grab;
 mod handoff;
 mod instance;
 mod monitors;
+mod note_edit;
 mod overlay;
 mod paint;
+mod panel;
 mod place;
 mod store;
 mod targets;

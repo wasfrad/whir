@@ -1,5 +1,6 @@
 //! Where the dock sits: flush against one edge of a monitor's work area,
-//! somewhere along it, with only a grip showing until it slides out.
+//! somewhere along it, with only a grip showing until it slides out; and
+//! where its panel (todos, the time drawer) goes beside it.
 
 use crate::geom::{Point, Rect};
 use crate::monitors::Monitor;
@@ -46,19 +47,26 @@ pub struct Layout {
     pub grip: i32,
     pub button: i32,
     pub pad: i32,
+    /// The last button (the ▾ that opens the panel) is this long.
+    pub chevron: i32,
+    /// The panel's width.
+    pub panel: i32,
 }
 
-pub const BUTTONS: usize = 2;
+/// Capture, Delay, the timer, and the ▾ that opens the time drawer.
+pub const BUTTONS: usize = 4;
 
 pub fn layout(dpi: u32) -> Layout {
     let px = |v: i32| (v * dpi.max(48) as i32 + 48) / 96;
-    let (button, pad, grip) = (px(34), px(4), px(8));
+    let (button, pad, grip, chevron) = (px(34), px(4), px(8), px(20));
     Layout {
         depth: button + 2 * pad + grip,
-        length: BUTTONS as i32 * (button + pad) + pad,
+        length: (BUTTONS as i32 - 1) * (button + pad) + chevron + 2 * pad,
         grip,
         button,
         pad,
+        chevron,
+        panel: px(300),
     }
 }
 
@@ -83,9 +91,18 @@ impl Layout {
         }
     }
 
+    /// How long button `i` is, along the strip.
+    fn extent(&self, i: usize) -> i32 {
+        if i + 1 == BUTTONS {
+            self.chevron
+        } else {
+            self.button
+        }
+    }
+
     /// Button `i` inside the panel.
     pub fn button_rect(&self, edge: Edge, i: usize) -> Rect {
-        let along = self.pad + i as i32 * (self.button + self.pad);
+        let along = self.pad + (0..i).map(|j| self.extent(j) + self.pad).sum::<i32>();
         // Past the grip when the grip comes first.
         let across = self.pad
             + if matches!(edge, Edge::Right | Edge::Bottom) {
@@ -93,13 +110,36 @@ impl Layout {
             } else {
                 0
             };
-        let (x, y) = if edge.is_side() {
-            (across, along)
+        let (x, y, w, h) = if edge.is_side() {
+            (across, along, self.button, self.extent(i))
         } else {
-            (along, across)
+            (along, across, self.extent(i), self.button)
         };
-        Rect::new(x, y, x + self.button, y + self.button)
+        Rect::new(x, y, x + w, y + h)
     }
+}
+
+/// Where the panel beside the strip goes (the strip open at `anchor`), for a
+/// panel of `size` (width, height). Below the strip, or above it on the
+/// bottom edge or when there is more room above; flush with the screen edge
+/// on the sides, lined up with the strip on the top and bottom. It is cut to
+/// the room there is. Also says whether it is below.
+pub fn panel_rect(work: Rect, edge: Edge, anchor: Rect, size: (i32, i32)) -> (Rect, bool) {
+    let (w, h) = size;
+    let (below_room, above_room) = (work.bottom - anchor.bottom, anchor.top - work.top);
+    let below = match edge {
+        Edge::Top => true,
+        Edge::Bottom => false,
+        Edge::Left | Edge::Right => below_room >= h || below_room >= above_room,
+    };
+    let h = h.min(if below { below_room } else { above_room }).max(0);
+    let x = match edge {
+        Edge::Left => work.left,
+        Edge::Right => work.right - w,
+        Edge::Top | Edge::Bottom => anchor.left.min(work.right - w).max(work.left),
+    };
+    let y = if below { anchor.bottom } else { anchor.top - h };
+    (Rect::new(x, y, x + w, y + h), below)
 }
 
 /// Where the open panel is on screen: against `edge` of `work`, `offset`
@@ -252,8 +292,9 @@ mod tests {
     #[test]
     fn the_layout_scales_and_buttons_fit_beside_the_grip() {
         let l = layout(96);
-        assert_eq!((l.depth, l.length, l.grip), (50, 80, 8));
+        assert_eq!((l.depth, l.length, l.grip), (50, 142, 8));
         assert_eq!(layout(192).depth, 100);
+        assert_eq!(layout(192).length, 284);
         for edge in Edge::ALL {
             let (w, h) = l.size(edge);
             let panel = Rect::new(0, 0, w, h);
@@ -263,13 +304,29 @@ mod tests {
                 let b = l.button_rect(edge, i);
                 assert_eq!(b.intersect(panel), b, "{edge:?} button {i}");
                 assert!(b.intersect(grip).is_empty(), "{edge:?} button {i}");
-                assert_eq!((b.width(), b.height()), (l.button, l.button));
+                let along = if i + 1 == BUTTONS {
+                    l.chevron
+                } else {
+                    l.button
+                };
+                let size = if edge.is_side() {
+                    (l.button, along)
+                } else {
+                    (along, l.button)
+                };
+                assert_eq!((b.width(), b.height()), size, "{edge:?} button {i}");
+                for j in i + 1..BUTTONS {
+                    assert!(b.intersect(l.button_rect(edge, j)).is_empty());
+                }
             }
-            assert!(
-                l.button_rect(edge, 0)
-                    .intersect(l.button_rect(edge, 1))
-                    .is_empty()
-            );
+            // The last one ends a pad short of the end.
+            let last = l.button_rect(edge, BUTTONS - 1);
+            let end = if edge.is_side() {
+                last.bottom
+            } else {
+                last.right
+            };
+            assert_eq!(end + l.pad, l.length, "{edge:?}");
         }
     }
 
@@ -321,6 +378,44 @@ mod tests {
             }
             assert!(viewport(edge, a, 0).0.is_empty());
         }
+    }
+
+    #[test]
+    fn the_panel_sits_beside_the_strip_inside_the_work_area() {
+        let work = Rect::new(0, 0, 2560, 1392);
+        let l = layout(96);
+        let size = (l.panel, 400);
+        for edge in Edge::ALL {
+            for offset in [0, 500, 1000] {
+                let a = anchor(work, edge, offset, &l);
+                let (p, below) = panel_rect(work, edge, a, size);
+                assert_eq!(p.intersect(work), p, "{edge:?} {offset}");
+                assert!(p.intersect(a).is_empty(), "{edge:?} {offset} overlaps");
+                // Touching the strip.
+                if below {
+                    assert_eq!(p.top, a.bottom, "{edge:?} {offset}");
+                } else {
+                    assert_eq!(p.bottom, a.top, "{edge:?} {offset}");
+                }
+                assert_eq!(p.width(), l.panel);
+                match edge {
+                    Edge::Left => assert_eq!(p.left, work.left),
+                    Edge::Right => assert_eq!(p.right, work.right),
+                    Edge::Top => assert!(below),
+                    Edge::Bottom => assert!(!below),
+                }
+            }
+        }
+        // Low on a side edge: above the strip.
+        let a = anchor(work, Edge::Left, 1000, &l);
+        assert!(!panel_rect(work, Edge::Left, a, size).1);
+        // Too tall for the room: cut to it.
+        let a = anchor(work, Edge::Top, 500, &l);
+        let (p, _) = panel_rect(work, Edge::Top, a, (l.panel, 5000));
+        assert_eq!(p.bottom, work.bottom);
+        // At the right end of the top edge: pulled in to stay on screen.
+        let a = anchor(work, Edge::Top, 1000, &l);
+        assert_eq!(panel_rect(work, Edge::Top, a, size).0.right, work.right);
     }
 
     #[test]

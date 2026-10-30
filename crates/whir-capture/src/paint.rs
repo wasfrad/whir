@@ -3,13 +3,15 @@
 //! layered window. Shapes get their soft edges from signed distances; glyphs
 //! are rendered by GDI in white on black and used as coverage masks.
 
+use std::cell::RefCell;
+
 use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS,
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, FW_NORMAL, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetGlyphIndicesW,
-    GetTextExtentPoint32W, HBITMAP, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT, TextOutW,
+    DeleteObject, FW_NORMAL, FW_SEMIBOLD, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetGlyphIndicesW,
+    GetTextExtentExPointW, GetTextExtentPoint32W, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows::core::HSTRING;
 
@@ -171,11 +173,19 @@ impl Canvas<'_> {
 
     /// `mask` in `color`, centred on `center`.
     pub fn mask(&mut self, center: Point, mask: &Mask, color: [u8; 3]) {
-        let (left, top) = (center.0 - mask.width / 2, center.1 - mask.height / 2);
+        self.mask_at(
+            (center.0 - mask.width / 2, center.1 - mask.height / 2),
+            mask,
+            color,
+        );
+    }
+
+    /// `mask` in `color`, its top-left corner at `at`.
+    pub fn mask_at(&mut self, at: Point, mask: &Mask, color: [u8; 3]) {
         for y in 0..mask.height {
             for x in 0..mask.width {
                 let c = mask.coverage[(y * mask.width + x) as usize];
-                self.blend(left + x, top + y, color, c as f32 / 255.0);
+                self.blend(at.0 + x, at.1 + y, color, c as f32 / 255.0);
             }
         }
     }
@@ -188,48 +198,115 @@ pub struct Mask {
     pub coverage: Vec<u8>,
 }
 
+thread_local! {
+    /// Fonts made so far, by face, size and weight: a dock uses a handful,
+    /// and redraws often.
+    static FONTS: RefCell<Vec<((String, i32, bool), HFONT)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn font(face: &str, px: i32, bold: bool) -> HFONT {
+    FONTS.with_borrow_mut(|fonts| {
+        if let Some((_, f)) = fonts
+            .iter()
+            .find(|((n, p, b), _)| n == face && *p == px && *b == bold)
+        {
+            return *f;
+        }
+        let weight = if bold { FW_SEMIBOLD } else { FW_NORMAL };
+        let f = unsafe {
+            CreateFontW(
+                -px,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                ANTIALIASED_QUALITY,
+                0,
+                &HSTRING::from(face),
+            )
+        };
+        fonts.push(((face.to_owned(), px, bold), f));
+        f
+    })
+}
+
 /// `text` in `face`, `px` pixels tall. `None` if the font has no glyph for it
 /// (Windows would quietly substitute another font's, or a box).
 pub fn text_mask(text: &str, face: &str, px: i32) -> Option<Mask> {
-    let units: Vec<u16> = text.encode_utf16().collect();
+    render(text, font(face, px, false), None, true)
+}
+
+/// A line of text in `face` (semibold if `bold`), cut short with "…" if it
+/// is wider than `max_width`. Characters the font lacks come from Windows'
+/// fallback fonts (names and notes can be in any script).
+pub fn label_mask(text: &str, face: &str, px: i32, bold: bool, max_width: i32) -> Option<Mask> {
+    render(text, font(face, px, bold), Some(max_width), false)
+}
+
+fn render(text: &str, font: HFONT, max_width: Option<i32>, strict: bool) -> Option<Mask> {
+    let mut units: Vec<u16> = text.encode_utf16().collect();
     unsafe {
-        let font = CreateFontW(
-            -px,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
-            0,
-            &HSTRING::from(face),
-        );
         // Measured on a scratch surface, then drawn on one that fits.
-        let mut probe = Surface::new(1, 1)?;
+        let probe = Surface::new(1, 1)?;
         let previous = SelectObject(probe.dc(), HGDIOBJ(font.0));
-        let mut glyphs = vec![0u16; units.len()];
-        let found = GetGlyphIndicesW(
-            probe.dc(),
-            &HSTRING::from(text),
-            units.len() as i32,
-            glyphs.as_mut_ptr(),
-            GGI_MARK_NONEXISTING_GLYPHS,
-        );
-        let mut size = SIZE::default();
-        let measured = GetTextExtentPoint32W(probe.dc(), &units, &mut size).as_bool();
-        SelectObject(probe.dc(), previous);
-        let _ = probe.pixels();
-        drop(probe);
-        let missing = found == u32::MAX || glyphs.contains(&0xFFFF);
-        if missing || !measured || size.cx <= 0 || size.cy <= 0 {
-            let _ = DeleteObject(HGDIOBJ(font.0));
-            return None;
+        let measure = |units: &[u16]| {
+            let mut size = SIZE::default();
+            GetTextExtentPoint32W(probe.dc(), units, &mut size)
+                .as_bool()
+                .then_some(size)
+        };
+        if strict {
+            let mut glyphs = vec![0u16; units.len()];
+            let found = GetGlyphIndicesW(
+                probe.dc(),
+                &HSTRING::from(text),
+                units.len() as i32,
+                glyphs.as_mut_ptr(),
+                GGI_MARK_NONEXISTING_GLYPHS,
+            );
+            if found == u32::MAX || glyphs.contains(&0xFFFF) {
+                SelectObject(probe.dc(), previous);
+                return None;
+            }
         }
+        let mut size = measure(&units);
+        if let (Some(max), Some(s)) = (max_width, size)
+            && s.cx > max
+        {
+            // As much as fits before an ellipsis.
+            let ellipsis = [0x2026u16];
+            let room = max - measure(&ellipsis).map_or(0, |e| e.cx);
+            let mut fit = 0i32;
+            let mut whole = SIZE::default();
+            let _ = GetTextExtentExPointW(
+                probe.dc(),
+                windows::core::PCWSTR(units.as_ptr()),
+                units.len() as i32,
+                room.max(0),
+                Some(&mut fit),
+                None,
+                &mut whole,
+            );
+            units.truncate(fit.max(0) as usize);
+            // Not half a surrogate pair, nor a trailing space.
+            if units.last().is_some_and(|&u| (0xD800..0xDC00).contains(&u)) {
+                units.pop();
+            }
+            while units.last() == Some(&(' ' as u16)) {
+                units.pop();
+            }
+            units.push(ellipsis[0]);
+            size = measure(&units);
+        }
+        SelectObject(probe.dc(), previous);
+        drop(probe);
+        let size = size.filter(|s| s.cx > 0 && s.cy > 0)?;
 
         let mut surface = Surface::new(size.cx, size.cy)?;
         let dc = surface.dc();
@@ -238,7 +315,6 @@ pub fn text_mask(text: &str, face: &str, px: i32) -> Option<Mask> {
         SetTextColor(dc, COLORREF(0x00ff_ffff));
         let _ = TextOutW(dc, 0, 0, &units);
         SelectObject(dc, previous);
-        let _ = DeleteObject(HGDIOBJ(font.0));
         // White on black: any channel is the coverage.
         let coverage = surface.pixels().iter().map(|p| (p >> 8) as u8).collect();
         Some(Mask {
@@ -325,5 +401,21 @@ mod tests {
         // Windows ships one of its icon fonts.
         let camera = icon_mask('\u{E722}', 20).expect("an icon font");
         assert!(camera.coverage.iter().any(|&c| c > 200));
+    }
+
+    #[test]
+    fn long_labels_are_cut_short_to_fit() {
+        let full = label_mask("Acme Corporation · Onboarding", "Segoe UI", 14, false, 1000)
+            .expect("a label");
+        let cut = label_mask("Acme Corporation · Onboarding", "Segoe UI", 14, false, 80)
+            .expect("a label");
+        assert!(cut.width <= 80, "{}", cut.width);
+        assert!(cut.width < full.width);
+        // Semibold is wider than regular.
+        let bold = label_mask("Acme", "Segoe UI", 14, true, 1000).unwrap();
+        let regular = label_mask("Acme", "Segoe UI", 14, false, 1000).unwrap();
+        assert!(bold.width >= regular.width);
+        // Unlike a strict mask, a label draws what it can.
+        assert!(label_mask("\u{F8FF}x", "Segoe UI", 14, false, 100).is_some());
     }
 }
