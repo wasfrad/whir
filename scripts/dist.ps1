@@ -1,4 +1,4 @@
-# Release build + portable folder: dist\whir\{whir.exe, pdfium.dll, licenses}.
+# Release build + portable folder: dist\whir\{whir.exe, pdfium.dll, README.md, licenses}.
 # Copy that folder anywhere (no installer, no admin), then run:
 #   whir.exe --register     (per-user "Open with" entries)
 $ErrorActionPreference = "Stop"
@@ -25,6 +25,8 @@ try {
     New-Item -ItemType Directory -Force (Join-Path $out "licenses") | Out-Null
     Copy-Item (Join-Path $root "target\release\whir.exe") $out
     Copy-Item $pdfium $out
+    # The user guide travels with the folder; .md opens in whir itself once registered.
+    Copy-Item (Join-Path $root "docs\guide.md") (Join-Path $out "README.md")
     Copy-Item (Join-Path $root "vendor\pdfium\LICENSE") (Join-Path $out "licenses\pdfium-LICENSE.txt")
     Copy-Item (Join-Path $root "vendor\pdfium\licenses\*") (Join-Path $out "licenses")
 
