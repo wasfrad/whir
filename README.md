@@ -209,45 +209,47 @@ cell → **Find "…" in all tabs** searches for its value as a whole cell.
 
 ## Time tracking
 
-Time is tracked against projects, each a customer's, from the capture dock: its third
-button is the timer, and the ▾ next to it opens the time drawer.
+Time is tracked against projects, each a customer's, from the capture dock. After its
+camera and delay buttons it is a stopwatch: ▶ / ⏸, today's time on the project to the
+second, and the customer over the project.
 
 | Dock | |
 |---|---|
-| Timer button | Pause the running timer · resume the last one (it shows the time so far, h:mm) |
-| ▾ | The time drawer: what's running and its note, every project with today's time, today's and this week's totals |
-| A project in the drawer | Start it (whatever was running stops; one runs at a time) |
-| ■ · the note line | Stop · say what the time is for (Enter keeps it, Esc doesn't) |
-| Timesheet · + | Open the week in whir · add customers and projects |
+| ▶ · ⏸ | Time the project · pause (it carries on from the same time when played again, and starts over each day) |
+| The customer and project | Pick another project: every customer's, with today's time on each. Picked, it starts; if another is running, the dock asks **Switch** or **Keep it running** first (one runs at a time) |
+| ⌄ | Today's times: each project with time today, and the day's total (click it for the timesheet) |
 
 While a timer runs the dock stays out, so the time is always in sight (an option), and the
 tray icon's tooltip says what's running. Leave the PC (no keyboard or mouse for ten
 minutes, a locked screen, sleep, or whir not running at all) and the dock asks, once you're
 back, whether that time counts: **Keep it**, or **Drop it** to stop the timer when you left
-and start it again from when you came back. A start that's switched away within half a
-minute leaves nothing behind.
+and start it again from when you came back. Every second timed is kept, however short.
 
 ### The timesheet
 
-Settings (Ctrl+, or the gear in the toolbar) opens on the week at a glance: a row per
-project, grouped by customer with its code, a column per day, in hours rounded the way
-they go on the timecard (to 0.25 h per project per day by default; 0.1 h or exact in
-**Customers & projects**), the running timer included as it goes.
+Settings (Ctrl+, or the gear in the toolbar) opens on the week at a glance, and that's
+where time is put down too: a row per project, grouped by customer with its code, a column
+per day, in hours rounded the way they go on the timecard (to 0.25 h per project per day
+by default; 0.1 h or exact in **Customers & projects**). The running project's today is
+marked and counts up, and a line above the table shows it to the second, with **Pause**.
 
 | Timesheet | |
 |---|---|
 | ‹ › · This week | Previous / next week · back to this one |
-| Click a day's hours | Its entries: change a start or an end (`9:05`, `1:20 pm`, `1320`), the note, or delete it |
-| + Add time | By start and end, or a length (`1:30`, `1.5`, `90m`) after the day's last entry |
+| Click a day · type `2`, `1.5`, `1:30` or `90m` · Enter | That day's hours on the project (more is added after the day's last entry; less is taken off the latest; empty or `0` clears it) |
+| Tab / Shift+Tab · Esc | Put them down and go to the next / previous day · leave it as it was |
+| The last row: Customer… then Project… | Add a project to the week (or a new customer or project, with its code), then type its hours |
+| Below the table | The chosen day's entries: change a start or an end (`9:05`, `1:20 pm`, `1320`), the note, or delete it |
 | Copy | The week as a table, to paste into Excel or an email |
 | Close week… | Close it out: writes `<Monday> timesheet.csv` (the hours per project per day, with each day's notes) and `<Monday> entries.csv` (every entry, to the second) to the Time folder |
 | Reopen · Closed weeks | Open a closed week again · every closed week with its hours, its CSV a click away (it opens in whir as a table) |
 
-On Monday the timesheet says when last week is still open, with a way straight to it.
+On Monday the timesheet says when last week is still open, with a way straight to it. A
+closed week can be read but not changed until it's reopened.
 **Customers & projects** is where timers are set up: customers, their projects and codes,
 renamed in place; a project with time in it is archived (no longer offered in the dock,
 its time kept) rather than deleted. `whir.exe --settings timesheet` (or `timers`,
-`startup`) opens a page directly; the dock's **Timesheet** button does that.
+`startup`) opens a page directly; the day's total in the dock's ⌄ does that.
 
 The timesheet is kept in `Documents\whir\Time` (`WHIR_TIME_DIR` elsewhere): the data in a
 hidden `.whir` folder, one small text file for the projects and what's running and one
@@ -297,8 +299,9 @@ Much of the baseline memory is the GPU driver itself. On weak or remote machines
 crates/
   whir/           exe: startup ordering, single instance, tabs + title bar, toolbar, shortcuts,
                   save/close prompts, the bottom drawer, Settings, the Find in all tabs panel, --register
-  whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer;
-                  the tray icon, the timer and time drawer, noticing time away;
+  whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer
+                  (its text through DirectWrite, in software); the tray icon, the stopwatch,
+                  the project picker and today's times, noticing time away;
                   screen grab, the selection overlay, PNG into the screenshots folder
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
                   input → egui, Open/Save dialogs, Recycle Bin, session end
