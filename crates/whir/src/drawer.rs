@@ -1,6 +1,6 @@
 //! The app-wide drawer: Notes and Images tabs, independent of the open document.
-//! Notes include tables and put open todos first; Images is a filmstrip of
-//! captures, newest first. PDFs and CSVs initially fold it down to its header,
+//! Notes include tables and put open todos first; Images is a grid of
+//! fixed-size capture thumbnails, newest first. PDFs and CSVs initially fold it down to its header,
 //! but either drawer tab or Ctrl+E opens it again.
 //!
 //! The selected tab, shared height and each pane's manual fold state are remembered.
@@ -31,7 +31,7 @@ use crate::tab_bar::paint_kind_glyph;
 pub enum Mode {
     /// Every note and table in the notes folder.
     Notes,
-    /// The screenshots, as a filmstrip.
+    /// The screenshots, as a thumbnail grid.
     Shots,
 }
 
@@ -61,7 +61,8 @@ const MIN_HEIGHT: f32 = 96.0;
 const DEFAULT_HEIGHT: f32 = 170.0;
 /// Notes are laid out in columns at least this wide.
 const NOTE_COLUMN: f32 = 280.0;
-/// A filmstrip picture's box is this wide for its height.
+/// Thumbnail dimensions in points, independent of the drawer's height.
+const SHOT_THUMB_H: f32 = 100.0;
 const SHOT_ASPECT: f32 = 1.6;
 const SHOT_LABEL_H: f32 = 20.0;
 const SHOT_GAP: f32 = 10.0;
@@ -79,7 +80,7 @@ pub struct Drawer {
     /// A newly opened capture may not have reached the background list yet.
     pending_active: bool,
     scroll_to: bool,
-    /// Made the first time the filmstrip is shown.
+    /// Made the first time the image grid is shown.
     thumbs: Option<Thumbs>,
     /// The unfolded pane last frame (opening one may need a rescan).
     shown: Option<Mode>,
@@ -246,16 +247,13 @@ impl Drawer {
         let mode = self.mode;
         let columns = ui
             .ctx()
-            .data(|d| d.get_temp::<usize>(Id::new("whir.drawer.columns")))
+            .data(|d| d.get_temp::<usize>(Id::new(("whir.drawer.columns", mode.key()))))
             .unwrap_or(1);
         let (mut open, mut delete, mut close, mut step) = (false, false, false, 0isize);
         let mut flag = false;
         ui.input_mut(|i| {
             let none = Modifiers::NONE;
-            let (across, down) = match mode {
-                Mode::Shots => (1, 1),
-                Mode::Notes => (1, columns as isize),
-            };
+            let (across, down) = (1, columns as isize);
             for (key, d) in [
                 (Key::ArrowLeft, -across),
                 (Key::ArrowRight, across),
@@ -358,7 +356,7 @@ impl Drawer {
                     match mode {
                         Mode::Notes => self.notes(&mut body_ui, lib, active, theme, &mut out),
                         Mode::Shots => {
-                            self.filmstrip(&mut body_ui, shots, cx, active, theme, &mut out)
+                            self.images(&mut body_ui, shots, cx, active, theme, &mut out)
                         }
                     }
                 });
@@ -522,7 +520,7 @@ impl Drawer {
                     Align2::LEFT_CENTER,
                     match self.mode {
                         Mode::Notes => "↑ ↓ ← → · Enter · F to flag · Delete · Esc",
-                        Mode::Shots => "← → · Enter · Delete · Esc",
+                        Mode::Shots => "↑ ↓ ← → · Enter · Delete · Esc",
                     },
                     FontId::proportional(theme.metrics.small_text_size),
                     theme.text_dim,
@@ -598,7 +596,7 @@ impl Drawer {
         let row_h = theme.metrics.drawer_row_h;
         let columns = ((ui.available_width() / NOTE_COLUMN).floor() as usize).max(1);
         ui.ctx()
-            .data_mut(|d| d.insert_temp(Id::new("whir.drawer.columns"), columns));
+            .data_mut(|d| d.insert_temp(Id::new(("whir.drawer.columns", "notes")), columns));
         let rows = entries.len().div_ceil(columns);
         let selected = self.pane(Mode::Notes).selected.min(entries.len() - 1);
         self.pane(Mode::Notes).selected = selected;
@@ -654,8 +652,8 @@ impl Drawer {
             .data_mut(|d| d.insert_temp(Id::new("whir.drawer.notes.off"), res.state.offset.y));
     }
 
-    /// The screenshots side by side, as tall as the drawer.
-    fn filmstrip(
+    /// Fixed-size thumbnails wrap into rows; a taller drawer reveals more rows.
+    fn images(
         &mut self,
         ui: &mut egui::Ui,
         shots: &CapturesSnapshot,
@@ -682,35 +680,15 @@ impl Drawer {
         }
         let selected = self.pane(Mode::Shots).selected.min(entries.len() - 1);
         self.pane(Mode::Shots).selected = selected;
-        let thumb_h = (ui.available_height() - SHOT_LABEL_H - 12.0).max(40.0);
-        let card_w = thumb_h * SHOT_ASPECT;
-        let step = card_w + SHOT_GAP;
-        let area = ui.max_rect();
-        // The wheel turns the strip (it only goes sideways).
-        if ui.rect_contains_pointer(area) {
-            ui.input_mut(|i| {
-                if i.smooth_scroll_delta.x == 0.0 {
-                    i.smooth_scroll_delta.x = i.smooth_scroll_delta.y;
-                    i.smooth_scroll_delta.y = 0.0;
-                }
-            });
-        }
-        let off_id = Id::new("whir.drawer.shots.off");
-        let mut scroll = egui::ScrollArea::horizontal()
+        let card_w = SHOT_THUMB_H * SHOT_ASPECT;
+        let card_h = SHOT_THUMB_H + SHOT_LABEL_H;
+        let row_h = card_h + SHOT_GAP;
+        let scroll_to = std::mem::take(&mut self.scroll_to);
+        let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .id_salt("whir.drawer.shots");
-        if std::mem::take(&mut self.scroll_to) {
-            let target = selected as f32 * step;
-            let view = area.width();
-            let off = ui.ctx().data(|d| d.get_temp::<f32>(off_id)).unwrap_or(0.0);
-            scroll = scroll.horizontal_scroll_offset(if target < off {
-                target
-            } else if target + card_w > off + view {
-                target + card_w - view
-            } else {
-                off
-            });
-        }
+            // Selection jumps must keep up with rapid arrow/Home/End input.
+            .animated(false)
+            .id_salt("whir.drawer.shots.grid");
         let thumbs = self
             .thumbs
             .get_or_insert_with(|| Thumbs::new(cx.textures.clone(), cx.waker.clone()));
@@ -719,39 +697,55 @@ impl Drawer {
         let now = whir_core::time::now_local();
         let focused = self.focused;
         let mut clicked = None;
-        let res = scroll.show_viewport(ui, |ui, viewport| {
-            let total = vec2(entries.len() as f32 * step, ui.available_height());
-            let (strip, _) = ui.allocate_exact_size(total, Sense::hover());
-            let first = (viewport.left() / step).floor().max(0.0) as usize;
-            let last = ((viewport.right() / step).ceil() as usize).min(entries.len());
-            for idx in first..last {
-                let e = &entries[idx];
-                let left = strip.left() + idx as f32 * step;
-                let card = Rect::from_min_size(
-                    pos2(left, strip.top() + 4.0),
-                    vec2(card_w, thumb_h + SHOT_LABEL_H),
-                );
-                let on = focused && idx == selected;
-                if shot_card(
-                    ui,
-                    card,
-                    thumb_h,
-                    e,
-                    thumbs,
-                    is(active, &e.path),
-                    on,
-                    &now,
-                    now_sys,
-                    theme,
-                    out,
-                ) {
-                    clicked = Some(idx);
+        scroll.show_viewport(ui, |ui, viewport| {
+            // Measure inside the scroll area so the scrollbar can't obscure a column.
+            let width = ui.available_width();
+            let columns = ((width + SHOT_GAP) / (card_w + SHOT_GAP)).floor().max(1.0) as usize;
+            let columns_id = Id::new(("whir.drawer.columns", "shots"));
+            let previous_columns = ui.ctx().data(|d| d.get_temp::<usize>(columns_id));
+            ui.ctx().data_mut(|d| d.insert_temp(columns_id, columns));
+            let rows = entries.len().div_ceil(columns);
+            let (grid, _) =
+                ui.allocate_exact_size(vec2(width, rows as f32 * row_h), Sense::hover());
+            let card_at = |index: usize| {
+                Rect::from_min_size(
+                    grid.min
+                        + vec2(
+                            (index % columns) as f32 * (card_w + SHOT_GAP),
+                            (index / columns) as f32 * row_h + 4.0,
+                        ),
+                    vec2(card_w, card_h),
+                )
+            };
+            if scroll_to || (focused && previous_columns != Some(columns)) {
+                ui.scroll_to_rect(card_at(selected), None);
+            }
+            let first = (viewport.top() / row_h).floor().max(0.0) as usize;
+            let last = ((viewport.bottom() / row_h).ceil() as usize).min(rows);
+            for row in first..last {
+                for col in 0..columns {
+                    let idx = row * columns + col;
+                    let Some(e) = entries.get(idx) else { break };
+                    let on = focused && idx == selected;
+                    if shot_card(
+                        ui,
+                        card_at(idx),
+                        SHOT_THUMB_H,
+                        e,
+                        thumbs,
+                        is(active, &e.path),
+                        on,
+                        &now,
+                        now_sys,
+                        theme,
+                        out,
+                    ) {
+                        clicked = Some(idx);
+                    }
                 }
             }
         });
         thumbs.end_frame();
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(off_id, res.state.offset.x));
         if let Some(idx) = clicked {
             self.pending_active = false;
             self.pane(Mode::Shots).selected = idx;
@@ -871,7 +865,7 @@ fn note_row(
     clicked
 }
 
-/// One screenshot in the filmstrip: its picture with its highlights, and
+/// One screenshot in the grid: its picture with its highlights, and
 /// when it was taken. True if clicked.
 #[allow(clippy::too_many_arguments)]
 fn shot_card(
@@ -1263,6 +1257,8 @@ mod tests {
         ctx: egui::Context,
         drawer: Drawer,
         cx: OpenCx,
+        shots: CapturesSnapshot,
+        size: egui::Vec2,
         time: f64,
     }
 
@@ -1274,8 +1270,39 @@ mod tests {
                 ctx,
                 drawer: drawer(),
                 cx: cx(Path::new(r"C:\whir-drawer-test")),
+                shots: CapturesSnapshot::default(),
+                size: vec2(800.0, 600.0),
                 time: 0.0,
             }
+        }
+
+        fn with_images(name: &str, count: usize) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("whir-drawer-images-{name}-{}", std::process::id(),));
+            let dir = root.join("Screenshots");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..count {
+                std::fs::write(dir.join(format!("shot-{i:03}.png")), b"fixture").unwrap();
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let waker = whir_core::Waker::new(move || {
+                let _ = tx.send(());
+            });
+            let mut h = Self::new();
+            h.cx = cx(&root);
+            h.cx.captures = whir_core::Captures::at(dir, waker);
+            h.cx.captures.scan();
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            h.shots = h.cx.captures.snapshot();
+            assert_eq!(h.shots.entries.len(), count);
+            // Layout tests need cards, not background decoding or GPU textures.
+            for entry in std::sync::Arc::make_mut(&mut h.shots.entries) {
+                entry.cloud_only = true;
+            }
+            h.drawer.select(Mode::Shots);
+            std::fs::remove_dir_all(root).unwrap();
+            h
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Out {
@@ -1283,19 +1310,30 @@ mod tests {
             let input = egui::RawInput {
                 events,
                 time: Some(self.time),
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, self.size)),
                 ..Default::default()
             };
             let mut out = Out::default();
             let output = self.ctx.run_ui(input, |ui| {
+                let mut keys = Out::default();
+                if self.drawer.mode() == Mode::Shots {
+                    self.drawer.keys(
+                        ui,
+                        self.shots.entries.len(),
+                        |i| self.shots.entries.get(i).map(|e| e.path.clone()),
+                        &mut keys,
+                    );
+                }
                 out = self.drawer.show(
                     ui,
                     &LibrarySnapshot::default(),
-                    &CapturesSnapshot::default(),
+                    &self.shots,
                     &self.cx,
                     None,
                     &Theme::light(),
                 );
+                out.open = keys.open.or(out.open.take());
+                out.delete = keys.delete.or(out.delete.take());
                 egui::CentralPanel::default().show(ui, |_| {});
             });
             output.drop_without_applying_deltas();
@@ -1314,6 +1352,61 @@ mod tests {
                 .rect
         }
 
+        fn image_id(&self, index: usize) -> Id {
+            Id::new(("whir.drawer.shot", &self.shots.entries[index].path))
+        }
+
+        fn image_visible(&self, index: usize) -> bool {
+            self.ctx
+                .read_response(self.image_id(index))
+                .is_some_and(|r| r.interact_rect.contains_rect(r.rect))
+        }
+
+        fn visible_images(&self) -> usize {
+            (0..self.shots.entries.len())
+                .filter(|&i| self.image_visible(i))
+                .count()
+        }
+
+        fn press_key(&mut self, key: Key) -> Out {
+            let event = |pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            };
+            let out = self.frame(vec![event(true)]);
+            self.frame(vec![event(false)]);
+            out
+        }
+
+        fn finish_scroll(&mut self) {
+            for _ in 0..12 {
+                self.frame(vec![]);
+            }
+        }
+
+        fn resize_drawer(&mut self, delta: f32) {
+            let from = pos2(400.0, self.rect(Id::new("whir.drawer.fold")).top());
+            let to = from + vec2(0.0, delta);
+            self.frame(vec![egui::Event::PointerMoved(from)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }]);
+            self.frame(vec![egui::Event::PointerMoved(to)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            self.settle();
+        }
+
         fn click(&mut self, pos: egui::Pos2) -> Out {
             self.frame(vec![egui::Event::PointerMoved(pos)]);
             let button = |pressed| egui::Event::PointerButton {
@@ -1328,6 +1421,101 @@ mod tests {
     }
 
     #[test]
+    fn expanding_images_shows_more_rows_without_enlarging_thumbnails() {
+        let mut h = Harness::with_images("resize", 24);
+        h.settle();
+        let size = h.rect(h.image_id(0)).size();
+        let visible = h.visible_images();
+        assert!(visible > 0);
+        h.resize_drawer(-200.0);
+        assert_eq!(h.rect(h.image_id(0)).size(), size);
+        assert!(
+            h.visible_images() > visible,
+            "extra height shows more images"
+        );
+        h.resize_drawer(200.0);
+        assert_eq!(h.rect(h.image_id(0)).size(), size);
+        assert_eq!(h.visible_images(), visible);
+    }
+
+    #[test]
+    fn image_grid_reflows_and_keyboard_navigation_follows_its_rows() {
+        let mut h = Harness::with_images("keyboard", 25);
+        h.settle();
+        h.resize_drawer(-200.0);
+        let size = h.rect(h.image_id(0)).size();
+        let columns_id = Id::new(("whir.drawer.columns", "shots"));
+        let wide_columns = h.ctx.data(|d| d.get_temp::<usize>(columns_id)).unwrap();
+        h.size.x = 540.0;
+        h.settle();
+        let columns = h.ctx.data(|d| d.get_temp::<usize>(columns_id)).unwrap();
+        assert!(columns < wide_columns);
+        assert_eq!(h.rect(h.image_id(0)).size(), size);
+        let next_row = h.rect(h.image_id(columns));
+        assert_eq!(next_row.left(), h.rect(h.image_id(0)).left());
+        assert!(next_row.top() > h.rect(h.image_id(0)).bottom());
+        h.drawer.toggle();
+        h.press_key(Key::ArrowDown);
+        assert_eq!(h.drawer.pane(Mode::Shots).selected, columns);
+        h.press_key(Key::ArrowRight);
+        assert_eq!(h.drawer.pane(Mode::Shots).selected, columns + 1);
+        h.press_key(Key::ArrowUp);
+        assert_eq!(h.drawer.pane(Mode::Shots).selected, 1);
+        h.press_key(Key::End);
+        let last = h.shots.entries.len() - 1;
+        assert_eq!(h.drawer.pane(Mode::Shots).selected, last);
+        h.finish_scroll();
+        assert!(
+            h.image_visible(last),
+            "keyboard selection scrolls into view"
+        );
+        assert_eq!(
+            h.press_key(Key::Enter).open,
+            Some(h.shots.entries[last].path.clone())
+        );
+    }
+
+    #[test]
+    fn image_keyboard_navigation_can_reverse_before_scrolling_finishes() {
+        let mut h = Harness::with_images("rapid-keys", 100);
+        h.settle();
+        h.drawer.toggle();
+        h.press_key(Key::End);
+        h.press_key(Key::Home);
+        h.finish_scroll();
+        assert_eq!(h.drawer.pane(Mode::Shots).selected, 0);
+        assert!(
+            h.image_visible(0),
+            "rapid navigation must keep the selection in view"
+        );
+    }
+
+    #[test]
+    fn image_grid_scrolls_vertically_and_only_draws_visible_rows() {
+        let mut h = Harness::with_images("scroll", 100);
+        h.settle();
+        h.resize_drawer(-150.0);
+        let size = h.rect(h.image_id(0)).size();
+        assert!(h.ctx.read_response(h.image_id(99)).is_none());
+        let pos = h.rect(h.image_id(0)).center();
+        h.frame(vec![egui::Event::PointerMoved(pos)]);
+        h.frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -300.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        }]);
+        h.finish_scroll();
+        let first = (0..100).find(|&i| h.image_visible(i)).unwrap();
+        assert!(first > 0, "wheel moves down through the grid");
+        assert!(h.ctx.read_response(h.image_id(0)).is_none());
+        assert!(h.ctx.read_response(h.image_id(99)).is_none());
+        assert_eq!(h.rect(h.image_id(first)).size(), size);
+        let out = h.click(h.rect(h.image_id(first)).center());
+        assert_eq!(out.open, Some(h.shots.entries[first].path.clone()));
+    }
+
+    #[test]
     fn switching_libraries_keeps_the_resized_drawer_height() {
         let mut h = Harness::new();
         h.settle();
@@ -1336,23 +1524,7 @@ mod tests {
             h.click(h.rect(Id::new(("whir.drawer.tab", mode.key()))).center());
             h.settle();
             let top = h.rect(fold).top();
-            let from = pos2(400.0, top);
-            let to = from + vec2(0.0, delta);
-            h.frame(vec![egui::Event::PointerMoved(from)]);
-            h.frame(vec![egui::Event::PointerButton {
-                pos: from,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            }]);
-            h.frame(vec![egui::Event::PointerMoved(to)]);
-            h.frame(vec![egui::Event::PointerButton {
-                pos: to,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            }]);
-            h.settle();
+            h.resize_drawer(delta);
             let resized_top = h.rect(fold).top();
             assert!(
                 (resized_top - top - delta).abs() < 1.0,

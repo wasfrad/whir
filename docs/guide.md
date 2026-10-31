@@ -84,10 +84,11 @@ note keeps its flag, and a deleted one takes it along.
 
 The drawer along the bottom of the window is available everywhere, with **Notes** and
 **Images** tabs. Notes lists the notes and tables in the notes folder, open todos first,
-then newest first, wrapped into columns. Images shows the screenshots as a filmstrip,
-their highlights and text drawn on them. The selected drawer tab stays selected when
-you switch documents and is remembered next time you open whir. Both drawer tabs share
-one height, so switching between Notes and Images keeps the panel the same size.
+then newest first, wrapped into columns. Images shows screenshots as fixed-size
+thumbnails in a grid, their highlights and text drawn on them. A taller drawer reveals
+more rows rather than enlarging the thumbnails. The selected drawer tab stays selected
+when you switch documents and is remembered next time you open whir. Both drawer tabs
+share one height, so switching between Notes and Images keeps the panel the same size.
 
 Opening or switching to a PDF or CSV folds the drawer down to its header by default.
 Both drawer tabs stay visible: click either one or use Ctrl+E to unfold it without
@@ -95,9 +96,9 @@ leaving the document. This automatic fold doesn't change your fold preference fo
 notes and images.
 
 - **Notes · Images**: select that library and unfold the drawer
-- **Click the chevron or unused header space · drag its top edge**: fold or unfold · make it taller or shorter (bigger pictures, more notes); height is shared and remembered, while manual folding is remembered for each library
+- **Click the chevron or unused header space · drag its top edge**: fold or unfold · make it taller or shorter (more rows of images or notes); height is shared and remembered, while manual folding is remembered for each library
 - **Click · right-click**: open · show in Explorer / delete (to the Recycle Bin)
-- **Wheel over the filmstrip**: scroll it sideways
+- **Wheel over the images**: scroll through the thumbnail rows
 - **Ctrl+E, then ↑ ↓ ← → · Enter · Delete · Esc**: keyboard: move · open · delete · give the keyboard back
 
 ## Images
@@ -150,8 +151,8 @@ whir is done from that icon.
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots`, immediately added to the
 drawer's **Images** tab, and opens in whir with the highlighter in hand. You don't need
-to switch documents to refresh the filmstrip. Their highlights and text are kept beside
-them (in `Screenshots\.whir`), so the PNG is always the capture itself.
+to switch documents to refresh the thumbnail grid. Their highlights and text are kept
+beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
 
 whir starts with Windows (a per-user entry under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, set the first time the dock runs;
