@@ -1,13 +1,10 @@
-//! The drawer along the bottom of the window: what's near the open document.
-//! A screenshot's tab has a filmstrip of the screenshots, newest first; a
-//! note's (or a table's in the notes folder) has every note, todos first.
-//! Other images and PDFs have none, though Ctrl+E brings up the notes there
-//! too, until the tab changes.
+//! The app-wide drawer: Notes and Images tabs, independent of the open document.
+//! Notes include tables and put open todos first; Images is a filmstrip of
+//! captures, newest first. PDFs and CSVs initially fold it down to its header,
+//! but either drawer tab or Ctrl+E opens it again.
 //!
-//! It folds down to its header and is dragged taller or shorter by its top
-//! edge: a taller filmstrip has bigger pictures, a taller notes list more
-//! rows. Both are remembered, for each kind. Notes flagged as todos are
-//! marked (⚑ to do, ✓ done) and the open ones come first.
+//! The selected tab, shared height and each pane's manual fold state are remembered.
+//! Automatic folding never changes those preferences.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -29,7 +26,7 @@ use crate::keys::consume_exact;
 use crate::reltime::{self, SystemFormats};
 use crate::tab_bar::paint_kind_glyph;
 
-/// Which drawer a tab has.
+/// Which library the drawer shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Every note and table in the notes folder.
@@ -47,22 +44,15 @@ impl Mode {
     }
 }
 
-/// The drawer for a tab showing `kind` (from `path`): screenshots for a
-/// capture, notes for a note or a table in the notes folder, else none.
-pub fn mode_for(kind: DocKind, path: Option<&Path>, cx: &OpenCx) -> Option<Mode> {
-    match kind {
-        DocKind::Image if path.is_some_and(|p| cx.captures.contains(p)) => Some(Mode::Shots),
-        DocKind::Note => Some(Mode::Notes),
-        DocKind::Csv if path.is_some_and(|p| cx.library.contains(p)) => Some(Mode::Notes),
-        _ => None,
-    }
+enum HeaderAction {
+    Toggle,
+    Select(Mode),
 }
 
-/// Folded or not, and how tall, for one kind of drawer.
+/// Fold state and keyboard selection for one library.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Pane {
     open: bool,
-    height: f32,
     /// The keyboard's place in the list.
     selected: usize,
 }
@@ -78,19 +68,20 @@ const SHOT_GAP: f32 = 10.0;
 
 pub struct Drawer {
     panes: [Pane; 2],
-    /// Ctrl+E on a tab without a drawer: its notes drawer, while that tab
-    /// stays active.
-    summoned: Option<u64>,
-    /// Ctrl+E: arrows, Enter, Delete and Esc are the drawer's (while the
-    /// tab it was pressed on stays the active one).
+    mode: Mode,
+    height: f32,
+    document: Option<(u64, DocKind)>,
+    /// PDF/CSV activation folds the drawer without overwriting manual preferences.
+    auto_collapsed: bool,
+    /// Ctrl+E: arrows, Enter, Delete and Esc belong to the drawer.
     focused: bool,
-    focus_tab: Option<u64>,
-    /// The active document last frame (its picture is scrolled into view).
     last_active: Option<PathBuf>,
+    /// A newly opened capture may not have reached the background list yet.
+    pending_active: bool,
     scroll_to: bool,
     /// Made the first time the filmstrip is shown.
     thumbs: Option<Thumbs>,
-    /// The mode shown last frame (a new one may want its folder rescanned).
+    /// The unfolded pane last frame (opening one may need a rescan).
     shown: Option<Mode>,
 }
 
@@ -121,26 +112,43 @@ pub enum Flag {
 }
 
 fn load_pane(mode: Mode) -> Pane {
-    let key = |k: &str| format!("drawer.{}.{k}", mode.key());
     Pane {
-        open: settings::get_bool(&key("open"), true),
-        height: settings::get_str(&key("height"))
-            .and_then(|h| h.parse::<f32>().ok())
-            .filter(|h| h.is_finite())
-            .unwrap_or(DEFAULT_HEIGHT)
-            .max(MIN_HEIGHT),
+        open: settings::get_bool(&format!("drawer.{}.open", mode.key()), true),
         selected: 0,
     }
 }
 
+fn saved_height(shared: Option<&str>, legacy: Option<&str>) -> f32 {
+    let parse = |s: &str| s.parse::<f32>().ok().filter(|h| h.is_finite());
+    shared
+        .and_then(parse)
+        .or_else(|| legacy.and_then(parse))
+        .unwrap_or(DEFAULT_HEIGHT)
+        .max(MIN_HEIGHT)
+}
+
 impl Default for Drawer {
     fn default() -> Self {
+        let mode = match settings::get_str("drawer.tab").as_deref() {
+            Some("shots") => Mode::Shots,
+            _ => Mode::Notes,
+        };
+        // Migrate the selected pane's old height once, so changing tabs and
+        // restarting cannot bring back the other pane's size.
+        let height = saved_height(
+            settings::get_str("drawer.height").as_deref(),
+            settings::get_str(&format!("drawer.{}.height", mode.key())).as_deref(),
+        );
+        settings::set_str("drawer.height", &height.to_string());
         Self {
             panes: [load_pane(Mode::Notes), load_pane(Mode::Shots)],
-            summoned: None,
+            mode,
+            height,
+            document: None,
+            auto_collapsed: false,
             focused: false,
-            focus_tab: None,
             last_active: None,
+            pending_active: false,
             scroll_to: false,
             thumbs: None,
             shown: None,
@@ -153,50 +161,72 @@ impl Drawer {
         &mut self.panes[mode as usize]
     }
 
-    fn set_open(&mut self, mode: Mode, open: bool) {
+    fn is_open(&self) -> bool {
+        self.panes[self.mode as usize].open && !self.auto_collapsed
+    }
+
+    fn set_open(&mut self, open: bool) {
+        self.auto_collapsed = false;
+        if !open {
+            self.focused = false;
+        }
+        let mode = self.mode;
         if self.pane(mode).open != open {
             self.pane(mode).open = open;
             settings::set_bool(&format!("drawer.{}.open", mode.key()), open);
         }
     }
 
-    /// The drawer the active tab has, if any (summoned ones included).
-    pub fn mode(&mut self, tab: Option<u64>, own: Option<Mode>) -> Option<Mode> {
-        if self.summoned.is_some() && self.summoned != tab {
-            self.summoned = None;
-        }
-        if self.focus_tab != tab {
-            self.focused = false;
-        }
-        own.or(self.summoned.map(|_| Mode::Notes))
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
-    /// Ctrl+E: unfold the drawer and take the keyboard; again to give it
-    /// back and fold it. A tab without a drawer gets the notes.
-    pub fn toggle(&mut self, tab: Option<u64>, own: Option<Mode>) {
-        if self.focus_tab != tab {
-            self.focus_tab = tab;
+    /// Only a document change applies the default fold; repainting must not
+    /// undo the user's decision to unfold it on a PDF or table.
+    pub fn sync_document(&mut self, document: Option<(u64, DocKind)>) {
+        if self.document != document {
+            self.document = document;
             self.focused = false;
+            self.auto_collapsed =
+                document.is_some_and(|(_, kind)| matches!(kind, DocKind::Pdf | DocKind::Csv));
         }
-        let mode = match own {
-            Some(m) => m,
-            None if self.summoned.is_some() && self.summoned == tab => {
-                self.summoned = None;
-                self.focused = false;
-                return;
-            }
-            None => {
-                self.summoned = tab;
-                Mode::Notes
-            }
-        };
-        if self.focused && self.pane(mode).open {
-            self.focused = false;
-            self.set_open(mode, false);
+    }
+
+    fn select(&mut self, mode: Mode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.last_active = None;
+            self.pending_active = false;
+            settings::set_str("drawer.tab", mode.key());
+        }
+        self.set_open(true);
+        self.scroll_to = true;
+    }
+
+    /// Ctrl+E: unfold the selected pane and take the keyboard; again to
+    /// give it back and fold it.
+    pub fn toggle(&mut self) {
+        if self.focused && self.is_open() {
+            self.set_open(false);
         } else {
             self.focused = true;
             self.scroll_to = true;
-            self.set_open(mode, true);
+            self.set_open(true);
+        }
+    }
+
+    fn follow_active(&mut self, active: Option<&Path>, index: impl FnOnce() -> Option<usize>) {
+        if self.last_active.as_deref() != active {
+            self.last_active = active.map(Path::to_path_buf);
+            self.pending_active = active.is_some();
+            self.scroll_to = true;
+        }
+        if self.pending_active
+            && let Some(at) = index()
+        {
+            self.pane(self.mode).selected = at;
+            self.pending_active = false;
+            self.scroll_to = true;
         }
     }
 
@@ -205,15 +235,15 @@ impl Drawer {
     pub fn keys(
         &mut self,
         ui: &mut egui::Ui,
-        mode: Option<Mode>,
         n: usize,
         path_at: impl Fn(usize) -> Option<PathBuf>,
         out: &mut Out,
     ) {
-        let Some(mode) = mode.filter(|_| self.focused) else {
+        if !self.focused || !self.is_open() {
             self.focused = false;
             return;
-        };
+        }
+        let mode = self.mode;
         let columns = ui
             .ctx()
             .data(|d| d.get_temp::<usize>(Id::new("whir.drawer.columns")))
@@ -246,6 +276,7 @@ impl Drawer {
             flag = mode == Mode::Notes && consume_exact(i, none, Key::F);
         });
         if n > 0 && step != 0 {
+            self.pending_active = false;
             let pane = self.pane(mode);
             pane.selected = (pane.selected as isize + step).clamp(0, n as isize - 1) as usize;
             self.scroll_to = true;
@@ -263,19 +294,13 @@ impl Drawer {
         }
         if close {
             self.focused = false;
-            if self.summoned.is_some() {
-                self.summoned = None;
-            }
         }
     }
 
-    /// The drawer for `mode` along the bottom of `ui` (before the document
-    /// takes what is left).
-    #[allow(clippy::too_many_arguments)]
+    /// The drawer along the bottom of `ui`, before the document takes what is left.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        mode: Option<Mode>,
         lib: &LibrarySnapshot,
         shots: &CapturesSnapshot,
         cx: &OpenCx,
@@ -283,39 +308,33 @@ impl Drawer {
         theme: &Theme,
     ) -> Out {
         let mut out = Out::default();
-        if mode != self.shown {
-            self.shown = mode;
-            out.rescan = mode;
+        let mode = self.mode;
+        let open = self.is_open();
+        let shown = open.then_some(mode);
+        if shown != self.shown {
+            self.shown = shown;
+            out.rescan = shown;
         }
-        let Some(mode) = mode else {
-            self.focused = false;
-            return out;
-        };
-        if self.last_active.as_deref() != active {
-            self.last_active = active.map(Path::to_path_buf);
-            self.scroll_to = true;
-            // The keyboard starts from the document that's open.
-            let at = match mode {
-                Mode::Notes => lib.entries.iter().position(|e| is(active, &e.path)),
-                Mode::Shots => shots.entries.iter().position(|e| is(active, &e.path)),
-            };
-            if let Some(at) = at {
-                self.pane(mode).selected = at;
-            }
-        }
+        let listed_active = active.filter(|p| match mode {
+            Mode::Notes => cx.library.contains(p),
+            Mode::Shots => cx.captures.contains(p),
+        });
+        self.follow_active(listed_active, || match mode {
+            Mode::Notes => lib.entries.iter().position(|e| is(active, &e.path)),
+            Mode::Shots => shots.entries.iter().position(|e| is(active, &e.path)),
+        });
         let header_h = theme.metrics.drawer_header_h;
-        let pane = *self.pane(mode);
         let frame = Frame::NONE.fill(theme.drawer_bg);
-        let id = Id::new(("whir.drawer", mode.key()));
-        let mut toggle = false;
-        let drawn = if !pane.open {
+        let id = Id::new("whir.drawer");
+        let mut action = None;
+        let drawn = if !open {
             Panel::bottom(id.with("folded"))
                 .exact_size(header_h)
                 .resizable(false)
                 .show_separator_line(false)
                 .frame(frame)
                 .show(ui, |ui| {
-                    toggle = self.header(ui, mode, lib, shots, cx, false, theme, &mut out);
+                    action = self.header(ui, lib, shots, cx, false, theme, &mut out);
                 })
                 .response
                 .rect
@@ -324,7 +343,7 @@ impl Drawer {
             let shown = Panel::bottom(id)
                 .resizable(true)
                 .show_separator_line(false)
-                .default_size(pane.height.min(max))
+                .default_size(self.height.min(max))
                 .size_range(MIN_HEIGHT..=max)
                 .frame(frame)
                 .show(ui, |ui| {
@@ -332,7 +351,7 @@ impl Drawer {
                     let all = ui.max_rect();
                     let head = Rect::from_min_size(all.min, vec2(all.width(), header_h));
                     let mut head_ui = ui.new_child(egui::UiBuilder::new().max_rect(head));
-                    toggle = self.header(&mut head_ui, mode, lib, shots, cx, true, theme, &mut out);
+                    action = self.header(&mut head_ui, lib, shots, cx, true, theme, &mut out);
                     let body = Rect::from_min_max(pos2(all.left(), head.bottom()), all.max);
                     let mut body_ui = ui
                         .new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(10.0, 4.0))));
@@ -346,18 +365,21 @@ impl Drawer {
             // Dragged taller or shorter: remembered once it's let go.
             let height = shown.response.rect.height();
             let released = ui.input(|i| !i.pointer.any_down());
-            if (height - pane.height).abs() > 0.5 && released {
-                self.pane(mode).height = height;
-                settings::set_str(
-                    &format!("drawer.{}.height", mode.key()),
-                    &format!("{height:.0}"),
-                );
+            if (height - self.height).abs() > 0.5 && released {
+                self.height = height;
+                settings::set_str("drawer.height", &format!("{height:.0}"));
             }
             shown.response.rect
         };
-        if toggle {
-            self.set_open(mode, !pane.open);
-            self.scroll_to = !pane.open;
+        if let Some(action) = action {
+            match action {
+                HeaderAction::Toggle => {
+                    self.set_open(!open);
+                    self.scroll_to = !open;
+                }
+                HeaderAction::Select(mode) => self.select(mode),
+            }
+            ui.ctx().request_repaint();
         }
         // A click elsewhere gives the keyboard back to the document.
         let pressed_at = ui.input(|i| {
@@ -375,36 +397,39 @@ impl Drawer {
         out
     }
 
-    /// The header: what's listed and how many, the drawer's buttons, and a
-    /// fold toggle. Returns whether it was clicked to fold or unfold.
+    /// Both tabs stay visible when folded. Only the chevron and unused
+    /// header space fold it; selecting a tab always opens that library.
     #[allow(clippy::too_many_arguments)]
     fn header(
         &mut self,
         ui: &mut egui::Ui,
-        mode: Mode,
         lib: &LibrarySnapshot,
         shots: &CapturesSnapshot,
         cx: &OpenCx,
         open: bool,
         theme: &Theme,
         out: &mut Out,
-    ) -> bool {
+    ) -> Option<HeaderAction> {
         let rect = ui.max_rect();
         let painter = ui.painter();
         painter.line_segment(
             [rect.left_top(), rect.right_top()],
             Stroke::new(1.0, theme.separator),
         );
-        let resp = ui.interact(rect, Id::new("whir.drawer.header"), Sense::CLICK);
-        if resp.hovered() {
+        let fold_rect = Rect::from_min_size(rect.min, vec2(28.0, rect.height()));
+        let fold = ui
+            .interact(fold_rect, Id::new("whir.drawer.fold"), Sense::CLICK)
+            .on_hover_text(if open {
+                "Collapse drawer"
+            } else {
+                "Expand drawer"
+            });
+        if fold.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
-        let (title, count) = match mode {
-            Mode::Notes => ("Notes", lib.entries.len()),
-            Mode::Shots => ("Screenshots", shots.entries.len()),
-        };
+        let mut action = fold.clicked().then_some(HeaderAction::Toggle);
         // ▸ folded, ▾ open.
-        let c = pos2(rect.left() + 16.0, rect.center().y);
+        let c = pos2(rect.left() + 14.0, rect.center().y);
         let s = Stroke::new(1.3, theme.text_dim);
         let pts = if open {
             vec![
@@ -420,41 +445,98 @@ impl Drawer {
             ]
         };
         painter.add(egui::Shape::line(pts, s));
-        let name = painter.layout_no_wrap(title.to_owned(), FontId::proportional(13.5), theme.text);
-        let name_w = name.size().x;
-        painter.galley(
-            pos2(rect.left() + 28.0, rect.center().y - name.size().y / 2.0),
-            name,
-            theme.text,
-        );
-        if count > 0 {
-            painter.text(
-                pos2(rect.left() + 34.0 + name_w, rect.center().y),
-                Align2::LEFT_CENTER,
+        let mut left = fold_rect.right();
+        for (mode, title, count) in [
+            (Mode::Notes, "Notes", lib.entries.len()),
+            (Mode::Shots, "Images", shots.entries.len()),
+        ] {
+            let selected = mode == self.mode;
+            let color = if selected { theme.text } else { theme.text_dim };
+            let name = painter.layout_no_wrap(title.to_owned(), FontId::proportional(13.5), color);
+            let count = painter.layout_no_wrap(
                 count.to_string(),
                 FontId::proportional(theme.metrics.small_text_size),
                 theme.text_dim,
             );
-        }
-        if self.focused {
-            painter.text(
-                pos2(rect.left() + 60.0 + name_w, rect.center().y),
-                Align2::LEFT_CENTER,
-                match mode {
-                    Mode::Notes => "↑ ↓ ← → · Enter · F to flag · Delete · Esc",
-                    Mode::Shots => "← → · Enter · Delete · Esc",
-                },
-                FontId::proportional(theme.metrics.small_text_size),
+            let tab_rect = Rect::from_min_size(
+                pos2(left, rect.top() + 3.0),
+                vec2(name.size().x + count.size().x + 26.0, rect.height() - 6.0),
+            );
+            let resp = ui.interact(
+                tab_rect,
+                Id::new(("whir.drawer.tab", mode.key())),
+                Sense::CLICK,
+            );
+            if selected || resp.hovered() {
+                painter.rect_filled(
+                    tab_rect,
+                    4.0,
+                    if selected {
+                        theme.drawer_item_active
+                    } else {
+                        theme.drawer_item_hover
+                    },
+                );
+            }
+            if selected {
+                painter.line_segment(
+                    [tab_rect.left_bottom(), tab_rect.right_bottom()],
+                    Stroke::new(2.0, theme.accent),
+                );
+            }
+            let name_w = name.size().x;
+            painter.galley(
+                pos2(left + 10.0, rect.center().y - name.size().y / 2.0),
+                name,
+                color,
+            );
+            painter.galley(
+                pos2(left + 16.0 + name_w, rect.center().y - count.size().y / 2.0),
+                count,
                 theme.text_dim,
             );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                action = Some(HeaderAction::Select(mode));
+            }
+            left = tab_rect.right() + 4.0;
+        }
+        let spare = Rect::from_min_max(
+            pos2(left, rect.top()),
+            pos2((rect.right() - 74.0).max(left), rect.bottom()),
+        );
+        let resp = ui.interact(spare, Id::new("whir.drawer.header"), Sense::CLICK);
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            action = Some(HeaderAction::Toggle);
+        }
+        if self.focused {
+            painter
+                .with_clip_rect(spare.intersect(ui.clip_rect()))
+                .text(
+                    pos2(left + 10.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    match self.mode {
+                        Mode::Notes => "↑ ↓ ← → · Enter · F to flag · Delete · Esc",
+                        Mode::Shots => "← → · Enter · Delete · Esc",
+                    },
+                    FontId::proportional(theme.metrics.small_text_size),
+                    theme.text_dim,
+                );
         }
         let mut buttons = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(rect.shrink2(vec2(10.0, 0.0)))
+                .max_rect(Rect::from_min_max(
+                    pos2(spare.right(), rect.top()),
+                    pos2(rect.right() - 10.0, rect.bottom()),
+                ))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        let mut clicked_button = false;
-        match mode {
+        match self.mode {
             Mode::Notes => {
                 if let Some(dir) = cx.library.dir()
                     && icon_button(&mut buttons, Icon::Folder, theme)
@@ -462,14 +544,12 @@ impl Drawer {
                         .clicked()
                 {
                     out.reveal = Some(dir.to_path_buf());
-                    clicked_button = true;
                 }
                 if icon_button(&mut buttons, Icon::Plus, theme)
                     .on_hover_text("New note (Ctrl+N)")
                     .clicked()
                 {
                     out.new_note = true;
-                    clicked_button = true;
                 }
             }
             Mode::Shots => {
@@ -479,18 +559,16 @@ impl Drawer {
                         .clicked()
                 {
                     out.reveal = Some(dir.to_path_buf());
-                    clicked_button = true;
                 }
                 if icon_button(&mut buttons, Icon::Camera, theme)
                     .on_hover_text("Open the capture dock")
                     .clicked()
                 {
                     out.capture = true;
-                    clicked_button = true;
                 }
             }
         }
-        resp.clicked() && !clicked_button
+        action
     }
 
     fn notes(
@@ -566,6 +644,7 @@ impl Drawer {
                         theme,
                         out,
                     ) {
+                        self.pending_active = false;
                         self.pane(Mode::Notes).selected = idx;
                     }
                 }
@@ -674,6 +753,7 @@ impl Drawer {
         ui.ctx()
             .data_mut(|d| d.insert_temp(off_id, res.state.offset.x));
         if let Some(idx) = clicked {
+            self.pending_active = false;
             self.pane(Mode::Shots).selected = idx;
         }
     }
@@ -949,7 +1029,13 @@ enum Icon {
 
 /// A small frameless icon button (drawn with lines: no font needs these glyphs).
 fn icon_button(ui: &mut egui::Ui, icon: Icon, theme: &Theme) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::CLICK);
+    let name = match icon {
+        Icon::Plus => "new-note",
+        Icon::Folder => "folder",
+        Icon::Camera => "capture",
+    };
+    let (_, rect) = ui.allocate_space(vec2(24.0, 24.0));
+    let resp = ui.interact(rect, Id::new(("whir.drawer.action", name)), Sense::CLICK);
     let painter = ui.painter();
     if resp.hovered() {
         painter.rect_filled(rect, 5.0, theme.drawer_item_hover);
@@ -1040,44 +1126,283 @@ mod tests {
         }
     }
 
-    #[test]
-    fn each_kind_of_tab_has_its_drawer() {
-        let dir = PathBuf::from(r"C:\notes");
-        let cx = cx(&dir);
-        let shot = dir.join("Screenshots").join("Screenshot 1.png");
-        let photo = PathBuf::from(r"C:\photos\cat.png");
-        let table = dir.join("budget.csv");
-        let elsewhere = PathBuf::from(r"C:\data\rack.csv");
-        assert_eq!(
-            mode_for(DocKind::Image, Some(&shot), &cx),
-            Some(Mode::Shots)
-        );
-        assert_eq!(mode_for(DocKind::Image, Some(&photo), &cx), None);
-        assert_eq!(mode_for(DocKind::Note, None, &cx), Some(Mode::Notes));
-        assert_eq!(mode_for(DocKind::Csv, Some(&table), &cx), Some(Mode::Notes));
-        assert_eq!(mode_for(DocKind::Csv, Some(&elsewhere), &cx), None);
-        assert_eq!(mode_for(DocKind::Pdf, Some(&photo), &cx), None);
-        assert_eq!(mode_for(DocKind::Settings, None, &cx), None);
+    fn drawer() -> Drawer {
+        settings::memory_only();
+        Drawer {
+            mode: Mode::Notes,
+            height: DEFAULT_HEIGHT,
+            panes: [Pane {
+                open: true,
+                selected: 0,
+            }; 2],
+            ..Drawer::default()
+        }
     }
 
     #[test]
-    fn ctrl_e_summons_the_notes_only_while_the_tab_stays() {
-        whir_core::settings::memory_only();
-        let mut d = Drawer::default();
-        // A PDF's tab (id 7): no drawer of its own.
-        assert_eq!(d.mode(Some(7), None), None);
-        d.toggle(Some(7), None);
-        assert_eq!(d.mode(Some(7), None), Some(Mode::Notes));
-        assert!(d.focused);
-        // Another tab: gone.
-        assert_eq!(d.mode(Some(8), None), None);
-        assert_eq!(d.mode(Some(7), None), None);
-        // A note's tab: Ctrl+E takes the keyboard, then folds it away.
-        d.toggle(Some(9), Some(Mode::Notes));
-        assert!(d.focused && d.panes[Mode::Notes as usize].open);
-        d.toggle(Some(9), Some(Mode::Notes));
-        assert!(!d.focused && !d.panes[Mode::Notes as usize].open);
-        d.toggle(Some(9), Some(Mode::Notes));
-        assert!(d.focused && d.panes[Mode::Notes as usize].open);
+    fn the_selected_library_is_independent_of_the_document() {
+        let mut d = drawer();
+        for mode in [Mode::Shots, Mode::Notes] {
+            d.select(mode);
+            for (id, kind) in [
+                DocKind::Note,
+                DocKind::Image,
+                DocKind::Pdf,
+                DocKind::Csv,
+                DocKind::Settings,
+                DocKind::Error,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                d.sync_document(Some((id as u64, kind)));
+                assert_eq!(d.mode(), mode);
+                assert_eq!(d.is_open(), !matches!(kind, DocKind::Pdf | DocKind::Csv));
+            }
+            d.sync_document(None);
+            assert_eq!(d.mode(), mode);
+            assert!(d.is_open());
+        }
+    }
+
+    #[test]
+    fn pdfs_and_tables_fold_only_on_activation_and_allow_either_library() {
+        let mut d = drawer();
+        d.select(Mode::Shots);
+        for kind in [DocKind::Pdf, DocKind::Csv] {
+            d.sync_document(Some((7, kind)));
+            assert!(!d.is_open());
+            assert!(
+                d.panes[Mode::Shots as usize].open,
+                "automatic fold isn't a preference"
+            );
+            for mode in [Mode::Notes, Mode::Shots] {
+                d.select(mode);
+                assert!(d.is_open());
+                d.sync_document(Some((7, kind)));
+                assert!(
+                    d.is_open(),
+                    "repainting must not collapse a manual expansion"
+                );
+            }
+            d.sync_document(Some((8, kind)));
+            assert!(!d.is_open(), "another document of the same kind also folds");
+            d.sync_document(Some((9, DocKind::Image)));
+            assert!(d.is_open());
+            assert_eq!(d.mode(), Mode::Shots);
+        }
+    }
+
+    #[test]
+    fn shared_height_prefers_the_new_setting_and_migrates_the_old_one() {
+        assert_eq!(saved_height(Some("260"), Some("120")), 260.0);
+        assert_eq!(saved_height(None, Some("240")), 240.0);
+        assert_eq!(saved_height(None, None), DEFAULT_HEIGHT);
+        for invalid in ["invalid", "NaN", "inf"] {
+            assert_eq!(saved_height(Some(invalid), Some("120")), 120.0);
+            assert_eq!(saved_height(None, Some(invalid)), DEFAULT_HEIGHT);
+        }
+        assert_eq!(saved_height(Some("20"), Some("240")), MIN_HEIGHT);
+    }
+
+    #[test]
+    fn manual_fold_and_shared_height_survive_document_changes() {
+        let mut d = drawer();
+        d.height = 240.0;
+        d.set_open(false);
+        d.sync_document(Some((1, DocKind::Csv)));
+        d.sync_document(Some((2, DocKind::Note)));
+        assert!(!d.is_open());
+        d.select(Mode::Shots);
+        assert!(d.is_open());
+        assert_eq!(d.height, 240.0);
+        d.select(Mode::Notes);
+        assert!(d.is_open());
+        assert_eq!(d.height, 240.0);
+    }
+
+    #[test]
+    fn ctrl_e_uses_the_selected_library_and_releases_focus_when_tabs_change() {
+        let mut d = drawer();
+        d.select(Mode::Shots);
+        d.sync_document(Some((7, DocKind::Pdf)));
+        d.toggle();
+        assert_eq!(d.mode(), Mode::Shots);
+        assert!(d.focused && d.is_open());
+        d.toggle();
+        assert!(!d.focused && !d.is_open());
+        d.toggle();
+        assert!(d.focused && d.is_open());
+        d.sync_document(Some((8, DocKind::Note)));
+        assert!(!d.focused && d.is_open());
+        assert_eq!(d.mode(), Mode::Shots);
+    }
+
+    #[test]
+    fn a_capture_is_selected_and_scrolled_to_when_its_refresh_arrives() {
+        let mut d = drawer();
+        d.select(Mode::Shots);
+        d.pane(Mode::Shots).selected = 8;
+        let path = Path::new(r"C:\notes\Screenshots\new.png");
+        d.follow_active(Some(path), || None);
+        assert!(d.pending_active);
+        // A frame can draw the old list and consume its scroll request.
+        d.scroll_to = false;
+        d.follow_active(Some(path), || Some(0));
+        assert_eq!(d.pane(Mode::Shots).selected, 0);
+        assert!(!d.pending_active && d.scroll_to);
+        // Later repaints must not override keyboard navigation.
+        d.pane(Mode::Shots).selected = 3;
+        d.scroll_to = false;
+        d.follow_active(Some(path), || Some(0));
+        assert_eq!(d.pane(Mode::Shots).selected, 3);
+        assert!(!d.scroll_to);
+    }
+
+    struct Harness {
+        ctx: egui::Context,
+        drawer: Drawer,
+        cx: OpenCx,
+        time: f64,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(whir_platform::fonts::definitions(whir_core::theme::FONTS));
+            Self {
+                ctx,
+                drawer: drawer(),
+                cx: cx(Path::new(r"C:\whir-drawer-test")),
+                time: 0.0,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> Out {
+            self.time += 0.05;
+            let input = egui::RawInput {
+                events,
+                time: Some(self.time),
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                ..Default::default()
+            };
+            let mut out = Out::default();
+            let output = self.ctx.run_ui(input, |ui| {
+                out = self.drawer.show(
+                    ui,
+                    &LibrarySnapshot::default(),
+                    &CapturesSnapshot::default(),
+                    &self.cx,
+                    None,
+                    &Theme::light(),
+                );
+                egui::CentralPanel::default().show(ui, |_| {});
+            });
+            output.drop_without_applying_deltas();
+            out
+        }
+
+        fn settle(&mut self) {
+            self.frame(vec![]);
+            self.frame(vec![]);
+        }
+
+        fn rect(&self, id: Id) -> Rect {
+            self.ctx
+                .read_response(id)
+                .expect("drawer control exists")
+                .rect
+        }
+
+        fn click(&mut self, pos: egui::Pos2) -> Out {
+            self.frame(vec![egui::Event::PointerMoved(pos)]);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame(vec![button(true)]);
+            self.frame(vec![button(false)])
+        }
+    }
+
+    #[test]
+    fn switching_libraries_keeps_the_resized_drawer_height() {
+        let mut h = Harness::new();
+        h.settle();
+        let fold = Id::new("whir.drawer.fold");
+        for (mode, delta) in [(Mode::Notes, -90.0), (Mode::Shots, 40.0)] {
+            h.click(h.rect(Id::new(("whir.drawer.tab", mode.key()))).center());
+            h.settle();
+            let top = h.rect(fold).top();
+            let from = pos2(400.0, top);
+            let to = from + vec2(0.0, delta);
+            h.frame(vec![egui::Event::PointerMoved(from)]);
+            h.frame(vec![egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }]);
+            h.frame(vec![egui::Event::PointerMoved(to)]);
+            h.frame(vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            h.settle();
+            let resized_top = h.rect(fold).top();
+            assert!(
+                (resized_top - top - delta).abs() < 1.0,
+                "the edge was dragged"
+            );
+            for tab in [Mode::Shots, Mode::Notes] {
+                h.click(h.rect(Id::new(("whir.drawer.tab", tab.key()))).center());
+                h.settle();
+                assert_eq!(h.rect(fold).top(), resized_top, "switching to {tab:?}");
+            }
+            h.drawer.sync_document(Some((1, DocKind::Pdf)));
+            h.settle();
+            assert!(!h.drawer.is_open());
+            h.click(h.rect(Id::new(("whir.drawer.tab", "shots"))).center());
+            h.settle();
+            assert_eq!(h.rect(fold).top(), resized_top, "unfolding on a PDF");
+            h.drawer.sync_document(Some((2, DocKind::Note)));
+            h.settle();
+        }
+    }
+
+    #[test]
+    fn both_tabs_work_when_folded_and_actions_do_not_toggle_the_drawer() {
+        let mut h = Harness::new();
+        h.drawer.sync_document(Some((1, DocKind::Pdf)));
+        h.settle();
+        let notes = Id::new(("whir.drawer.tab", "notes"));
+        let images = Id::new(("whir.drawer.tab", "shots"));
+        assert!(!h.drawer.is_open());
+        assert!(h.rect(notes).top() >= 570.0);
+        assert!(h.rect(images).top() >= 570.0);
+        h.click(h.rect(images).center());
+        assert!(h.drawer.is_open());
+        assert_eq!(h.drawer.mode(), Mode::Shots);
+        assert_eq!(h.frame(vec![]).rescan, Some(Mode::Shots));
+        h.settle();
+        let out = h.click(h.rect(Id::new(("whir.drawer.action", "folder"))).center());
+        assert_eq!(out.reveal, h.cx.captures.dir().map(Path::to_path_buf));
+        assert!(h.drawer.is_open(), "folder button isn't a fold toggle");
+        h.click(h.rect(notes).center());
+        assert_eq!(h.drawer.mode(), Mode::Notes);
+        assert!(h.drawer.is_open());
+        h.settle();
+        h.click(h.rect(Id::new("whir.drawer.fold")).center());
+        assert!(!h.drawer.is_open());
+        h.settle();
+        h.click(h.rect(notes).center());
+        assert!(
+            h.drawer.is_open(),
+            "the selected tab also unfolds the drawer"
+        );
     }
 }

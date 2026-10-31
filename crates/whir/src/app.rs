@@ -185,6 +185,9 @@ impl App {
         let mut last = None;
         for path in paths {
             let path = whir_platform::ipc::canonicalize(&path);
+            // Captures arrive after their PNG is saved, even when the Images
+            // pane is already visible and its last scan is still recent.
+            self.open_cx.captures.refresh(vec![path.clone()]);
             if let Some(i) = self.tabs.iter().position(|t| {
                 t.doc
                     .path()
@@ -440,7 +443,13 @@ impl App {
     /// The todo flag of the active tab's note (`None`: it can't have one).
     fn active_flag(&self) -> Option<Option<whir_core::todos::State>> {
         let tab = self.tabs.get(self.active)?;
-        if self.own_drawer() != Some(drawer::Mode::Notes) {
+        if !(tab.doc.kind() == DocKind::Note
+            || (tab.doc.kind() == DocKind::Csv
+                && tab
+                    .doc
+                    .path()
+                    .is_some_and(|p| self.open_cx.library.contains(p))))
+        {
             return None;
         }
         let Some(path) = tab.doc.path() else {
@@ -457,10 +466,9 @@ impl App {
         )
     }
 
-    /// The drawer the active tab has of its own (screenshots, notes).
-    fn own_drawer(&self) -> Option<drawer::Mode> {
-        let t = self.tabs.get(self.active)?;
-        drawer::mode_for(t.doc.kind(), t.doc.path(), &self.open_cx)
+    fn sync_drawer(&mut self) {
+        let document = self.tabs.get(self.active).map(|t| (t.id, t.doc.kind()));
+        self.drawer.sync_document(document);
     }
 
     /// Show the capture dock (a process of its own), starting it if needed.
@@ -562,9 +570,8 @@ impl App {
             self.save_active_as();
         }
         if drawer {
-            let tab = self.tabs.get(self.active).map(|t| t.id);
-            let own = self.own_drawer();
-            self.drawer.toggle(tab, own);
+            self.sync_drawer();
+            self.drawer.toggle();
         }
         if find_in_tabs {
             self.search.focus();
@@ -779,20 +786,17 @@ impl App {
         }
         let mut drawer_out = drawer::Out::default();
         if self.close_flow.is_none() {
-            let tab = self.tabs.get(self.active).map(|t| t.id);
-            let mode = self.drawer.mode(tab, self.own_drawer());
-            match mode {
-                Some(drawer::Mode::Shots) => {
+            self.sync_drawer();
+            match self.drawer.mode() {
+                drawer::Mode::Shots => {
                     let shots = self.open_cx.captures.snapshot().entries;
                     let path_at = |i: usize| shots.get(i).map(|e| e.path.clone());
-                    self.drawer
-                        .keys(ui, mode, shots.len(), path_at, &mut drawer_out);
+                    self.drawer.keys(ui, shots.len(), path_at, &mut drawer_out);
                 }
                 _ => {
                     let notes = self.open_cx.library.snapshot().entries;
                     let path_at = |i: usize| notes.get(i).map(|e| e.path.clone());
-                    self.drawer
-                        .keys(ui, mode, notes.len(), path_at, &mut drawer_out);
+                    self.drawer.keys(ui, notes.len(), path_at, &mut drawer_out);
                 }
             }
             self.handle_shortcuts(ui);
@@ -1007,16 +1011,14 @@ impl App {
             }
         }
 
-        // The drawer along the bottom, for the kind of document that's open.
-        let tab = self.tabs.get(self.active).map(|t| t.id);
-        let mode = self.drawer.mode(tab, self.own_drawer());
+        // The drawer is app-wide; only its default fold follows the document.
+        self.sync_drawer();
         let active_path = self
             .tabs
             .get(self.active)
             .and_then(|t| t.doc.path().map(Path::to_path_buf));
         let out = self.drawer.show(
             ui,
-            mode,
             &self.open_cx.library.snapshot(),
             &self.open_cx.captures.snapshot(),
             &self.open_cx,
@@ -1337,9 +1339,10 @@ impl Handler for App {
                 out.repaint_after = Some(out.repaint_after.map_or(remaining, |d| d.min(remaining)));
             }
         } else if !self.library_scanned {
-            // The notes list is read once the window is up (never on the startup path).
+            // Populate both drawer tabs once the window is up, not on the startup path.
             self.library_scanned = true;
             self.open_cx.library.scan();
+            self.open_cx.captures.scan();
             // whir lives on in its dock (the tray icon, timers, todos) when this
             // window closes: make sure it is running.
             let _ = whir_capture::launch(whir_capture::Command::Start);

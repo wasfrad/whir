@@ -638,6 +638,89 @@ mod tests {
     }
 
     #[test]
+    fn refresh_updates_a_recent_scan_and_wakes_the_drawer() {
+        let dir = test_dir("refresh-recent");
+        let first = dir.join("first.png");
+        std::fs::write(&first, b"first").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let store = Captures::at(
+            dir.clone(),
+            Waker::new(move || {
+                let _ = tx.send(());
+            }),
+        );
+        store.scan();
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let before = store.snapshot();
+        assert_eq!(before.entries.len(), 1);
+        assert!(before.scanned && !before.scanning);
+
+        let second = dir.join("second.png");
+        std::fs::write(&second, b"second").unwrap();
+        // A completed save does not itself invalidate the app's snapshot.
+        assert_eq!(store.snapshot().entries.len(), 1);
+        store.refresh(vec![second.clone(), second.clone()]);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let after = store.snapshot();
+        assert_eq!(after.generation, before.generation + 1);
+        assert_eq!(after.entries.len(), 2);
+        assert_eq!(after.entries[0].path, second);
+        assert_eq!(after.entries[0].size, 6);
+        assert_eq!(after.entries[1].path, first);
+        assert_eq!(after.scanned_at, before.scanned_at, "no full rescan needed");
+        assert!(after.scanned && !after.scanning);
+        assert_eq!(after.error, None);
+
+        std::fs::remove_file(&second).unwrap();
+        store.refresh(vec![second]);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let removed = store.snapshot();
+        assert_eq!(removed.generation, after.generation + 1);
+        assert_eq!(removed.entries.len(), 1);
+        assert_eq!(removed.entries[0].path, first);
+        assert_eq!(removed.scanned_at, before.scanned_at);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_is_queued_behind_the_first_scan() {
+        let dir = test_dir("refresh-scanning");
+        let store = Captures::at(dir.clone(), Waker::noop());
+        // Hold the worker queue here so the scan cannot finish before refresh.
+        let (tx, rx) = mpsc::channel();
+        *store.worker.lock().unwrap() = Some(tx);
+        store.scan();
+        assert!(store.snapshot().scanning);
+        assert!(!store.snapshot().scanned);
+
+        let image = dir.join("shot.png");
+        std::fs::write(&image, b"png").unwrap();
+        store.refresh(vec![image.clone()]);
+        let worker = Worker {
+            dir: Some(dir.clone()),
+            shared: store.shared.clone(),
+            waker: Waker::noop(),
+        };
+        let scan = rx.try_recv().unwrap();
+        assert!(matches!(scan, Work::Scan));
+        worker.run(scan);
+        let scanned_at = store.snapshot().scanned_at;
+        let refresh = rx
+            .try_recv()
+            .expect("refresh must not be dropped during a scan");
+        assert!(matches!(refresh, Work::Refresh(_)));
+        worker.run(refresh);
+        let after = store.snapshot();
+        assert_eq!(after.generation, 2);
+        assert_eq!(after.entries.len(), 1);
+        assert_eq!(after.entries[0].path, image);
+        assert!(after.scanned && !after.scanning);
+        assert_eq!(after.scanned_at, scanned_at);
+        assert!(rx.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn orphaned_marks_are_swept_only_once_they_are_old() {
         let dir = test_dir("orphans");
         let image = dir.join("kept.png");
