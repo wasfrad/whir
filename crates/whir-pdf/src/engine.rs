@@ -9,7 +9,7 @@
 //! that feeds search.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -56,6 +56,10 @@ pub enum Event {
         /// The view it was left with last time (see [`whir_core::views`]).
         saved: Option<String>,
     },
+    /// It needs a password. `tried`: and the one given wasn't it.
+    Locked {
+        tried: bool,
+    },
     Failed(String),
     Tile {
         key: TileKey,
@@ -78,6 +82,7 @@ enum Cmd {
     Open {
         doc: u64,
         path: PathBuf,
+        password: Option<String>,
         events: Sender<Event>,
         waker: Waker,
         textures: Arc<dyn TextureRegistry>,
@@ -141,8 +146,10 @@ pub struct DocHandle {
 }
 
 impl DocHandle {
+    /// `password` is for this attempt to open the file; it isn't saved.
     pub fn open(
         path: PathBuf,
+        password: Option<String>,
         events: Sender<Event>,
         waker: Waker,
         textures: Arc<dyn TextureRegistry>,
@@ -152,6 +159,7 @@ impl DocHandle {
         send(Cmd::Open {
             doc: id,
             path,
+            password,
             events,
             waker,
             textures,
@@ -395,15 +403,24 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
         Cmd::Open {
             doc,
             path,
+            password,
             events,
             waker,
             textures,
         } => {
+            let tried = password.is_some();
             let result = match api {
-                Ok(api) => open_doc(api, &path, events.clone(), waker.clone(), textures),
-                Err(e) => Err(format!(
+                Ok(api) => open_doc(
+                    api,
+                    &path,
+                    password,
+                    events.clone(),
+                    waker.clone(),
+                    textures,
+                ),
+                Err(e) => Err(OpenError::Failed(format!(
                     "{e} PDF viewing needs pdfium.dll next to whir.exe."
-                )),
+                ))),
             };
             match result {
                 Ok((d, pages, identity)) => {
@@ -420,7 +437,10 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
                         saved,
                     });
                 }
-                Err(e) => {
+                Err(OpenError::Locked) => {
+                    let _ = events.send(Event::Locked { tried });
+                }
+                Err(OpenError::Failed(e)) => {
                     let _ = events.send(Event::Failed(e));
                 }
             }
@@ -454,29 +474,47 @@ fn handle(cmd: Cmd, api: Result<&Api, &str>, docs: &mut HashMap<u64, OpenDoc>) {
     }
 }
 
+#[derive(Debug)]
+enum OpenError {
+    /// It needs a password: none was given, or that wasn't it.
+    Locked,
+    Failed(String),
+}
+
 fn open_doc(
     api: &Api,
     path: &std::path::Path,
+    password: Option<String>,
     events: Sender<Event>,
     waker: Waker,
     textures: Arc<dyn TextureRegistry>,
-) -> Result<(OpenDoc, Vec<[f32; 2]>, FileIdentity), String> {
-    let file = FileSource::open(path).map_err(|e| format!("Couldn't open the file: {e}"))?;
+) -> Result<(OpenDoc, Vec<[f32; 2]>, FileIdentity), OpenError> {
+    let file = FileSource::open(path)
+        .map_err(|e| OpenError::Failed(format!("Couldn't open the file: {e}")))?;
     let identity = file.identity();
     if file.len() > u32::MAX as u64 {
-        return Err("PDFs larger than 4 GB aren't supported.".into());
+        return Err(OpenError::Failed(
+            "PDFs larger than 4 GB aren't supported.".into(),
+        ));
     }
+    // PDFium takes UTF-8, and tries Latin-1 itself on the older files that need
+    // it. A NUL can't be passed, and no real password has one: it's just wrong.
+    let password = password.map(|p| CString::new(p).unwrap_or_default());
     let file = Arc::into_raw(file);
     let mut access = Box::new(ffi::FileAccess {
         file_len: unsafe { (*file).len() } as u32,
         get_block: Some(get_block),
         param: file as *mut c_void,
     });
-    let handle = unsafe { (api.load_custom_document)(&mut *access, std::ptr::null()) };
+    let secret = password.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
+    let handle = unsafe { (api.load_custom_document)(&mut *access, secret) };
     if handle.is_null() {
-        let msg = api.error_message();
+        let code = api.last_error();
         drop(unsafe { Arc::from_raw(file) });
-        return Err(msg);
+        return Err(match code {
+            ffi::ERR_PASSWORD => OpenError::Locked,
+            code => OpenError::Failed(ffi::error_message(code)),
+        });
     }
     let count = unsafe { (api.get_page_count)(handle) }.max(0);
     let pages: Vec<[f32; 2]> = (0..count)
@@ -907,6 +945,10 @@ pub(crate) mod test_support {
         assemble(&objs)
     }
 
+    /// One page saying "Hello world", AES-256 encrypted: it opens with the user
+    /// password "pässwörd" or the owner password "owner", and not without one.
+    pub const LOCKED_PDF: &[u8] = include_bytes!("../testdata/locked.pdf");
+
     /// `n` upright letter pages, each saying "Page k".
     pub fn pages_pdf(n: usize) -> Vec<u8> {
         let kids: Vec<String> = (0..n).map(|k| format!("{} 0 R", 4 + 2 * k)).collect();
@@ -956,7 +998,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{NoTextures, pdfium_lock, test_pdf};
+    use super::test_support::{LOCKED_PDF, NoTextures, pdfium_lock, test_pdf};
     use super::*;
 
     #[test]
@@ -1027,7 +1069,7 @@ mod tests {
         std::fs::write(&path, test_pdf()).unwrap();
         let (tx, _rx) = channel();
         let (mut d, sizes, _) =
-            open_doc(&api, &path, tx, Waker::noop(), Arc::new(NoTextures)).expect("open");
+            open_doc(&api, &path, None, tx, Waker::noop(), Arc::new(NoTextures)).expect("open");
         assert_eq!(sizes, vec![[612.0, 792.0], [792.0, 612.0]]);
 
         // Upright page: two lines with a generated break between them.
@@ -1070,6 +1112,51 @@ mod tests {
         assert!(text.geom.is_none() && !text.chars.is_empty());
 
         close_doc(&api, d);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn a_password_opens_what_it_should() {
+        let _pdfium = pdfium_lock();
+        let api = Api::load().expect("pdfium.dll");
+        unsafe { (api.init_library)() };
+        let t = api.text.as_ref().expect("text API");
+        let path = std::env::temp_dir().join(format!("whir-pdf-pass-{}.pdf", std::process::id()));
+        std::fs::write(&path, LOCKED_PDF).unwrap();
+        let open = |password: Option<&str>| {
+            let (tx, _rx) = channel();
+            let password = password.map(str::to_owned);
+            open_doc(
+                &api,
+                &path,
+                password,
+                tx,
+                Waker::noop(),
+                Arc::new(NoTextures),
+            )
+        };
+
+        for refused in [None, Some(""), Some("wrong"), Some("p\0ss")] {
+            assert!(
+                matches!(open(refused), Err(OpenError::Locked)),
+                "{refused:?}"
+            );
+        }
+        // The user's password, and the owner's. The file still decrypts: its
+        // text comes back readable.
+        for password in ["pässwörd", "owner"] {
+            let (mut d, sizes, _) = open(Some(password)).expect("open");
+            let p = page(&api, &mut d, 0).unwrap();
+            let text = extract(t, p, sizes[0], false);
+            let s = String::from_utf16_lossy(&text.chars);
+            assert!(s.starts_with("Hello world"), "{s:?}");
+            close_doc(&api, d);
+        }
+        // Anything else that's wrong with a file is still that.
+        std::fs::write(&path, b"not a pdf").unwrap();
+        assert!(matches!(open(Some("pässwörd")), Err(OpenError::Failed(_))));
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -204,6 +204,9 @@ are kept for the last 500 files, each only for that same file: another file late
 at the same path, such as a mail attachment's temporary copy, opens afresh. Settings can
 switch this off or forget them all.
 
+A PDF that needs a password asks for it in its tab. whir doesn't keep the password, so
+it asks again the next time the file is opened.
+
 The minimap is the document in miniature beside the scrollbar: page thumbnails with a
 slider over what's on screen, the page number and previous/next buttons above them. It
 scrolls along with the document and hides itself in narrow windows. Jumping to a part
@@ -331,8 +334,8 @@ without losing anything.
 
 ## Not yet
 
-PDF passwords, animated GIFs, ICC colour management, image editing beyond highlights and
-text, freehand marks, arrows and boxes, text fonts and sizes from a menu, tab
+Animated GIFs, ICC colour management, image editing beyond highlights and text, freehand
+marks, arrows and boxes, text fonts and sizes from a menu, tab
 reordering, spreadsheet formulas, cell formatting and multiple sheets, WebP/HEIC without
 the Microsoft Store codecs, IME composition at the caret, spell check, subfolders in the
 notes library.

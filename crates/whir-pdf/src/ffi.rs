@@ -219,13 +219,17 @@ impl Api {
         })
     }
 
-    pub fn error_message(&self) -> String {
-        match unsafe { (self.get_last_error)() } {
-            ERR_FILE => "The file couldn't be read.".into(),
-            ERR_FORMAT => "This isn't a valid PDF, or it's damaged.".into(),
-            ERR_PASSWORD => "This PDF is password-protected.".into(),
-            ERR_SECURITY => "This PDF uses an unsupported security scheme.".into(),
-            code => format!("PDFium couldn't open this PDF (error {code})."),
-        }
+    pub fn last_error(&self) -> u32 {
+        unsafe { (self.get_last_error)() }
+    }
+}
+
+/// What to tell the user about `FPDF_GetLastError`'s `code`.
+pub fn error_message(code: u32) -> String {
+    match code {
+        ERR_FILE => "The file couldn't be read.".into(),
+        ERR_FORMAT => "This isn't a valid PDF, or it's damaged.".into(),
+        ERR_SECURITY => "This PDF uses an unsupported security scheme.".into(),
+        code => format!("PDFium couldn't open this PDF (error {code})."),
     }
 }

@@ -5,10 +5,12 @@
 //! minimap of page thumbnails with page controls.
 
 mod find;
+mod locked;
 mod minimap;
 mod selection;
 mod tools;
 
+use locked::Locked;
 use tools::Cmd;
 
 use std::collections::{HashMap, HashSet};
@@ -23,7 +25,9 @@ use whir_core::file::FileIdentity;
 use whir_core::find_bar::FindBar;
 use whir_core::scroll::{ScrollAxis, scrollbar};
 use whir_core::theme::Theme;
-use whir_core::{DocCx, DocKind, Document, Menu, OpenCx, TextureRegistry, UserTexture, views};
+use whir_core::{
+    DocCx, DocKind, Document, Menu, OpenCx, TextureRegistry, UserTexture, Waker, views,
+};
 
 use crate::engine::{DocHandle, Event, Job, TileKey};
 use crate::layout::{self, Layout};
@@ -113,6 +117,7 @@ impl Place {
 
 enum State {
     Loading,
+    Locked(Locked),
     Ready(Arc<Layout>),
     Failed(String),
 }
@@ -137,6 +142,7 @@ pub struct PdfDoc {
     title: String,
     handle: DocHandle,
     rx: Receiver<Event>,
+    waker: Waker,
     textures: Arc<dyn TextureRegistry>,
     state: State,
     tiles: HashMap<TileKey, Cached>,
@@ -203,7 +209,13 @@ pub struct PdfDoc {
 impl PdfDoc {
     pub fn open(path: PathBuf, cx: &OpenCx) -> Self {
         let (tx, rx) = channel();
-        let handle = DocHandle::open(path.clone(), tx, cx.waker.clone(), cx.textures.clone());
+        let handle = DocHandle::open(
+            path.clone(),
+            None,
+            tx,
+            cx.waker.clone(),
+            cx.textures.clone(),
+        );
         Self {
             title: path
                 .file_name()
@@ -212,6 +224,7 @@ impl PdfDoc {
             path,
             handle,
             rx,
+            waker: cx.waker.clone(),
             textures: cx.textures.clone(),
             state: State::Loading,
             tiles: HashMap::new(),
@@ -253,6 +266,20 @@ impl PdfDoc {
         }
     }
 
+    /// Open the file again with `password`. The answer is the usual
+    /// [`Event::Opened`], or [`Event::Locked`] if that wasn't it.
+    fn try_password(&mut self, password: String) {
+        let (tx, rx) = channel();
+        self.handle = DocHandle::open(
+            self.path.clone(),
+            Some(password),
+            tx,
+            self.waker.clone(),
+            self.textures.clone(),
+        );
+        self.rx = rx;
+    }
+
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
@@ -274,6 +301,7 @@ impl PdfDoc {
                     self.mini = Some(Arc::new(MiniLayout::new(&layout, minimap::THUMB_W)));
                     self.state = State::Ready(Arc::new(layout));
                 }
+                Event::Locked { tried } => self.state = State::Locked(Locked::new(tried)),
                 Event::Failed(e) => self.state = State::Failed(e),
                 Event::Tile { key, texture } => {
                     let cached = Cached {
@@ -1017,6 +1045,7 @@ impl Document for PdfDoc {
     fn is_loading(&self) -> bool {
         match &self.state {
             State::Loading => true,
+            State::Locked(lock) => lock.checking,
             State::Ready(l) => self.on_screen && !self.got_first_tile && !l.is_empty(),
             State::Failed(_) => false,
         }
@@ -1072,9 +1101,9 @@ impl Document for PdfDoc {
         self.status_line()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+    fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
         self.drain();
-        match &self.state {
+        match &mut self.state {
             State::Loading => {
                 let theme = Theme::current();
                 let r = ui.max_rect();
@@ -1083,6 +1112,11 @@ impl Document for PdfDoc {
                     Rect::from_center_size(r.center(), vec2(24.0, 24.0)),
                     egui::Spinner::new().size(20.0),
                 );
+            }
+            State::Locked(lock) => {
+                if let Some(password) = lock.show(ui, &self.path, cx.just_activated) {
+                    self.try_password(password);
+                }
             }
             State::Failed(e) => {
                 let e = e.clone();
@@ -1103,11 +1137,11 @@ mod tests {
     use std::time::Instant;
 
     use egui::{Event as In, PointerButton};
+    use whir_core::Library;
     use whir_core::find_bar::FindStatus;
-    use whir_core::{Library, Waker};
 
     use super::*;
-    use crate::engine::test_support::{NoTextures, pages_pdf, pdfium_lock, test_pdf};
+    use crate::engine::test_support::{LOCKED_PDF, NoTextures, pages_pdf, pdfium_lock, test_pdf};
 
     const NONE: Modifiers = Modifiers::NONE;
 
@@ -1120,6 +1154,8 @@ mod tests {
         screen: Rect,
         time: f64,
         copied: Vec<String>,
+        /// The next frame is the one the tab comes up in.
+        activating: bool,
     }
 
     impl Harness {
@@ -1166,6 +1202,7 @@ mod tests {
                 screen: Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0)),
                 time: 1.0,
                 copied: Vec::new(),
+                activating: false,
             }
         }
 
@@ -1182,11 +1219,12 @@ mod tests {
             let (doc, textures) = (&mut self.doc, &self.textures);
             let waker = Waker::noop();
             let mut requests = Vec::new();
+            let just_activated = std::mem::take(&mut self.activating);
             let mut out = self.ctx.run_ui(input, |ui| {
                 let mut cx = DocCx {
                     textures,
                     waker: &waker,
-                    just_activated: false,
+                    just_activated,
                     requests: &mut requests,
                 };
                 doc.ui(ui, &mut cx);
@@ -1268,6 +1306,66 @@ mod tests {
             self.frame(vec![In::Copy], NONE);
             self.copied.pop()
         }
+    }
+
+    /// The tab asks for the password, says when it's wrong, and opens with it.
+    /// `cargo test -p whir-pdf -- --ignored`
+    #[test]
+    #[ignore = "loads pdfium.dll"]
+    fn a_locked_pdf_asks_for_its_password() {
+        fn locked(h: &Harness) -> Option<&Locked> {
+            match &h.doc.state {
+                State::Locked(lock) => Some(lock),
+                _ => None,
+            }
+        }
+        fn answered(h: &Harness) -> bool {
+            !h.doc.is_loading()
+        }
+        fn give(h: &mut Harness, password: &str) {
+            h.frame(vec![In::Text(password.to_owned())], NONE);
+            h.key(Key::Enter, NONE);
+        }
+
+        let _pdfium = pdfium_lock();
+        let path = std::env::temp_dir().join(format!("whir-pdf-lock-{}.pdf", std::process::id()));
+        std::fs::write(&path, LOCKED_PDF).unwrap();
+        let mut h = Harness::new(path.clone());
+        h.until("the prompt", |h| locked(h).is_some());
+        h.idle();
+        assert!(!locked(&h).unwrap().wrong, "nothing has been tried yet");
+        assert!(answered(&h), "nothing to wait for: the app can sit idle");
+
+        // An empty field has nothing to try.
+        h.key(Key::Enter, NONE);
+        h.idle();
+        assert!(answered(&h));
+
+        give(&mut h, "wrong");
+        assert!(locked(&h).unwrap().checking, "it went to the PDF thread");
+        // Enter again mid-check doesn't send it twice.
+        h.key(Key::Enter, NONE);
+        h.until("the answer", answered);
+        assert!(locked(&h).unwrap().wrong);
+
+        // Away from the field, and back with a click on its tab: the press brings
+        // the tab up, and the click ending must leave the keyboard in the field.
+        let away = pos2(20.0, 20.0);
+        h.click(away, NONE);
+        h.frame(vec![In::PointerMoved(away)], NONE);
+        h.activating = true;
+        h.button(away, true, NONE);
+        h.button(away, false, NONE);
+        h.idle();
+
+        give(&mut h, "pässwörd");
+        h.until("the document", |h| matches!(h.doc.state, State::Ready(_)));
+        h.until("page 0's text", |h| h.doc.text.has_text(0) == Some(true));
+        let chars = String::from_utf16_lossy(&h.doc.text.page(0).unwrap().chars);
+        assert!(chars.starts_with("Hello world"), "{chars:?}");
+
+        drop(h);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Selection by drag, click counts, Shift, keyboard and Ctrl+A; copy; find.

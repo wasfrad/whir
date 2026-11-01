@@ -55,6 +55,17 @@ impl Document for MessageDoc {
 
 /// Centered heading + detail, used by error states across pillars.
 pub fn show_message(ui: &mut egui::Ui, heading: &str, detail: &str, path: Option<&Path>) {
+    show_message_above(ui, heading, detail, path, |_| {});
+}
+
+/// [`show_message`], with what can be done about it (`below`) under it.
+pub fn show_message_above(
+    ui: &mut egui::Ui,
+    heading: &str,
+    detail: &str,
+    path: Option<&Path>,
+    below: impl FnOnce(&mut egui::Ui),
+) {
     let theme = Theme::current();
     ui.painter()
         .rect_filled(ui.max_rect(), 0.0, theme.content_bg);
@@ -74,6 +85,7 @@ pub fn show_message(ui: &mut egui::Ui, heading: &str, detail: &str, path: Option
                         .color(theme.text_dim),
                 );
             }
+            below(ui);
         });
     });
 }
