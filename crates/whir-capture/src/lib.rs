@@ -31,11 +31,14 @@ mod veil;
 use std::path::PathBuf;
 
 use whir_image::{PixelLayout, encode_png};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
+    MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW, PostMessageW,
 };
 use windows::core::{HSTRING, w};
+
+pub use crate::config::{Ask, DELAYS, DockConfig, Hotkey, format_hotkey, parse_hotkey};
 
 use crate::grab::Frame;
 use crate::overlay::Outcome;
@@ -45,6 +48,8 @@ use crate::overlay::Outcome;
 pub enum Command {
     /// Show it (starting it if needed).
     Reveal,
+    /// Leave only its tray icon (starting it if needed).
+    Hide,
     /// Make sure it is running, without showing it (at sign-in, and whenever
     /// the main window starts).
     Start,
@@ -55,8 +60,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 4] = [
+    pub const ALL: [Command; 5] = [
         Command::Reveal,
+        Command::Hide,
         Command::Start,
         Command::Capture,
         Command::Quit,
@@ -69,6 +75,7 @@ impl Command {
     pub fn flag(self) -> &'static str {
         match self {
             Command::Reveal => "--dock",
+            Command::Hide => "--dock-hide",
             Command::Start => "--dock-start",
             Command::Capture => "--dock-capture",
             Command::Quit => "--dock-quit",
@@ -88,6 +95,21 @@ pub fn launch(cmd: Command) -> std::io::Result<()> {
         .arg(cmd.flag())
         .spawn()
         .map(|_| ())
+}
+
+/// The dock is there to be asked things.
+pub fn running() -> bool {
+    whir_platform::ipc::find_dock_window().is_some()
+}
+
+/// Ask the dock to change something of its own. False if there's no dock.
+pub fn ask(what: Ask) -> bool {
+    let Some(dock) = whir_platform::ipc::find_dock_window() else {
+        return false;
+    };
+    let (kind, value) = what.encode();
+    let asked = instance::WM_ASKED;
+    unsafe { PostMessageW(Some(dock), asked, WPARAM(kind), LPARAM(value)) }.is_ok()
 }
 
 /// The whole of a `whir.exe --dock…` process. Returns its exit code.

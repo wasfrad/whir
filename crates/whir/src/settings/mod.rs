@@ -1,15 +1,19 @@
 //! whir's Settings: a tab of its own. The timesheet (the week at a glance,
 //! its entries, closing it out), the timers (customers and their projects),
-//! how PDFs and images open, and how whir starts.
+//! how time is kept, how whir looks, how PDFs and images open, the capture dock,
+//! and how whir starts.
 
+mod appearance;
+mod capture;
 mod startup;
 mod timers;
 mod timesheet;
+mod tracking;
 mod viewing;
 
 use std::path::Path;
 
-use egui::{Align, Layout, RichText, vec2};
+use egui::{Align, Layout, Margin, Rect, RichText, Stroke, pos2, vec2};
 use whir_core::icons::Icon;
 use whir_core::kit;
 use whir_core::theme::Theme;
@@ -21,43 +25,98 @@ use whir_platform::ipc::{self, Changed};
 pub enum Section {
     Timesheet,
     Timers,
+    Tracking,
+    Appearance,
     Viewing,
+    Capture,
     Startup,
 }
 
-impl Section {
-    const ALL: [Section; 4] = [
-        Section::Timesheet,
-        Section::Timers,
+/// The sections down the left, in the two groups they make: your time, then
+/// how whir behaves.
+const GROUPS: [&[Section]; 2] = [
+    &[Section::Timesheet, Section::Timers, Section::Tracking],
+    &[
+        Section::Appearance,
         Section::Viewing,
+        Section::Capture,
         Section::Startup,
-    ];
+    ],
+];
+/// Wide enough for the sections' names, and for a page beside them below this
+/// the sections fold to their icons.
+const NAV_WIDTH: f32 = 200.0;
+const RAIL_WIDTH: f32 = 48.0;
+const FOLD_BELOW: f32 = 760.0;
+/// The widest a page of settings reads well, and the timesheet.
+const PAGE_MAX: f32 = 720.0;
+const SHEET_MAX: f32 = 1120.0;
+
+impl Section {
+    pub fn all() -> impl Iterator<Item = Section> {
+        GROUPS.into_iter().flatten().copied()
+    }
+
+    /// What `from_name` knows it by.
+    pub fn name(self) -> &'static str {
+        match self {
+            Section::Timesheet => "timesheet",
+            Section::Timers => "timers",
+            Section::Tracking => "tracking",
+            Section::Appearance => "appearance",
+            Section::Viewing => "pdfs",
+            Section::Capture => "capture",
+            Section::Startup => "startup",
+        }
+    }
+
+    /// Words the command palette finds it by, for what's on the page.
+    pub fn keywords(self) -> &'static str {
+        match self {
+            Section::Timesheet => "week hours timecard entries close",
+            Section::Timers => "customers projects codes archive",
+            Section::Tracking => "rounding round away idle keep dock",
+            Section::Appearance => "theme dark light mode note text size font",
+            Section::Viewing => "pdf image zoom fit minimap remember reopen",
+            Section::Capture => "screenshot shortcut hotkey delay dock hide show",
+            Section::Startup => "sign in autostart window monitor folders",
+        }
+    }
 
     /// As `whir.exe --settings <name>` and the dock ask for it.
     pub fn from_name(name: &str) -> Option<Section> {
         match name.to_ascii_lowercase().as_str() {
             "timesheet" | "time" | "week" => Some(Section::Timesheet),
             "timers" | "projects" | "customers" => Some(Section::Timers),
+            "tracking" | "options" => Some(Section::Tracking),
+            "appearance" | "theme" => Some(Section::Appearance),
             "viewing" | "pdf" | "pdfs" | "images" | "zoom" => Some(Section::Viewing),
-            "startup" | "dock" | "general" | "window" => Some(Section::Startup),
+            "capture" | "dock" => Some(Section::Capture),
+            "startup" | "general" | "window" => Some(Section::Startup),
             _ => None,
         }
     }
 
-    fn icon(self) -> Icon {
+    pub fn icon(self) -> Icon {
         match self {
-            Section::Timesheet => Icon::Stopwatch,
+            Section::Timesheet => Icon::Calendar,
             Section::Timers => Icon::People,
+            Section::Tracking => Icon::Stopwatch,
+            Section::Appearance => Icon::Palette,
             Section::Viewing => Icon::Picture,
-            Section::Startup => Icon::Settings,
+            Section::Capture => Icon::Camera,
+            Section::Startup => Icon::Power,
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Section::Timesheet => "Timesheet",
             Section::Timers => "Customers & projects",
+            Section::Tracking => "Time tracking",
+            Section::Appearance => "Appearance",
             Section::Viewing => "PDFs & images",
+            Section::Capture => "Capture & dock",
             Section::Startup => "Startup & window",
         }
     }
@@ -71,6 +130,7 @@ pub struct SettingsDoc {
     generation: u64,
     sheet: timesheet::View,
     timers: timers::View,
+    capture: capture::View,
 }
 
 impl SettingsDoc {
@@ -87,6 +147,7 @@ impl SettingsDoc {
             generation: ts::generation(),
             sheet: timesheet::View::new(),
             timers: timers::View::default(),
+            capture: capture::View::default(),
         };
         if let Some(s) = &mut doc.store {
             s.refresh();
@@ -105,6 +166,7 @@ impl SettingsDoc {
         }
         self.sheet.forget();
         self.timers.forget();
+        self.capture.forget();
     }
 }
 
@@ -127,6 +189,10 @@ impl Document for SettingsDoc {
         }
     }
 
+    fn wants_every_key(&self) -> bool {
+        self.section == Section::Capture && self.capture.recording()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
         let theme = Theme::current();
         if cx.just_activated || ts::generation() != self.generation {
@@ -134,26 +200,12 @@ impl Document for SettingsDoc {
             self.refresh();
         }
         let area = ui.max_rect();
-        ui.painter().rect_filled(area, 0.0, theme.content_bg);
+        ui.painter().rect_filled(area, 0.0, theme.page_bg);
+        self.nav(ui, area, &theme);
+        let folded = area.width() < FOLD_BELOW;
+        let nav_width = if folded { RAIL_WIDTH } else { NAV_WIDTH };
 
-        // The sections down the left.
-        let nav_width = 190.0;
-        let nav = egui::Rect::from_min_size(area.min, vec2(nav_width, area.height()));
-        ui.painter().rect_filled(nav, 0.0, theme.strip_bg);
-        let mut nav_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(nav.shrink2(vec2(10.0, 14.0)))
-                .layout(Layout::top_down(Align::Min)),
-        );
-        nav_ui.label(RichText::new("Settings").heading().color(theme.text));
-        nav_ui.add_space(10.0);
-        for s in Section::ALL {
-            if kit::nav_row(&mut nav_ui, s.icon(), s.label(), s == self.section, &theme) {
-                self.section = s;
-            }
-        }
-
-        let body = egui::Rect::from_min_max(egui::pos2(nav.right(), area.top()), area.max);
+        let body = Rect::from_min_max(pos2(area.left() + nav_width, area.top()), area.max);
         let mut body_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(body)
@@ -163,19 +215,28 @@ impl Document for SettingsDoc {
             .id_salt(("whir.settings", self.section as u8))
             .auto_shrink(false)
             .show(&mut body_ui, |ui| {
-                egui::Frame::NONE
-                    .inner_margin(egui::Margin::symmetric(28, 22))
-                    .show(ui, |ui| {
-                        ui.set_max_width(980.0);
-                        match self.section {
-                            Section::Timesheet => {
-                                self.sheet.ui(ui, self.store.as_mut(), cx, &theme)
-                            }
-                            Section::Timers => self.timers.ui(ui, self.store.as_mut(), cx, &theme),
-                            Section::Viewing => viewing::ui(ui, cx, &theme),
-                            Section::Startup => startup::ui(ui, cx, &theme),
-                        }
-                    });
+                let margin = if folded {
+                    Margin::symmetric(16, 16)
+                } else {
+                    Margin::symmetric(32, 24)
+                };
+                egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+                    let widest = match self.section {
+                        Section::Timesheet => SHEET_MAX,
+                        _ => PAGE_MAX,
+                    };
+                    // `set_max_width` sets it: it would widen a narrower page.
+                    ui.set_max_width(ui.available_width().min(widest));
+                    match self.section {
+                        Section::Timesheet => self.sheet.ui(ui, self.store.as_mut(), cx, &theme),
+                        Section::Timers => self.timers.ui(ui, self.store.as_mut(), cx, &theme),
+                        Section::Tracking => tracking::ui(ui, self.store.as_mut(), cx, &theme),
+                        Section::Appearance => appearance::ui(ui, cx, &theme),
+                        Section::Viewing => viewing::ui(ui, cx, &theme),
+                        Section::Capture => self.capture.ui(ui, cx, &theme),
+                        Section::Startup => startup::ui(ui, cx, &theme),
+                    }
+                });
             });
 
         // A running timer's time goes on: the timesheet shows its seconds.
@@ -195,44 +256,61 @@ impl Document for SettingsDoc {
     }
 }
 
-/// A section heading.
-fn heading(ui: &mut egui::Ui, text: &str, theme: &Theme) {
-    ui.label(RichText::new(text).heading().color(theme.text));
-    ui.add_space(6.0);
+impl SettingsDoc {
+    /// The sections down the left, or just their icons.
+    fn nav(&mut self, ui: &mut egui::Ui, area: Rect, theme: &Theme) {
+        let folded = area.width() < FOLD_BELOW;
+        let width = if folded { RAIL_WIDTH } else { NAV_WIDTH };
+        let nav = Rect::from_min_size(area.min, vec2(width, area.height()));
+        ui.painter().rect_filled(nav, 0.0, theme.strip_bg);
+        let inset = if folded {
+            vec2(6.0, 10.0)
+        } else {
+            vec2(10.0, 14.0)
+        };
+        let mut nav_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(nav.shrink2(inset))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        nav_ui.spacing_mut().item_spacing.y = 2.0;
+        if !folded {
+            nav_ui.label(RichText::new("Settings").heading().color(theme.text));
+            nav_ui.add_space(10.0);
+        }
+        for (i, sections) in GROUPS.into_iter().enumerate() {
+            if i > 0 {
+                nav_ui.add_space(6.0);
+                let y = nav_ui.cursor().top();
+                let y = nav_ui.painter().round_to_pixel_center(y);
+                let x = nav_ui.max_rect().x_range();
+                let line = Stroke::new(1.0, theme.separator);
+                nav_ui.painter().hline(x, y, line);
+                nav_ui.add_space(8.0);
+            }
+            for &s in sections {
+                let on = s == self.section;
+                if kit::nav_row(&mut nav_ui, s.icon(), s.label(), on, folded, theme) {
+                    self.section = s;
+                }
+            }
+        }
+    }
+}
+
+/// Said in place of a page about time when there's nowhere to keep it.
+fn no_folder(ui: &mut egui::Ui, title: &str, theme: &Theme) {
+    kit::page_header(ui, title, "", theme, |_| {});
+    note(
+        ui,
+        "The Documents folder isn't available, so there is nowhere to keep time.",
+        theme,
+    );
 }
 
 /// A line of explanation under a heading or a control.
 fn note(ui: &mut egui::Ui, text: &str, theme: &Theme) {
     ui.label(RichText::new(text).color(theme.text_dim));
-}
-
-/// A one-line text field that keeps what's typed to itself until Enter (or
-/// leaving it), then returns it. Shows `current` otherwise.
-fn edit_line(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    current: &str,
-    width: f32,
-    hint: &str,
-) -> Option<String> {
-    let mut text = ui
-        .data_mut(|d| d.get_temp::<String>(id))
-        .unwrap_or_else(|| current.to_owned());
-    // Its own width, not the grid column's of the frame before (which a
-    // field would otherwise never grow past).
-    let size = vec2(width, ui.spacing().interact_size.y);
-    let response = ui.add_sized(
-        size,
-        egui::TextEdit::singleline(&mut text).id(id).hint_text(hint),
-    );
-    let done = response.lost_focus();
-    if response.has_focus() {
-        ui.data_mut(|d| d.insert_temp(id, text));
-        None
-    } else {
-        ui.data_mut(|d| d.remove::<String>(id));
-        (done && text.trim() != current).then(|| text.trim().to_owned())
-    }
 }
 
 /// A time of day as people type it: "9", "9:05", "905", "13:20", "1:20 pm",
@@ -420,7 +498,15 @@ mod tests {
         h.frame();
         h.doc.sheet.confirm_close = true;
         h.frame();
-        for section in ["timers", "viewing", "startup", "timesheet"] {
+        for section in [
+            "timers",
+            "tracking",
+            "appearance",
+            "viewing",
+            "capture",
+            "startup",
+            "timesheet",
+        ] {
             h.doc.show_section(section);
             h.frame();
             h.frame();
@@ -486,10 +572,11 @@ mod tests {
 
     #[test]
     fn sections_have_names() {
-        for s in Section::ALL {
-            let name = s.label().split_whitespace().next().unwrap();
-            assert!(Section::from_name(name).is_some(), "{name}");
+        assert_eq!(Section::all().count(), 7);
+        for section in Section::all() {
+            assert_eq!(Section::from_name(section.name()), Some(section));
         }
+        assert_eq!(Section::from_name("dock"), Some(Section::Capture));
         assert_eq!(Section::from_name("TIMESHEET"), Some(Section::Timesheet));
         assert_eq!(Section::from_name("nope"), None);
     }

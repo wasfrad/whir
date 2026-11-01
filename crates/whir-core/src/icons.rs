@@ -63,6 +63,9 @@ pub enum Icon {
     List,
     Checklist,
     Minimap,
+    Calendar,
+    Palette,
+    Power,
 }
 
 impl Icon {
@@ -123,6 +126,9 @@ impl Icon {
         Icon::List,
         Icon::Checklist,
         Icon::Minimap,
+        Icon::Calendar,
+        Icon::Palette,
+        Icon::Power,
     ];
 
     /// The glyph in Segoe Fluent Icons. Segoe MDL2 Assets, on older Windows,
@@ -184,6 +190,9 @@ impl Icon {
             Icon::List => '\u{E8FD}',
             Icon::Checklist => '\u{E9D5}',
             Icon::Minimap => '\u{E90D}',
+            Icon::Calendar => '\u{E787}',
+            Icon::Palette => '\u{E790}',
+            Icon::Power => '\u{E7E8}',
         }
     }
 }

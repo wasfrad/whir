@@ -21,6 +21,9 @@ use crate::Command;
 pub const CLASS: PCWSTR = w!("whir.dock.v1");
 /// Posted to the dock by another launch; `wParam` is [`code`] of its command.
 pub const WM_LAUNCHED: u32 = WM_APP + 1;
+/// Posted to the dock by Settings; `wParam` and `lParam` are an
+/// [`crate::config::Ask`].
+pub const WM_ASKED: u32 = WM_APP + 5;
 
 pub fn code(cmd: Command) -> usize {
     match cmd {
@@ -28,6 +31,7 @@ pub fn code(cmd: Command) -> usize {
         Command::Capture => 2,
         Command::Quit => 3,
         Command::Start => 4,
+        Command::Hide => 5,
     }
 }
 

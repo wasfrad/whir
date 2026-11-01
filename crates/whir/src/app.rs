@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use egui::{CentralPanel, Event, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
 use whir_core::icons::Icon;
 use whir_core::kit;
-use whir_core::theme::{self, Theme};
+use whir_core::theme::{self, Mode, NoteSize, Theme};
 use whir_core::{
     DocCx, DocKind, DocRequest, Document, FindQuery, OpenCx, Persistence, SaveAsSpec, SaveResult,
     TextureRegistry, needs_attention, trace,
@@ -26,6 +26,7 @@ use crate::dispatch;
 use crate::drawer::{self, Drawer};
 use crate::keys::consume_exact;
 use crate::menus::{self, Command, Enabled};
+use crate::palette::{self, Palette, Pick};
 use crate::search_panel::{self, SearchPanel};
 use crate::settings::{Section, SettingsDoc};
 use crate::tab_bar::{self, TabInfo};
@@ -87,6 +88,7 @@ pub struct App {
     drawer: Drawer,
     /// Find in all tabs, along the bottom.
     search: SearchPanel,
+    palette: Palette,
     library_scanned: bool,
     toast: Option<(String, f64)>,
     blink_on: bool,
@@ -101,7 +103,7 @@ impl App {
         restart: Rc<RefCell<Option<Vec<PathBuf>>>>,
     ) -> Self {
         let ctx = egui::Context::default();
-        let theme = if dark { Theme::dark() } else { Theme::light() };
+        let theme = Theme::chosen(dark);
         ctx.set_fonts(whir_platform::fonts::definitions(theme::FONTS));
         theme.apply(&ctx);
         Theme::set_current(theme.clone());
@@ -161,6 +163,7 @@ impl App {
             next_token: 0,
             drawer: Drawer::default(),
             search: SearchPanel::default(),
+            palette: Palette::default(),
             library_scanned: false,
             toast: None,
             blink_on: true,
@@ -182,6 +185,40 @@ impl App {
     #[cfg(test)]
     pub fn loading(&self) -> bool {
         self.tabs.iter().any(|t| t.doc.is_loading())
+    }
+
+    /// The active tab's title, what it says of itself, and whether it has
+    /// changes, for the tests that drive the whole app.
+    #[cfg(test)]
+    pub fn active_tab(&self) -> (String, String, bool) {
+        self.tabs
+            .get(self.active)
+            .map_or_else(Default::default, |t| {
+                (t.doc.title().to_owned(), t.doc.status(), t.doc.is_dirty())
+            })
+    }
+
+    /// What has the keyboard.
+    #[cfg(test)]
+    pub fn focused(&self) -> Option<egui::Id> {
+        self.ctx.memory(|m| m.focused())
+    }
+
+    #[cfg(test)]
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    #[cfg(test)]
+    pub fn palette_is_open(&self) -> bool {
+        self.palette.is_open()
+    }
+
+    /// Do what the theme tiles and the note size drop-down do.
+    #[cfg(test)]
+    pub fn change_look(&mut self, mode: Mode, size: NoteSize) {
+        self.set_note_size(size);
+        self.run(Command::Theme(mode));
     }
 
     fn push_tab(&mut self, doc: Box<dyn Document>) -> usize {
@@ -523,6 +560,7 @@ impl App {
             (false, false, false, false, false);
         let (mut settings, mut flag) = (false, false);
         let (mut find_in_tabs, mut result_step) = (false, None);
+        let mut command_palette = false;
         ui.input_mut(|i| {
             let ctrl = Modifiers::CTRL;
             let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
@@ -549,6 +587,7 @@ impl App {
             settings = consume_exact(i, ctrl, Key::Comma);
             flag = consume_exact(i, ctrl_shift, Key::D);
             find_in_tabs = consume_exact(i, ctrl_shift, Key::F);
+            command_palette = consume_exact(i, ctrl_shift, Key::P);
             if consume_exact(i, Modifiers::SHIFT, Key::F4) {
                 result_step = Some(false);
             }
@@ -582,6 +621,7 @@ impl App {
             (drawer, Command::ToggleDrawer),
             (find_in_tabs, Command::FindInTabs),
             (settings, Command::Settings),
+            (command_palette, Command::Palette),
         ] {
             if asked {
                 self.run(command);
@@ -649,9 +689,44 @@ impl App {
             Command::Dock => self.open_dock(),
             Command::Timesheet => self.open_settings("timesheet"),
             Command::Settings => self.open_settings(""),
+            Command::Theme(mode) => self.set_theme(mode),
+            Command::Palette => {
+                let focused = self.ctx.memory(|m| m.focused());
+                let notes = self.open_cx.library.snapshot().entries;
+                self.palette.open(focused, &notes);
+                self.ctx.request_repaint();
+            }
             Command::Guide => self.open_guide(),
             Command::About => self.about = true,
         }
+    }
+
+    /// Draw in `mode` from now on, and tell the dock once it can read that.
+    fn set_theme(&mut self, mode: Mode) {
+        mode.save(|| whir_platform::ipc::notify_changed(Changed::Theme));
+        self.look_again();
+    }
+
+    fn set_note_size(&mut self, size: NoteSize) {
+        size.save();
+        self.look_again();
+    }
+
+    /// The theme or the note text size may be different now: everything is
+    /// drawn from these, so that's all there is to it.
+    fn look_again(&mut self) {
+        let dark = whir_platform::os::prefers_dark();
+        let theme = Theme::chosen(dark);
+        if dark == self.theme.dark && theme.metrics == self.theme.metrics {
+            return;
+        }
+        if dark != self.theme.dark {
+            self.pending.push(WindowCommand::SetDarkMode(dark));
+        }
+        theme.apply(&self.ctx);
+        Theme::set_current(theme.clone());
+        self.theme = theme;
+        self.ctx.request_repaint();
     }
 
     fn about_dialog(&mut self, theme: &Theme) {
@@ -696,6 +771,7 @@ impl App {
         Enabled {
             tab: doc.is_some(),
             reopen: !self.recently_closed.is_empty(),
+            theme: Mode::saved(),
             save,
             save_as: save || doc.is_some_and(|d| d.kind() == DocKind::Image),
             several_tabs: self.tabs.len() > 1,
@@ -776,18 +852,7 @@ impl App {
         }
         // The dialog is modal: documents get no keyboard input meanwhile.
         if self.close_flow.is_some() {
-            ui.input_mut(|i| {
-                i.events.retain(|e| {
-                    !matches!(
-                        e,
-                        Event::Key { .. }
-                            | Event::Text(_)
-                            | Event::Paste(_)
-                            | Event::Copy
-                            | Event::Cut
-                    )
-                })
-            });
+            ui.input_mut(|i| i.events.retain(|e| !palette::is_keyboard(e)));
         }
     }
 
@@ -822,6 +887,8 @@ impl App {
                 }
                 DocRequest::Reveal(path) => self.pending.push(WindowCommand::Reveal(path)),
                 DocRequest::Toast(text) => self.show_toast(text),
+                DocRequest::Theme(mode) => self.run(Command::Theme(mode)),
+                DocRequest::NoteSize(size) => self.set_note_size(size),
             }
         }
     }
@@ -883,8 +950,25 @@ impl App {
         if self.close_flow.is_some() {
             self.run_close_flow(ui);
         }
+        // The palette goes first, so it has the keys before anything else does;
+        // it's drawn over everything wherever it comes in the frame.
+        self.palette.tick(&self.ctx);
+        let palette_up = self.palette.is_open();
+        if palette_up {
+            let theme = self.theme.clone();
+            match self.palette.show(&self.ctx, &theme) {
+                Some(Pick::Note(path)) => self.open_paths(vec![path]),
+                Some(Pick::Page(section)) => self.open_settings(section.name()),
+                Some(Pick::Menu(..)) | None => {}
+            }
+            ui.input_mut(|i| i.events.retain(|e| !palette::is_keyboard(e)));
+        }
         let mut drawer_out = drawer::Out::default();
-        if self.close_flow.is_none() {
+        let every_key = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|t| t.doc.wants_every_key());
+        if self.close_flow.is_none() && !every_key && !palette_up {
             self.sync_drawer();
             match self.drawer.mode() {
                 drawer::Mode::Shots => {
@@ -1027,6 +1111,10 @@ impl App {
         let todo = self.active_flag();
         let enabled = self.enabled();
         let mut commands = Vec::new();
+        let read_menus = self.palette.wants_menus();
+        let press = self.palette.take_press();
+        let press = press.as_ref().map(|(menu, label)| (*menu, label.as_str()));
+        let mut read = None;
         Panel::top("toolbar")
             .exact_size(m.toolbar_height)
             .resizable(false)
@@ -1055,6 +1143,13 @@ impl App {
                 let tab = self.tabs.get_mut(active);
                 match tab {
                     Some(tab) => {
+                        if read_menus {
+                            let active = menus::Active {
+                                doc: &mut *tab.doc,
+                                cx: &mut cx,
+                            };
+                            read = Some(menus::read(&mut tools, Some(active), enabled, press));
+                        }
                         let active = menus::Active {
                             doc: &mut *tab.doc,
                             cx: &mut cx,
@@ -1065,7 +1160,12 @@ impl App {
                             tab.doc.toolbar(&mut tools, &mut cx);
                         }
                     }
-                    None => commands = menus::bar(&mut tools, None, enabled),
+                    None => {
+                        if read_menus {
+                            read = Some(menus::read(&mut tools, None, enabled, press));
+                        }
+                        commands = menus::bar(&mut tools, None, enabled);
+                    }
                 }
                 // A note: its todo flag, among its own tools.
                 if let Some(todo) = todo {
@@ -1082,6 +1182,10 @@ impl App {
                     });
                 }
             });
+        if let Some((entries, pressed)) = read {
+            self.palette.menus_read(entries);
+            commands.extend(pressed);
+        }
         for command in commands {
             self.run(command);
         }
@@ -1441,6 +1545,10 @@ impl Handler for App {
         match what {
             Changed::Time => whir_core::timesheet::changed_elsewhere(),
             Changed::Todos => self.open_cx.library.todos_changed(),
+            // Ours: the window is what writes it.
+            Changed::Theme => {}
+            // Settings reads it again with the timesheet.
+            Changed::Dock => whir_core::timesheet::changed_elsewhere(),
         }
         self.ctx.request_repaint();
     }
@@ -1506,13 +1614,7 @@ impl Handler for App {
     }
 
     fn system_theme_changed(&mut self) {
-        let dark = whir_platform::os::prefers_dark();
-        if dark != self.theme.dark {
-            self.theme = if dark { Theme::dark() } else { Theme::light() };
-            self.theme.apply(&self.ctx);
-            Theme::set_current(self.theme.clone());
-            self.pending.push(WindowCommand::SetDarkMode(dark));
-        }
+        self.look_again();
     }
 
     fn save_dialog_closed(&mut self, token: u64, path: Option<PathBuf>) {

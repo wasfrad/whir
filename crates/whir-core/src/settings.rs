@@ -111,21 +111,39 @@ pub fn set_str(key: &str, value: &str) {
     }
 }
 
+/// [`set_str`], for a value another process wants to read: `after` runs once
+/// it's on disk.
+pub fn set_str_then(key: &str, value: &str, after: impl FnOnce() + Send + 'static) {
+    let mut s = store();
+    let write = s.set(key, value) && s.path.is_some();
+    drop(s);
+    if write {
+        spawn_write("settings", move || {
+            write_latest();
+            after();
+        });
+    } else {
+        after();
+    }
+}
+
 /// Write the current settings on a short-lived thread (writes are rare, but
 /// flushing to disk can take a while on a busy drive).
 fn save_soon() {
-    spawn_write("settings", || {
-        // One write at a time, each of the latest values.
-        static WRITE: Mutex<()> = Mutex::new(());
-        let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
-        let snapshot = {
-            let s = store();
-            s.path.clone().map(|p| (p, serialize(&s.entries)))
-        };
-        if let Some((path, text)) = snapshot {
-            let _ = save_to(&path, &text);
-        }
-    });
+    spawn_write("settings", write_latest);
+}
+
+/// One write at a time, each of the latest values.
+fn write_latest() {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = {
+        let s = store();
+        s.path.clone().map(|p| (p, serialize(&s.entries)))
+    };
+    if let Some((path, text)) = snapshot {
+        let _ = save_to(&path, &text);
+    }
 }
 
 /// Writes of files in `%LOCALAPPDATA%\whir` still running, for [`wait_idle`].

@@ -46,7 +46,9 @@ open document, and the strip along the bottom says how the document stands.
 - **Ctrl+E**: the drawer along the bottom: take it to the keyboard · fold it away
 - **Capture, in the strip along the bottom · Tools › Capture screenshot**: take a screenshot
 - **Tools › Capture dock**: open the capture dock
-- **Ctrl+, · Tools › Settings**: Settings: the timesheet, customers & projects, PDFs & images, startup & window
+- **Ctrl+Shift+P · Tools › Command palette**: find anything by a few letters: every command in the menus, including the open document's, your notes, and the pages of Settings. ↑ ↓ and Enter pick, Esc closes
+- **Ctrl+, · Tools › Settings**: Settings: the timesheet, customers & projects, time tracking, appearance, PDFs & images, capture & dock, startup & window
+- **View › Theme · Settings › Appearance**: System, Light or Dark; the capture dock follows
 - **Ctrl+Shift+F · F4 / Shift+F4**: find in all tabs · next / previous result, in any file
 - **Ctrl+W / Ctrl+F4 / middle-click a tab**: close the tab (closing the last one closes whir)
 - **The arrow after the last tab**: every tab, when there are more than fit
@@ -64,6 +66,9 @@ the mouse is on another monitor, it opens there instead, centred, at the same si
 left off-screen when monitors change.
 
 ## Notes
+
+**Settings › Appearance** sets how big a note's text is: Small, Medium or Large. It changes
+how notes are shown here, not the files.
 
 - **Title field · ↓ / Enter**: name the note (it becomes the file name) · go to the text
 - **Enter in a list / task / quote**: continue it (Enter on an empty item ends it)
@@ -165,8 +170,10 @@ beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
 
 whir starts with Windows (a per-user entry under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, set the first time the dock runs;
-switch it off in the tray menu). The hotkey can be changed or switched off in
-`%LOCALAPPDATA%\whir\dock.ini` (`hotkey = ctrl+alt+f9`, `hotkey = off`).
+switch it off in the tray menu). **Settings › Capture & dock** changes the shortcut (press
+the new one, with Ctrl or Alt), the delay, and whether the dock shows; the ⋯ beside the
+shortcut has the Print Screen ones and **Turn off**. If another app already has that
+shortcut, the page says so.
 
 Captures are taken with GDI, which keeps the dock small: HDR content comes out as SDR,
 protected video is black, and the mouse pointer is never in the picture.
@@ -267,26 +274,34 @@ however short.
 ### The timesheet
 
 Settings (Ctrl+, or Tools › Timesheet) opens on the week at a glance, and that's
-where time is put down too: a row per project, grouped by customer with its code, a
-column per day, in hours rounded the way they go on the timecard (to 0.25 h per project
-per day by default; 0.1 h or exact in **Customers & projects**). The running project's
-today is marked and counts up, and a line above the table shows it to the second, with
-**Pause**.
+where time is put down too: a row per project, with its customer and code, a column per
+day, in hours rounded the way they go on the timecard (to 0.25 h per project per day by
+default; 0.1 h or exact in **Time tracking**). The running project's today is marked and
+counts up, and a line above the table shows it to the second, with **Pause**.
+
+The table fits itself to the window: the days narrow first, then customer and project
+share a column. In a very narrow window it scrolls sideways.
 
 - **‹ › · This week**: previous / next week · back to this one
 - **Click a day · type `2`, `1.5`, `1:30` or `90m` · Enter**: that day's hours on the project (more is added after the day's last entry; less is taken off the latest; empty or `0` clears it)
 - **Tab / Shift+Tab · Esc**: put them down and go to the next / previous day · leave it as it was
-- **The last row: Customer… then Project…**: add a project to the week (or a new customer or project, with its code), then type its hours
+- **Add a project, in the last row**: find a project by a few letters of its customer or name, or make a new one, then type its hours
 - **Below the table**: the chosen day's entries: change a start or an end (`9:05`, `1:20 pm`, `1320`), the note, or delete it
 - **Copy**: the week as a table, to paste into Excel or an email
 - **Close week…**: close it out: writes `<Monday> timesheet.csv` (the hours per project per day, with each day's notes) and `<Monday> entries.csv` (every entry, to the second) to the Time folder
 - **Reopen · Closed weeks**: open a closed week again · every closed week with its hours, its CSV a click away (it opens in whir as a table)
 
 On Monday the timesheet says when last week is still open, with a way straight to it. A
-closed week can be read but not changed until it's reopened. **Customers & projects** is
-where timers are set up: customers, their projects and codes, renamed in place; a
-project with time in it is archived (no longer offered in the dock, its time kept)
-rather than deleted.
+closed week can be read but not changed until it's reopened.
+
+**Customers & projects** is where timers are set up: a card for each customer, with its
+projects and codes. Click a name or a code to change it where it stands; Enter keeps it
+and Esc puts it back. The ⋯ at the end of a row has the rest: a project with time in it is
+archived (no longer offered in the dock, its time kept) rather than deleted, and archived
+projects fold away at the bottom of their customer's card.
+
+**Time tracking** has the rounding, when the dock asks about time away, and whether it
+stays out while a timer runs.
 
 Entries are kept to the second and never span midnight (they're cut there), so every
 day's total is the sum of its entries.
@@ -299,16 +314,16 @@ without losing anything.
 - `Documents\whir`: notes and new tables; the todo flags in `.whir\todos.txt`
 - `Documents\whir\Screenshots`: captures; their highlights and text in `.whir`
 - `Documents\whir\Time`: the timesheet (the data in a hidden `.whir` folder, one small text file for the projects and what's running and one per week, Monday to Sunday) and the CSVs of closed weeks. Set `WHIR_TIME_DIR` to keep it elsewhere.
-- `%LOCALAPPDATA%\whir\settings.ini`: whir's settings, the minimap's on/off among them
-- `%LOCALAPPDATA%\whir\dock.ini`: the dock's place, delay and hotkey
+- `%LOCALAPPDATA%\whir\settings.ini`: whir's settings, the theme and the minimap's on/off among them
+- `%LOCALAPPDATA%\whir\dock.ini`: the dock's place, delay and hotkey (change the last two in **Settings › Capture & dock**)
 - `%LOCALAPPDATA%\whir\views.txt`: where each PDF was left (the last 500)
 
 ## Command line
 
 - `whir.exe <files>`: open them (in the running window, if there is one)
 - `--register` · `--unregister`: add · remove the "Open with" entries (unregistering also stops whir starting with Windows)
-- `--settings timesheet` (or `timers`, `pdfs`, `startup`): open that page of Settings
-- `--dock` · `--dock-start` · `--dock-capture` · `--dock-quit`: show the dock (even when hidden) · start it without showing it · capture at once · close it
+- `--settings timesheet` (or `timers`, `tracking`, `appearance`, `pdfs`, `capture`, `startup`): open that page of Settings
+- `--dock` · `--dock-hide` · `--dock-start` · `--dock-capture` · `--dock-quit`: show the dock (even when hidden) · leave only its tray icon · start it without showing it · capture at once · close it
 - `--warp`: draw with Windows' software renderer instead of the graphics driver (try it if the window doesn't draw properly, or on a weak or remote machine)
 
 ## Not yet

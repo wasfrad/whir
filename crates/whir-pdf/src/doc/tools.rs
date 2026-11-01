@@ -105,12 +105,8 @@ impl PdfDoc {
             (Some(Icon::FitWidth), Zoom::FitWidth, "Fit width", "2"),
             (None, Zoom::Manual(ZOOM_100), "Actual size", "1"),
         ] {
-            if ui
-                .add(kit::menu_entry(icon, label, key).selected(self.zoom == zoom))
-                .clicked()
-            {
+            if kit::radio_entry(ui, icon, label, key, self.zoom == zoom) {
                 self.pending.push(Cmd::Zoom(zoom));
-                ui.close();
             }
         }
     }

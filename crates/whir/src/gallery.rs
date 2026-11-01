@@ -22,7 +22,7 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2, Vie
 use whir_core::Waker;
 use whir_core::settings;
 use whir_core::time::{Stamp, monday_of};
-use whir_core::timesheet::Store;
+use whir_core::timesheet::{Grid, Store};
 use whir_gfx::{Device, GpuTextures, Renderer};
 use whir_image::{PixelLayout, encode_png};
 use whir_platform::{FrameInfo, FrameOutput, Handler as _};
@@ -41,6 +41,8 @@ const CTRL_SHIFT: Modifiers = Modifiers {
     shift: true,
     ..CTRL
 };
+/// Where a note's text is, in a [`WINDOW`]: a click there gives it the keyboard.
+const IN_THE_NOTE: Pos2 = pos2(500.0, 200.0);
 
 /// Every picture a design pass should look at.
 const SCENES: &[Scene] = &[
@@ -83,13 +85,109 @@ const SCENES: &[Scene] = &[
     }),
     Scene::new("settings-timesheet", "notes", |s, _| {
         s.app.open_settings("timesheet")
-    }),
+    })
+    .fluid(),
     Scene::new("settings-timers", "notes", |s, _| {
         s.app.open_settings("timers")
-    }),
-    Scene::new("settings-pdfs", "notes", |s, _| s.app.open_settings("pdfs")),
+    })
+    .fluid(),
+    Scene::new("settings-tracking", "notes", |s, _| {
+        s.app.open_settings("tracking")
+    })
+    .fluid(),
+    Scene::new("settings-appearance", "notes", |s, _| {
+        s.app.open_settings("appearance")
+    })
+    .fluid(),
+    Scene::new("settings-pdfs", "notes", |s, _| s.app.open_settings("pdfs")).fluid(),
+    Scene::new("settings-capture", "notes", |s, _| {
+        s.app.open_settings("capture")
+    })
+    .fluid(),
     Scene::new("settings-startup", "notes", |s, _| {
         s.app.open_settings("startup")
+    })
+    .fluid(),
+    Scene::new("settings-timers-menu", "notes", |s, _| {
+        s.app.open_settings("timers");
+        s.settle();
+        s.click(pos2(929.0, 239.0), PointerButton::Primary);
+    }),
+    Scene::new("settings-timers-adding", "notes", |s, _| {
+        s.app.open_settings("timers");
+        s.settle();
+        s.click(pos2(871.0, 291.0), PointerButton::Primary);
+        s.settle();
+        s.text("Rail contract");
+    }),
+    Scene::new("settings-timers-archived", "notes", |s, _| {
+        s.app.open_settings("timers");
+        s.settle();
+        s.click(pos2(292.0, 492.0), PointerButton::Primary);
+    }),
+    Scene::new("settings-timesheet-adder", "notes", |s, _| {
+        s.app.open_settings("timesheet");
+        s.settle();
+        s.click(pos2(295.0, 332.0), PointerButton::Primary);
+        s.settle();
+        s.text("sch");
+    }),
+    Scene::new("settings-timesheet-new-project", "notes", |s, _| {
+        s.app.open_settings("timesheet");
+        s.settle();
+        s.click(pos2(295.0, 332.0), PointerButton::Primary);
+        s.settle();
+        s.text("zzz");
+        s.settle();
+        s.click(pos2(315.0, 430.0), PointerButton::Primary);
+        s.settle();
+        s.text("Rail contract");
+    }),
+    Scene::new("settings-timesheet-entries", "notes", |s, _| {
+        s.app.open_settings("timesheet");
+        s.settle();
+        s.click(pos2(700.0, 227.0), PointerButton::Primary);
+    }),
+    Scene::new("palette", "notes", |s, f| {
+        s.open(&[&f.note]);
+        s.settle();
+        s.key(CTRL_SHIFT, Key::P);
+    }),
+    Scene::new("palette-narrow", "notes", |s, f| {
+        s.resize(Vec2::new(480.0, 640.0));
+        s.open(&[&f.note]);
+        s.settle();
+        s.key(CTRL_SHIFT, Key::P);
+    }),
+    Scene::new("palette-pdf", "notes", |s, f| {
+        s.open(&[&f.pdf]);
+        s.settle();
+        s.key(CTRL_SHIFT, Key::P);
+        s.settle();
+        s.text("fit");
+    }),
+    Scene::new("palette-found", "notes", |s, f| {
+        s.open(&[&f.csv]);
+        s.settle();
+        s.key(CTRL_SHIFT, Key::P);
+        s.settle();
+        s.text("note");
+        s.settle();
+        s.key(Modifiers::NONE, Key::ArrowDown);
+    }),
+    Scene::new("menu-narrow", "notes", |s, f| {
+        s.resize(Vec2::new(480.0, 640.0));
+        s.open(&[&f.note]);
+        s.settle();
+        s.click(pos2(23.0, 54.0), PointerButton::Primary);
+    }),
+    Scene::new("menu-view-theme", "notes", |s, f| {
+        s.open(&[&f.note]);
+        s.settle();
+        s.click(pos2(101.0, 54.0), PointerButton::Primary);
+        s.settle();
+        s.hover(pos2(135.0, 105.0));
+        s.wait(0.4);
     }),
     Scene::new("tabs-many", "notes", |s, f| {
         let many: Vec<&Path> = f.notes.iter().map(PathBuf::as_path).collect();
@@ -188,11 +286,16 @@ const SCENES: &[Scene] = &[
     }),
 ];
 
+/// Widths a page has to cope with, besides [`WINDOW`]'s.
+const NARROWER: &[f32] = &[900.0, 640.0, 480.0];
+
 struct Scene {
     name: &'static str,
     /// The drawer tab it opens on.
     drawer: &'static str,
     setup: fn(&mut Stage, &Fixtures),
+    /// Shown again at each of these.
+    widths: &'static [f32],
 }
 
 impl Scene {
@@ -205,6 +308,15 @@ impl Scene {
             name,
             drawer,
             setup,
+            widths: &[],
+        }
+    }
+
+    /// Shown at [`NARROWER`] too.
+    const fn fluid(self) -> Self {
+        Self {
+            widths: NARROWER,
+            ..self
         }
     }
 }
@@ -332,6 +444,23 @@ impl Stage {
         };
         self.frame(vec![event(true)]);
         self.frame(vec![event(false)]);
+    }
+
+    /// Ctrl+Shift+P, some typing, and Enter.
+    fn palette(&mut self, query: &str) {
+        self.key(CTRL_SHIFT, Key::P);
+        self.settle();
+        self.text(query);
+        self.settle();
+        self.key(Modifiers::NONE, Key::Enter);
+    }
+
+    /// What's on the screen, once it has settled.
+    fn pixels(&mut self) -> Vec<u8> {
+        self.settle();
+        // The frame after a settle: one that has taken in everything before it.
+        self.frame(Vec::new());
+        self.app.read_pixels().expect("offscreen renderer")
     }
 
     fn shoot(&mut self, path: &Path) {
@@ -595,25 +724,45 @@ fn screenshot(variant: usize) -> Vec<u8> {
     .expect("encode")
 }
 
-/// A week with customers, projects and hours in it.
+/// A week with customers, projects and hours in it, and what a page has to
+/// cope with: long names, no code, a customer with no projects, an archived
+/// project, a week already closed.
 fn timesheet(dir: PathBuf) {
-    let monday = monday_of(Stamp::now().day);
+    let now = Stamp::now();
+    let monday = monday_of(now.day);
     let mut store = Store::open(dir);
     store
         .update(|tx| {
             let northwind = tx.state.add_customer("Northwind Fuels");
             let tailspin = tx.state.add_customer("Tailspin Logistics");
+            let contoso = tx
+                .state
+                .add_customer("Contoso Midstream Partners of the Northeast");
+            tx.state.add_customer("Fabrikam");
             let timers = [
                 tx.state.add_timer(northwind, "Rack audit", "NW-104"),
                 tx.state.add_timer(northwind, "Pricing model", "NW-118"),
                 tx.state.add_timer(tailspin, "Freight review", "TS-022"),
+                tx.state.add_timer(
+                    contoso,
+                    "Terminal automation rollout, phase two and beyond",
+                    "CMP-2291",
+                ),
             ];
+            tx.state.add_timer(tailspin, "Driver scheduling", "");
+            let old = tx.state.add_timer(northwind, "Q2 reconciliation", "NW-087");
+            if let Some(t) = tx.state.timer_mut(old) {
+                t.archived = true;
+            }
             for (t, timer) in timers.iter().enumerate() {
                 for day in 0..5 {
                     let hours = 1 + (t as i64 + day) % 4;
                     tx.set_day(*timer, monday + day, hours * 3600);
                 }
+                tx.set_day(*timer, monday - 14, 2 * 3600);
             }
+            tx.set_day(old, monday - 14, 3 * 3600);
+            tx.close_week(monday - 14, now).expect("closed week");
         })
         .expect("timesheet");
 }
@@ -633,25 +782,388 @@ fn gallery() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     let fixtures = Fixtures::write(&dir.join(".fixtures"));
-    for scene in SCENES
-        .iter()
-        .filter(|s| wanted("WHIR_PREVIEW_ONLY", s.name))
-    {
-        for (theme, dark) in [("dark", true), ("light", false)] {
-            for (percent, ppp) in [(100, 1.0), (150, 1.5)] {
-                let mode = format!("{theme}-{percent}");
-                if !wanted("WHIR_PREVIEW_MODES", &mode) {
-                    continue;
+    for scene in SCENES {
+        let widths = std::iter::once(None).chain(scene.widths.iter().copied().map(Some));
+        for width in widths {
+            let name = match width {
+                Some(width) => format!("{}-{width}", scene.name),
+                None => scene.name.to_owned(),
+            };
+            if !wanted("WHIR_PREVIEW_ONLY", &name) {
+                continue;
+            }
+            for (theme, dark) in [("dark", true), ("light", false)] {
+                for (percent, ppp) in [(100, 1.0), (150, 1.5)] {
+                    let mode = format!("{theme}-{percent}");
+                    if !wanted("WHIR_PREVIEW_MODES", &mode) {
+                        continue;
+                    }
+                    // A fresh start each time: nothing carries over from the last scene.
+                    settings::memory_only();
+                    settings::set_str("drawer.tab", scene.drawer);
+                    let mut stage = Stage::new(dark, ppp);
+                    if let Some(width) = width {
+                        stage.resize(Vec2::new(width, WINDOW.y));
+                    }
+                    (scene.setup)(&mut stage, &fixtures);
+                    stage.shoot(&dir.join(format!("{name}-{mode}.png")));
                 }
-                // A fresh start each time: nothing carries over from the last scene.
-                settings::memory_only();
-                settings::set_str("drawer.tab", scene.drawer);
-                let mut stage = Stage::new(dark, ppp);
-                (scene.setup)(&mut stage, &fixtures);
-                stage.shoot(&dir.join(format!("{}-{mode}.png", scene.name)));
             }
         }
     }
+}
+
+/// The made-up files, for a test that drives the whole app. These run one at a
+/// time (`--test-threads=1`) and want `WHIR_PREVIEW_DIR`, as the gallery does.
+fn live() -> Option<Fixtures> {
+    let dir = PathBuf::from(std::env::var_os("WHIR_PREVIEW_DIR")?);
+    unsafe {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+    settings::memory_only();
+    Some(Fixtures::write(&dir.join(".fixtures-live")))
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn what_is_typed_in_the_palette_stays_out_of_the_document() {
+    let Some(f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.open(&[&f.note]);
+    s.settle();
+    s.click(IN_THE_NOTE, PointerButton::Primary);
+    s.settle();
+    let before = s.app.active_tab();
+    let keyboard = s.app.focused();
+    assert!(keyboard.is_some(), "the click gave the note the keyboard");
+
+    s.key(CTRL_SHIFT, Key::P);
+    s.settle();
+    assert!(s.app.palette_is_open());
+    assert_ne!(s.app.focused(), keyboard, "the palette has the keyboard");
+    s.text("three more words");
+    s.key(Modifiers::NONE, Key::Backspace);
+    s.key(CTRL, Key::A);
+    s.settle();
+    assert_eq!(
+        s.app.active_tab(),
+        before,
+        "the note took keys from the palette"
+    );
+
+    // Esc goes back to where it was, with the keyboard.
+    s.key(Modifiers::NONE, Key::Escape);
+    s.settle();
+    assert!(!s.app.palette_is_open());
+    assert_eq!(s.app.active_tab(), before, "Esc reached the note");
+    assert_eq!(s.app.focused(), keyboard, "the note lost the keyboard");
+    s.text("three more words ");
+    s.settle();
+    assert_ne!(
+        s.app.active_tab().1,
+        before.1,
+        "typing didn't reach the note"
+    );
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn the_palette_runs_a_documents_own_command_on_its_selection() {
+    let Some(f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.open(&[&f.note]);
+    s.settle();
+    s.click(IN_THE_NOTE, PointerButton::Primary);
+    s.settle();
+    s.key(CTRL, Key::A);
+    s.settle();
+    assert!(!s.app.active_tab().2, "selecting isn't a change");
+    s.palette("bold");
+    s.frame(Vec::new());
+    s.frame(Vec::new());
+    assert!(!s.app.palette_is_open());
+    assert!(s.app.active_tab().2, "Bold didn't reach the note");
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn the_palette_runs_a_command_once() {
+    let Some(f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.open(&[&f.csv]);
+    s.settle();
+    let tabs = s.app.tab_count();
+    s.palette("new table");
+    s.settle();
+    assert_eq!(s.app.tab_count(), tabs + 1);
+    // And it's first in the list now, with nothing typed.
+    s.key(CTRL_SHIFT, Key::P);
+    s.settle();
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    assert_eq!(s.app.tab_count(), tabs + 2);
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn the_palette_opens_notes_and_settings() {
+    let Some(f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.open(&[&f.csv]);
+    // The notes are read once the window is up.
+    s.settle();
+    s.wait(0.2);
+    s.settle();
+    s.palette("hedge");
+    s.settle();
+    assert_eq!(s.app.active_tab().0, "Hedge questions");
+    s.palette("appearance");
+    s.settle();
+    assert_eq!(s.app.active_tab().0, "Settings");
+    // A setting's page, by a word that's on it.
+    s.palette("minimap");
+    s.settle();
+    assert_eq!(s.app.active_tab().0, "Settings");
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn a_change_of_look_leaves_nothing_of_the_old_one() {
+    use whir_core::theme::{Mode, NoteSize};
+    let Some(f) = live() else { return };
+    let shots = f.shots[0].clone();
+    let documents: [(&str, Option<&Path>); 5] = [
+        ("note", Some(&f.note)),
+        ("table", Some(&f.csv)),
+        ("pdf", Some(&f.pdf)),
+        ("image", Some(&shots)),
+        ("settings", None),
+    ];
+    let mut wrong = Vec::new();
+    for (name, path) in documents {
+        let open = |s: &mut Stage| match path {
+            Some(path) => s.open(&[path]),
+            None => s.app.open_settings("timers"),
+        };
+        for (from_dark, mode) in [(true, Mode::Light), (false, Mode::Dark)] {
+            // Changed while it's showing.
+            settings::memory_only();
+            let mut changed = Stage::new(from_dark, 1.0);
+            open(&mut changed);
+            changed.settle();
+            changed.app.change_look(mode, NoteSize::Medium);
+            let after = changed.pixels();
+
+            // As though it had always been so.
+            settings::memory_only();
+            mode.save(|| {});
+            let mut fresh = Stage::new(!from_dark, 1.0);
+            open(&mut fresh);
+            let want = fresh.pixels();
+
+            assert_eq!(after.len(), want.len());
+            let off = after
+                .chunks_exact(4)
+                .zip(want.chunks_exact(4))
+                .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 2))
+                .count();
+            println!("{name}, to {mode:?}: {off} pixels differ");
+            if off > 0 {
+                wrong.push(format!("{name} to {mode:?}: {off}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn a_note_takes_a_new_text_size_while_it_is_open() {
+    use whir_core::theme::{Mode, NoteSize};
+    let Some(f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.open(&[&f.note]);
+    let medium = s.pixels();
+    s.app.change_look(Mode::Dark, NoteSize::Large);
+    let large = s.pixels();
+    assert_ne!(medium, large, "the note didn't change size");
+
+    settings::memory_only();
+    Mode::Dark.save(|| {});
+    NoteSize::Large.save();
+    let mut fresh = Stage::new(true, 1.0);
+    fresh.open(&[&f.note]);
+    let want = fresh.pixels();
+    let off = large
+        .chunks_exact(4)
+        .zip(want.chunks_exact(4))
+        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 2))
+        .count();
+    assert_eq!(off, 0, "pixels differ from a note opened at that size");
+}
+
+/// The timesheet as it is on disk.
+fn on_disk() -> Store {
+    let mut store = Store::open(whir_core::timesheet::resolve_dir().expect("a time folder"));
+    store.refresh();
+    store
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn hours_are_typed_along_a_row_with_the_keyboard() {
+    let Some(_f) = live() else { return };
+    let store = on_disk();
+    let timer = store
+        .state()
+        .timers
+        .iter()
+        .find(|t| t.name == "Pricing model")
+        .expect("the fixture's project")
+        .id;
+    let monday = monday_of(Stamp::now().day);
+    let cell = |d: usize| {
+        let mut store = on_disk();
+        let week = store.week(monday).clone();
+        Grid::of(&week, None, Stamp::now()).cell(timer, d)
+    };
+    let (mon, tue, wed) = (cell(0), cell(1), cell(2));
+    assert_ne!(mon, 12600);
+
+    let mut s = Stage::new(true, 1.0);
+    s.app.open_settings("timesheet");
+    s.settle();
+    // Pricing model's Monday: typing replaces what it showed.
+    s.click(pos2(680.0, 227.0), PointerButton::Primary);
+    s.settle();
+    s.text("3.5");
+    // Tab puts it down and goes on to Tuesday.
+    s.key(Modifiers::NONE, Key::Tab);
+    s.settle();
+    assert_eq!(cell(0), 12600, "Tab put Monday's hours down");
+    s.text("1.25");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    assert_eq!(cell(1), 4500, "Enter put Tuesday's hours down");
+
+    // Esc leaves a cell as it was.
+    s.click(pos2(820.0, 227.0), PointerButton::Primary);
+    s.settle();
+    s.text("9");
+    s.key(Modifiers::NONE, Key::Escape);
+    s.settle();
+    assert_eq!(cell(2), wed, "Esc left Wednesday alone");
+
+    // Shift+Tab goes back along the row.
+    s.click(pos2(820.0, 227.0), PointerButton::Primary);
+    s.settle();
+    s.text("2");
+    s.key(Modifiers::SHIFT, Key::Tab);
+    s.settle();
+    assert_eq!(cell(2), 7200, "Shift+Tab put Wednesday's hours down");
+    s.text("4");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    assert_eq!(cell(1), 14400, "and went back to Tuesday");
+    assert_ne!(tue, 14400);
+
+    // A row stays where it is while a cell in it is being typed in: the next
+    // one is still under the same click.
+    s.click(pos2(680.0, 227.0), PointerButton::Primary);
+    s.settle();
+    s.click(pos2(680.0, 261.0), PointerButton::Primary);
+    s.settle();
+    s.text("6");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    let rack = on_disk()
+        .state()
+        .timers
+        .iter()
+        .find(|t| t.name == "Rack audit")
+        .expect("the fixture's project")
+        .id;
+    let mut store = on_disk();
+    let week = store.week(monday).clone();
+    assert_eq!(Grid::of(&week, None, Stamp::now()).cell(rack, 0), 21600);
+    assert_eq!(cell(0), 12600, "the first cell kept its hours");
+    let _ = mon;
+}
+
+#[test]
+#[ignore = "drives the whole app"]
+fn customers_and_projects_are_changed_where_they_stand() {
+    let Some(_f) = live() else { return };
+    let mut s = Stage::new(true, 1.0);
+    s.app.open_settings("timers");
+    s.settle();
+    let customer = |name: &str| {
+        let store = on_disk();
+        store
+            .state()
+            .customers
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.id)
+    };
+
+    // A new customer: named, and Enter.
+    s.click(pos2(900.0, 111.0), PointerButton::Primary);
+    s.settle();
+    s.text("Aardvark Oil");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    assert!(
+        customer("Aardvark Oil").is_some(),
+        "Enter added the customer"
+    );
+
+    // Esc doesn't add one.
+    s.click(pos2(900.0, 111.0), PointerButton::Primary);
+    s.settle();
+    s.text("Never mind");
+    s.key(Modifiers::NONE, Key::Escape);
+    s.settle();
+    assert_eq!(customer("Never mind"), None, "Esc called it off");
+
+    // Its card comes first, with its + Project: name one, with Enter.
+    s.click(pos2(871.0, 203.0), PointerButton::Primary);
+    s.settle();
+    s.text("Pipeline survey");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    let aardvark = customer("Aardvark Oil").expect("the new customer");
+    let store = on_disk();
+    let added = store
+        .state()
+        .timers
+        .iter()
+        .find(|t| t.name == "Pipeline survey");
+    assert_eq!(added.map(|t| t.customer), Some(aardvark));
+
+    // A name changes where it stands.
+    s.click(pos2(300.0, 203.0), PointerButton::Primary);
+    s.settle();
+    s.key(CTRL, Key::A);
+    s.text("Aardvark Petroleum");
+    s.key(Modifiers::NONE, Key::Enter);
+    s.settle();
+    assert!(
+        customer("Aardvark Petroleum").is_some(),
+        "Enter kept the name"
+    );
+    assert_eq!(customer("Aardvark Oil"), None);
+
+    // Esc puts one back.
+    s.click(pos2(300.0, 203.0), PointerButton::Primary);
+    s.settle();
+    s.key(CTRL, Key::A);
+    s.text("Nothing like it");
+    s.key(Modifiers::NONE, Key::Escape);
+    s.settle();
+    assert_eq!(customer("Nothing like it"), None, "Esc put the name back");
+    assert!(customer("Aardvark Petroleum").is_some());
 }
 
 /// Every icon at the sizes it's used, named: a codepoint that exists can

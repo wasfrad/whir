@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::captures::Captures;
 use crate::find_bar::FindQuery;
 use crate::library::Library;
+use crate::theme::{Mode, NoteSize};
 use crate::{TextureRegistry, Waker};
 
 /// What kind of content a tab shows; drives the tab glyph.
@@ -82,6 +83,10 @@ pub enum DocRequest {
     Reveal(PathBuf),
     /// Say this briefly, at the bottom of the window.
     Toast(String),
+    /// Draw in this theme from now on.
+    Theme(Mode),
+    /// Show notes at this size from now on.
+    NoteSize(NoteSize),
 }
 
 /// The menus a document adds to.
@@ -184,6 +189,11 @@ pub trait Document {
 
     /// Go to a part of the document by name (a Settings page's section).
     fn show_section(&mut self, _name: &str) {}
+
+    /// Every key is for the document just now: none are shortcuts.
+    fn wants_every_key(&self) -> bool {
+        false
+    }
 
     // --- saving -------------------------------------------------------------
 

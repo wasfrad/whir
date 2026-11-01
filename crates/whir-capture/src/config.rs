@@ -93,6 +93,39 @@ pub fn format_hotkey(h: Hotkey) -> String {
 /// Seconds a delayed capture waits; the Delay button steps through these.
 pub const DELAYS: [u32; 3] = [0, 3, 5];
 
+/// What Settings can ask of the dock, which owns `dock.ini`. Small enough to go
+/// in a posted message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// One of [`DELAYS`].
+    Delay(u32),
+    Hotkey(Option<Hotkey>),
+}
+
+impl Ask {
+    /// As `wParam` and `lParam`.
+    pub fn encode(self) -> (usize, isize) {
+        match self {
+            Ask::Delay(seconds) => (1, seconds as isize),
+            Ask::Hotkey(None) => (2, 0),
+            Ask::Hotkey(Some(h)) => (2, ((h.mods << 16) | h.vk) as isize),
+        }
+    }
+
+    pub fn decode(kind: usize, value: isize) -> Option<Ask> {
+        let value = value as u32;
+        match (kind, value) {
+            (1, seconds) => Some(Ask::Delay(seconds)),
+            (2, 0) => Some(Ask::Hotkey(None)),
+            (2, packed) => Some(Ask::Hotkey(Some(Hotkey {
+                mods: packed >> 16,
+                vk: packed & 0xffff,
+            }))),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockConfig {
     /// `None`: never placed, so the dock picks its default spot.
@@ -100,6 +133,8 @@ pub struct DockConfig {
     pub delay: u32,
     /// `None`: switched off (`hotkey = off`).
     pub hotkey: Option<Hotkey>,
+    /// Windows gave it to us: another program can hold a combination.
+    pub hotkey_ok: bool,
     /// Hidden (from its own menu or the tray's): only the tray icon shows.
     pub hidden: bool,
     /// Starting with Windows was set up once (after that it is the user's
@@ -152,6 +187,7 @@ impl DockConfig {
             spot,
             delay,
             hotkey,
+            hotkey_ok: ini.get("hotkey-ok") != Some("no"),
             hidden: yes("hidden"),
             autostart_set: yes("autostart-set"),
         }
@@ -167,6 +203,7 @@ impl DockConfig {
         let hotkey = self.hotkey.map(format_hotkey);
         ini.set("hotkey", hotkey.as_deref().unwrap_or("off"));
         let yes_no = |b| if b { "yes" } else { "no" };
+        ini.set("hotkey-ok", yes_no(self.hotkey_ok));
         ini.set("hidden", yes_no(self.hidden));
         ini.set("autostart-set", yes_no(self.autostart_set));
     }
@@ -175,6 +212,31 @@ impl DockConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_settings_asks_fits_in_a_message() {
+        for ask in [
+            Ask::Delay(0),
+            Ask::Delay(5),
+            Ask::Hotkey(None),
+            Ask::Hotkey(Some(Hotkey::DEFAULT)),
+            Ask::Hotkey(parse_hotkey("ctrl+alt+shift+f24")),
+        ] {
+            let (kind, value) = ask.encode();
+            assert_eq!(Ask::decode(kind, value), Some(ask));
+        }
+        assert_eq!(Ask::decode(0, 0), None);
+    }
+
+    #[test]
+    fn a_shortcut_windows_refused_is_remembered_and_starts_out_fine() {
+        let mut ini = IniFile::load(None);
+        assert!(DockConfig::read(&ini).hotkey_ok);
+        let mut config = DockConfig::read(&ini);
+        config.hotkey_ok = false;
+        config.write(&mut ini);
+        assert!(!DockConfig::read(&ini).hotkey_ok);
+    }
 
     #[test]
     fn hotkeys_parse_and_print() {
@@ -237,6 +299,7 @@ mod tests {
                 spot: None,
                 delay: 0,
                 hotkey: Some(Hotkey::DEFAULT),
+                hotkey_ok: true,
                 hidden: false,
                 autostart_set: false,
             }
@@ -253,6 +316,7 @@ mod tests {
             }),
             delay: 5,
             hotkey: parse_hotkey("ctrl+alt+f9"),
+            hotkey_ok: false,
             hidden: true,
             autostart_set: true,
         };

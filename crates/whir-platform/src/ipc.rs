@@ -48,6 +48,10 @@ pub enum Changed {
     Time,
     /// Which notes are flagged as todos.
     Todos,
+    /// The theme picked in Settings.
+    Theme,
+    /// `dock.ini`: what Settings shows of the dock.
+    Dock,
 }
 
 impl Changed {
@@ -55,12 +59,14 @@ impl Changed {
         match self {
             Changed::Time => 1,
             Changed::Todos => 2,
+            Changed::Theme => 3,
+            Changed::Dock => 4,
         }
     }
 
     /// From a [`changed_message`]'s `wParam`.
     pub fn from_code(code: usize) -> Option<Changed> {
-        [Changed::Time, Changed::Todos]
+        [Changed::Time, Changed::Todos, Changed::Theme, Changed::Dock]
             .into_iter()
             .find(|c| c.code() == code)
     }
@@ -191,7 +197,7 @@ mod tests {
 
     #[test]
     fn changes_round_trip() {
-        for c in [Changed::Time, Changed::Todos] {
+        for c in [Changed::Time, Changed::Todos, Changed::Theme, Changed::Dock] {
             assert_eq!(Changed::from_code(c.code()), Some(c));
         }
         assert_eq!(Changed::from_code(0), None);

@@ -68,7 +68,7 @@ use windows::core::{BOOL, PCWSTR, w};
 use crate::Command;
 use crate::bar::{self, Bar};
 use crate::clock::Clock;
-use crate::config::{DELAYS, DockConfig, Hotkey, Spot, format_hotkey};
+use crate::config::{Ask, DELAYS, DockConfig, Hotkey, Spot, format_hotkey};
 use crate::geom::{Point, Rect};
 use crate::instance::{self, Role, WM_LAUNCHED};
 use crate::menu::Entry;
@@ -252,7 +252,7 @@ fn cursor() -> Point {
 }
 
 fn theme() -> Theme {
-    if whir_platform::os::prefers_dark() {
+    if whir_platform::os::prefers_dark_on_disk() {
         Theme::dark()
     } else {
         Theme::light()
@@ -520,10 +520,35 @@ impl Dock {
         }
     }
 
+    /// Keep what changed, and tell Settings, which shows it.
+    fn config_changed(&self) {
+        self.config.save();
+        ipc::notify_changed(Changed::Dock);
+    }
+
+    /// Settings would like something changed.
+    fn asked(&mut self, ask: Ask) {
+        match ask {
+            Ask::Delay(seconds) if DELAYS.contains(&seconds) => self.set_delay(seconds),
+            Ask::Delay(_) => {}
+            Ask::Hotkey(hotkey) => {
+                if std::mem::take(&mut self.hotkey_registered) {
+                    unsafe {
+                        let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY);
+                    }
+                }
+                self.config.hotkey = hotkey;
+                self.config.hotkey_ok = true;
+                self.register_hotkey();
+                self.config_changed();
+            }
+        }
+    }
+
     fn set_hidden(&mut self, hidden: bool) {
         if self.config.hidden != hidden {
             self.config.hidden = hidden;
-            self.config.save();
+            self.config_changed();
         }
         self.show();
         self.present_shade();
@@ -970,7 +995,7 @@ impl Dock {
 
     fn set_delay(&mut self, seconds: u32) {
         self.config.delay = seconds;
-        self.config.save();
+        self.config_changed();
         self.redraw();
     }
 
@@ -1017,9 +1042,14 @@ impl Dock {
         };
         if !self.hotkey_registered {
             let mods = HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT;
-            // Fails if another program has the combination: the menu says so.
+            // Fails if another program has the combination: the menu and
+            // Settings say so.
             self.hotkey_registered =
                 unsafe { RegisterHotKey(Some(self.hwnd), HOTKEY, mods, vk) }.is_ok();
+        }
+        if self.config.hotkey_ok != self.hotkey_registered {
+            self.config.hotkey_ok = self.hotkey_registered;
+            self.config_changed();
         }
     }
 
@@ -1038,6 +1068,14 @@ impl Dock {
         }
     }
 
+    /// Monitors, scaling, the taskbar or the theme changed.
+    fn look_again(&mut self) {
+        self.relayout();
+        self.present();
+        self.raise();
+        self.update_panel();
+    }
+
     /// The window (or another dock) wrote the timesheet.
     fn shared_changed(&mut self, what: Option<Changed>) {
         match what {
@@ -1045,7 +1083,12 @@ impl Dock {
                 self.clock.refresh();
             }
             Some(Changed::Todos) => self.load_todos(),
-            None => return,
+            Some(Changed::Theme) => {
+                self.look_again();
+                return;
+            }
+            // Ours: the dock is what writes it.
+            Some(Changed::Dock) | None => return,
         }
         self.settle();
     }
@@ -1478,6 +1521,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     d.capture_now();
                 }
             }
+            instance::WM_ASKED => {
+                if let Some(ask) = Ask::decode(wparam.0, lparam.0) {
+                    d.asked(ask);
+                }
+            }
             WM_RAISE => {
                 d.raise();
                 SetTimer(Some(hwnd), TIMER_RAISE, RAISE_AGAIN_MS, None);
@@ -1496,6 +1544,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     d.linger(REVEAL_MS);
                 }
                 // Already running: that was all.
+                Some(Command::Hide) => d.set_hidden(true),
                 Some(Command::Start) => {}
                 Some(Command::Capture) => d.capture_now(),
                 Some(Command::Quit) => {
@@ -1504,13 +1553,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 None => {}
             },
-            // Monitors, scaling, the taskbar or the theme changed.
-            WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
-                d.relayout();
-                d.present();
-                d.raise();
-                d.update_panel();
-            }
+            WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => d.look_again(),
             WM_DESTROY => {
                 DOCK.store(0, Ordering::Relaxed);
                 if d.hotkey_registered {

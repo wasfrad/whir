@@ -8,6 +8,121 @@ use egui::Stroke;
 use egui::epaint::Shadow;
 use egui::style::WidgetVisuals;
 
+use crate::settings;
+
+/// Which theme whir draws in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// As Windows' apps are.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::System, Mode::Light, Mode::Dark];
+    /// In `settings.ini`.
+    const KEY: &str = "theme";
+
+    fn name(self) -> &'static str {
+        match self {
+            Mode::System => "system",
+            Mode::Light => "light",
+            Mode::Dark => "dark",
+        }
+    }
+
+    fn from_name(name: &str) -> Mode {
+        let same = |m: &Mode| m.name().eq_ignore_ascii_case(name.trim());
+        Mode::ALL.into_iter().find(same).unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::System => "System",
+            Mode::Light => "Light",
+            Mode::Dark => "Dark",
+        }
+    }
+
+    pub fn saved() -> Mode {
+        settings::get_str(Mode::KEY).map_or(Mode::default(), |s| Mode::from_name(&s))
+    }
+
+    /// As `settings.ini` has it now, for the dock: the file is the window's,
+    /// so what the dock read of it when it started says nothing.
+    pub fn on_disk() -> Mode {
+        let file = settings::IniFile::load(settings::app_data_file("settings.ini"));
+        file.get(Mode::KEY).map_or(Mode::default(), Mode::from_name)
+    }
+
+    /// Remember this; `after` runs once it's on disk.
+    pub fn save(self, after: impl FnOnce() + Send + 'static) {
+        settings::set_str_then(Mode::KEY, self.name(), after);
+    }
+}
+
+/// How big a note's text is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoteSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl NoteSize {
+    pub const ALL: [NoteSize; 3] = [NoteSize::Small, NoteSize::Medium, NoteSize::Large];
+    /// In `settings.ini`.
+    const KEY: &str = "note.size";
+
+    fn name(self) -> &'static str {
+        match self {
+            NoteSize::Small => "small",
+            NoteSize::Medium => "medium",
+            NoteSize::Large => "large",
+        }
+    }
+
+    fn from_name(name: &str) -> NoteSize {
+        let same = |s: &NoteSize| s.name().eq_ignore_ascii_case(name.trim());
+        NoteSize::ALL.into_iter().find(same).unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NoteSize::Small => "Small",
+            NoteSize::Medium => "Medium",
+            NoteSize::Large => "Large",
+        }
+    }
+
+    pub fn saved() -> NoteSize {
+        settings::get_str(NoteSize::KEY).map_or(NoteSize::default(), |s| NoteSize::from_name(&s))
+    }
+
+    pub fn save(self) {
+        settings::set_str(NoteSize::KEY, self.name());
+    }
+
+    /// `m`'s note text at this size, to the half point.
+    fn scale(self, m: &mut Metrics) {
+        let by = match self {
+            NoteSize::Small => 0.9,
+            NoteSize::Medium => return,
+            NoteSize::Large => 1.15,
+        };
+        for size in [
+            &mut m.note_title_size,
+            &mut m.note_body_size,
+            &mut m.note_code_size,
+        ] {
+            *size = (*size * by * 2.0).round() / 2.0;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub dark: bool,
@@ -37,6 +152,9 @@ pub struct Theme {
     pub control_pressed: Color32,
     /// The well of a text field.
     pub field_bg: Color32,
+    /// Behind a page of Settings, and the cards on it.
+    pub page_bg: Color32,
+    pub card_bg: Color32,
 
     pub caption_hover: Color32,
     pub caption_pressed: Color32,
@@ -116,7 +234,7 @@ pub struct Theme {
 }
 
 /// Sizes in egui points.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
     pub tab_strip_height: f32,
     /// The strip of tools between the tabs and the document.
@@ -191,6 +309,14 @@ impl Default for Metrics {
 }
 
 impl Theme {
+    /// The theme to draw in, as whoever's asking found `dark`, at the note
+    /// text size picked.
+    pub fn chosen(dark: bool) -> Self {
+        let mut theme = if dark { Theme::dark() } else { Theme::light() };
+        NoteSize::saved().scale(&mut theme.metrics);
+        theme
+    }
+
     pub fn dark() -> Self {
         let rgb = Color32::from_rgb;
         let accent = rgb(0x5b, 0x9b, 0xff);
@@ -213,6 +339,8 @@ impl Theme {
             control_hover: rgb(0x3b, 0x3b, 0x3f),
             control_pressed: rgb(0x2c, 0x2c, 0x2f),
             field_bg: rgb(0x1e, 0x1e, 0x20),
+            page_bg: rgb(0x20, 0x20, 0x22),
+            card_bg: rgb(0x2b, 0x2b, 0x2e),
             caption_hover: rgb(0x2e, 0x2e, 0x31),
             caption_pressed: rgb(0x38, 0x38, 0x3b),
             close_hover: rgb(0xc4, 0x2b, 0x1c),
@@ -291,6 +419,8 @@ impl Theme {
             control_hover: rgb(0xe6, 0xe6, 0xe9),
             control_pressed: rgb(0xdc, 0xdc, 0xe0),
             field_bg: rgb(0xff, 0xff, 0xff),
+            page_bg: rgb(0xf5, 0xf5, 0xf6),
+            card_bg: rgb(0xff, 0xff, 0xff),
             caption_hover: rgb(0xdc, 0xdc, 0xdf),
             caption_pressed: rgb(0xcf, 0xcf, 0xd3),
             close_hover: rgb(0xc4, 0x2b, 0x1c),
@@ -414,6 +544,12 @@ impl Theme {
         } else {
             egui::Theme::Light
         };
+        // The caret keeps time with Windows, and stops blinking when idle: that
+        // isn't the theme's, and must outlive a change of theme.
+        let caret = ctx.style_of(theme).visuals.text_cursor.clone();
+        visuals.text_cursor.blink = caret.blink;
+        visuals.text_cursor.on_duration = caret.on_duration;
+        visuals.text_cursor.off_duration = caret.off_duration;
         ctx.set_visuals_of(theme, visuals);
         ctx.set_theme(theme);
         ctx.all_styles_mut(|style| {
@@ -679,4 +815,64 @@ pub fn request_rich_fonts() {
 /// The shell polls this once per frame.
 pub fn rich_fonts_requested() -> bool {
     RICH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choices_are_read_back_as_they_were_written() {
+        for mode in Mode::ALL {
+            assert_eq!(Mode::from_name(mode.name()), mode);
+        }
+        for size in NoteSize::ALL {
+            assert_eq!(NoteSize::from_name(size.name()), size);
+        }
+        assert_eq!(Mode::from_name(" DARK "), Mode::Dark);
+    }
+
+    #[test]
+    fn what_cant_be_read_is_the_default() {
+        assert_eq!(Mode::from_name("mauve"), Mode::System);
+        assert_eq!(NoteSize::from_name(""), NoteSize::Medium);
+    }
+
+    #[test]
+    fn note_sizes_step_up_from_small_to_large() {
+        let body = |size: NoteSize| {
+            let mut m = Metrics::default();
+            size.scale(&mut m);
+            m.note_body_size
+        };
+        assert_eq!(body(NoteSize::Medium), Metrics::default().note_body_size);
+        assert!(body(NoteSize::Small) < body(NoteSize::Medium));
+        assert!(body(NoteSize::Large) > body(NoteSize::Medium));
+    }
+
+    #[test]
+    fn only_a_notes_text_changes_size() {
+        let mut m = Metrics::default();
+        NoteSize::Large.scale(&mut m);
+        let d = Metrics::default();
+        assert_eq!(m.body_text_size, d.body_text_size);
+        assert_eq!(m.note_column_max, d.note_column_max);
+    }
+
+    #[test]
+    fn a_change_of_theme_leaves_the_caret_keeping_windows_time() {
+        let ctx = test_context();
+        Theme::dark().apply(&ctx);
+        ctx.all_styles_mut(|s| {
+            s.visuals.text_cursor.on_duration = 0.25;
+            s.visuals.text_cursor.off_duration = 0.75;
+            s.visuals.text_cursor.blink = false;
+        });
+        Theme::light().apply(&ctx);
+        Theme::dark().apply(&ctx);
+        let caret = ctx.style_of(egui::Theme::Dark).visuals.text_cursor.clone();
+        assert_eq!(caret.on_duration, 0.25);
+        assert_eq!(caret.off_duration, 0.75);
+        assert!(!caret.blink);
+    }
 }

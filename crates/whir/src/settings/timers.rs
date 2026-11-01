@@ -1,28 +1,69 @@
-//! Customers and their projects (what time is tracked against), and the
-//! time-tracking options.
+//! Customers and their projects, what time is tracked against: a card for each
+//! customer, and everything on it edited where it stands.
 
 use std::collections::HashSet;
 
-use egui::{Id, RichText, vec2};
-use whir_core::DocCx;
-use whir_core::kit;
-use whir_core::theme::Theme;
-use whir_core::timesheet::{Rounding, Store, Txn};
+use egui::{Align, Button, FontId, Id, Key, Layout, RichText, TextEdit, Ui, vec2};
+use whir_core::icons::{self, Icon};
+use whir_core::kit::{self, Card, Inline};
+use whir_core::theme::{Metrics, Theme};
+use whir_core::timesheet::{Customer, Store, Timer, Txn};
+use whir_core::{DocCx, toolbar};
 
-use super::{edit_line, heading, note};
+use super::no_folder;
 
 /// A change to make to the timesheet, decided while drawing.
 type Change = Box<dyn FnOnce(&mut Txn)>;
 
+/// Between the columns of a row.
+const GAP: f32 = 8.0;
+/// Between cards.
+const CARD_GAP: f32 = 12.0;
+/// What "+ Project" takes up on a customer's row.
+const ADD_WIDTH: f32 = 84.0;
+
 #[derive(Default)]
 pub struct View {
-    new_customer: String,
-    /// The customer a project is being added to, its name and code, and
-    /// whether the name field still needs the keyboard.
-    new_project: Option<(u32, String, String, bool)>,
+    /// A new customer, while it's being named.
+    new_customer: Option<Naming>,
+    /// The customer a project is being added to, and the project.
+    new_project: Option<(u32, Naming)>,
+    /// Customers whose archived projects are showing.
+    archived: HashSet<u32>,
     /// Timers with time in any week (those can be archived, not deleted).
     used: Option<HashSet<u32>>,
     error: Option<String>,
+}
+
+/// Something new, while it's being named.
+struct Naming {
+    name: String,
+    code: String,
+    /// The name field still needs the keyboard.
+    focus: bool,
+}
+
+impl Naming {
+    fn new() -> Naming {
+        Naming {
+            name: String::new(),
+            code: String::new(),
+            focus: true,
+        }
+    }
+}
+
+/// How naming something went this frame.
+enum Named {
+    Waiting,
+    Done,
+    Cancelled,
+}
+
+/// How wide a project's name and code are, in a row `width` wide with its ⋯.
+fn columns(width: f32, m: Metrics) -> (f32, f32) {
+    let code = (width * 0.3).clamp(90.0, 170.0);
+    (width - code - m.control_height - 2.0 * GAP, code)
 }
 
 impl View {
@@ -31,40 +72,34 @@ impl View {
         self.used = None;
     }
 
-    fn change(&mut self, store: &mut Store, change: impl FnOnce(&mut Txn)) {
-        match store.update(change) {
-            Ok(()) => self.error = None,
-            Err(e) => self.error = Some(e),
-        }
-    }
-
     pub fn ui(
         &mut self,
-        ui: &mut egui::Ui,
+        ui: &mut Ui,
         store: Option<&mut Store>,
         _cx: &mut DocCx<'_>,
         theme: &Theme,
     ) {
-        heading(ui, "Customers & projects", theme);
         let Some(store) = store else {
-            note(
-                ui,
-                "The Documents folder isn't available, so there is nowhere to keep time.",
-                theme,
-            );
+            no_folder(ui, "Customers & projects", theme);
             return;
         };
-        note(
+        kit::page_header(
             ui,
-            "Each project can be picked on the capture dock and timed, or have its hours \
-             typed into the timesheet. The code (a project or assignment ID) goes on the \
-             timesheet beside it.",
+            "Customers & projects",
+            "Each project can be timed from the capture dock, or have its hours typed into \
+             the timesheet. A code is the project or assignment ID that goes on the timesheet.",
             theme,
+            |ui| {
+                if kit::primary(ui, "New customer", theme).clicked() {
+                    self.new_customer = Some(Naming::new());
+                }
+            },
         );
-        ui.add_space(10.0);
         if let Some(e) = &self.error {
-            ui.label(RichText::new(e).color(theme.danger));
-            ui.add_space(6.0);
+            kit::banner(ui, theme.danger, theme, |ui| {
+                ui.label(RichText::new(e).color(theme.text));
+            });
+            ui.add_space(CARD_GAP);
         }
 
         let used = self.used.get_or_insert_with(|| {
@@ -77,209 +112,284 @@ impl View {
         let used = used.clone();
         let state = store.state().clone();
         let mut change: Option<Change> = None;
+
+        if self.new_customer.is_some() {
+            kit::card(ui, theme, |c| self.naming_customer(c, &mut change));
+            ui.add_space(CARD_GAP);
+        } else if state.customers.is_empty() {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                kit::empty_state(
+                    ui,
+                    Icon::People,
+                    "No customers yet",
+                    "Add one, then give it the projects you'd like to time.",
+                    theme,
+                );
+            });
+        }
         for (customer, timers) in state.by_customer(true, true) {
-            let cid = customer.id;
+            kit::card(ui, theme, |c| {
+                self.customer(c, customer, &timers, &used, &mut change);
+            });
+            ui.add_space(CARD_GAP);
+        }
+        if let Some(change) = change {
+            match store.update(change) {
+                Ok(()) => self.error = None,
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+
+    fn naming_customer(&mut self, c: &mut Card<'_>, change: &mut Option<Change>) {
+        let theme = c.theme;
+        let Some(n) = &mut self.new_customer else {
+            return;
+        };
+        let named = c.field_row(|ui| name_fields(ui, n, "New customer", false, theme));
+        match named {
+            Named::Waiting => {}
+            Named::Cancelled => self.new_customer = None,
+            Named::Done => {
+                let name = std::mem::take(&mut n.name);
+                self.new_customer = None;
+                *change = Some(Box::new(move |tx| {
+                    tx.state.add_customer(&name);
+                }));
+            }
+        }
+    }
+
+    /// A customer's card: its name, its projects, then the archived ones if
+    /// they've been asked for.
+    fn customer(
+        &mut self,
+        c: &mut Card<'_>,
+        customer: &Customer,
+        timers: &[&Timer],
+        used: &HashSet<u32>,
+        change: &mut Option<Change>,
+    ) {
+        let theme = c.theme;
+        let m = theme.metrics;
+        let cid = customer.id;
+        c.field_row(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
             ui.horizontal(|ui| {
-                let id = Id::new(("whir.customer", cid));
-                if let Some(name) = edit_line(ui, id, &customer.name, 240.0, "Customer")
+                let width = ui.available_width() - m.control_height - ADD_WIDTH - 2.0 * GAP;
+                let field = Inline {
+                    id: Id::new(("whir.customer", cid)),
+                    current: &customer.name,
+                    hint: "Customer",
+                    width,
+                    font: kit::strong(m.body_text_size),
+                    color: theme.text,
+                };
+                if let Some(name) = kit::inline_text(ui, field, theme)
                     && !name.is_empty()
                 {
-                    change = Some(Box::new(move |tx| {
+                    *change = Some(Box::new(move |tx| {
                         if let Some(c) = tx.state.customer_mut(cid) {
                             c.name = name;
                         }
                     }));
                 }
-                if ui.button("+ Project").clicked() {
-                    self.new_project = Some((cid, String::new(), String::new(), true));
-                }
-                if timers.is_empty()
-                    && ui
-                        .button("Delete")
-                        .on_hover_text("No projects: it can go")
-                        .clicked()
-                {
-                    change = Some(Box::new(move |tx| {
-                        tx.state.customers.retain(|c| c.id != cid)
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    kit::more_button(ui, theme, |ui| {
+                        let delete = kit::menu_entry(Some(Icon::Delete), "Delete customer", "");
+                        let delete = ui
+                            .add_enabled(timers.is_empty(), delete)
+                            .on_disabled_hover_text("It still has projects");
+                        if delete.clicked() {
+                            *change = Some(Box::new(move |tx| {
+                                tx.state.customers.retain(|c| c.id != cid)
+                            }));
+                            ui.close();
+                        }
+                    });
+                    if kit::icon_action(ui, Icon::Plus, "Project", theme).clicked() {
+                        self.new_project = Some((cid, Naming::new()));
+                    }
+                });
+            });
+        });
+
+        let (old, current): (Vec<&Timer>, Vec<&Timer>) =
+            timers.iter().copied().partition(|t| t.archived);
+        for t in &current {
+            project(c, t, used.contains(&t.id), change);
+        }
+        if let Some((_, n)) = self.new_project.as_mut().filter(|(on, _)| *on == cid) {
+            let named = c.field_row(|ui| name_fields(ui, n, "New project", true, theme));
+            match named {
+                Named::Waiting => {}
+                Named::Cancelled => self.new_project = None,
+                Named::Done => {
+                    let (name, code) = (std::mem::take(&mut n.name), std::mem::take(&mut n.code));
+                    self.new_project = None;
+                    *change = Some(Box::new(move |tx| {
+                        tx.state.add_timer(cid, &name, &code);
                     }));
                 }
+            }
+        } else if current.is_empty() && old.is_empty() {
+            c.row(|ui| {
+                ui.label(RichText::new("No projects yet").color(theme.text_dim));
             });
-            ui.indent(("whir.projects", cid), |ui| {
-                egui::Grid::new(("whir.projects.grid", cid))
-                    .spacing(vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        for t in timers {
-                            let tid = t.id;
-                            let id = |part: &str| Id::new(("whir.timer", tid, part.to_owned()));
-                            let shade = if t.archived {
-                                theme.text_dim
-                            } else {
-                                theme.text
-                            };
-                            if let Some(name) = edit_line(ui, id("name"), &t.name, 220.0, "Project")
-                                && !name.is_empty()
-                            {
-                                change = Some(Box::new(move |tx| {
-                                    if let Some(t) = tx.state.timer_mut(tid) {
-                                        t.name = name;
-                                    }
-                                }));
-                            }
-                            if let Some(code) = edit_line(ui, id("code"), &t.code, 130.0, "Code") {
-                                change = Some(Box::new(move |tx| {
-                                    if let Some(t) = tx.state.timer_mut(tid) {
-                                        t.code = code;
-                                    }
-                                }));
-                            }
-                            let archived = t.archived;
-                            let toggle = if archived { "Restore" } else { "Archive" };
-                            if ui
-                                .button(toggle)
-                                .on_hover_text(if archived {
-                                    "Offer it in the dock again"
-                                } else {
-                                    "No longer offered in the dock; its time stays"
-                                })
-                                .clicked()
-                            {
-                                change = Some(Box::new(move |tx| {
-                                    if let Some(t) = tx.state.timer_mut(tid) {
-                                        t.archived = !archived;
-                                    }
-                                }));
-                            }
-                            if !used.contains(&tid) && ui.button("Delete").clicked() {
-                                change = Some(Box::new(move |tx| {
-                                    tx.state.timers.retain(|t| t.id != tid);
-                                    if tx.state.last == Some(tid) {
-                                        tx.state.last = None;
-                                    }
-                                }));
-                            }
-                            if archived {
-                                ui.label(RichText::new("archived").color(shade));
-                            }
-                            ui.end_row();
-                        }
-                    });
-                if let Some((on, name, code, focus)) = &mut self.new_project
-                    && *on == cid
-                {
-                    let (mut add, mut cancel) = (false, false);
-                    ui.horizontal(|ui| {
-                        let r = ui.add(
-                            egui::TextEdit::singleline(name)
-                                .desired_width(220.0)
-                                .hint_text("Project"),
-                        );
-                        if std::mem::take(focus) {
-                            r.request_focus();
-                        }
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        ui.add(
-                            egui::TextEdit::singleline(code)
-                                .desired_width(130.0)
-                                .hint_text("Code (optional)"),
-                        );
-                        add = kit::primary(ui, "Add", theme).clicked() || enter;
-                        cancel = ui.button("Cancel").clicked();
-                    });
-                    if cancel {
-                        self.new_project = None;
-                    }
-                    if add
-                        && let Some((cid, name, code, _)) = self.new_project.take()
-                        && !name.trim().is_empty()
-                    {
-                        change = Some(Box::new(move |tx| {
-                            tx.state.add_timer(cid, &name, &code);
-                        }));
-                    }
-                }
-            });
-            ui.add_space(8.0);
         }
+        if old.is_empty() {
+            return;
+        }
+        let open = self.archived.contains(&cid);
+        let chevron = if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        };
+        let toggled = c.row(|ui| {
+            let words = format!("Archived ({})", old.len());
+            let words = RichText::new(words).color(theme.text_dim);
+            let icon = icons::text(chevron, 10.0).color(theme.text_dim);
+            ui.add(Button::new((icon, words)).frame(false)).clicked()
+        });
+        if toggled && !self.archived.remove(&cid) {
+            self.archived.insert(cid);
+        }
+        if open {
+            for t in old {
+                project(c, t, used.contains(&t.id), change);
+            }
+        }
+    }
+}
 
+/// A project's row: its name and code, and what else can be done with it.
+fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>) {
+    let theme = c.theme;
+    let m = theme.metrics;
+    let tid = t.id;
+    let archived = t.archived;
+    c.field_row(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
         ui.horizontal(|ui| {
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut self.new_customer)
-                    .desired_width(240.0)
-                    .hint_text("New customer"),
-            );
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("+ Customer").clicked() || enter) && !self.new_customer.trim().is_empty()
+            let (name_width, code_width) = columns(ui.available_width(), m);
+            let font = FontId::proportional(m.body_text_size);
+            let color = if archived { theme.text_dim } else { theme.text };
+            let name = Inline {
+                id: Id::new(("whir.timer", tid, "name")),
+                current: &t.name,
+                hint: "Project",
+                width: name_width,
+                font: font.clone(),
+                color,
+            };
+            if let Some(name) = kit::inline_text(ui, name, theme)
+                && !name.is_empty()
             {
-                let name = std::mem::take(&mut self.new_customer);
-                change = Some(Box::new(move |tx| {
-                    tx.state.add_customer(&name);
+                *change = Some(Box::new(move |tx| {
+                    if let Some(t) = tx.state.timer_mut(tid) {
+                        t.name = name;
+                    }
                 }));
             }
-        });
-        if let Some(c) = change {
-            self.change(store, c);
-        }
-
-        ui.add_space(24.0);
-        self.options(ui, store, theme);
-    }
-
-    fn options(&mut self, ui: &mut egui::Ui, store: &mut Store, theme: &Theme) {
-        heading(ui, "Options", theme);
-        let o = store.state().options;
-        let mut rounding = o.rounding;
-        let mut away = o.away_minutes;
-        let mut keep_out = o.keep_out;
-        ui.horizontal(|ui| {
-            ui.label("Round each project's day to");
-            egui::ComboBox::from_id_salt("whir.rounding")
-                .icon(kit::combo_chevron)
-                .selected_text(rounding.label())
-                .show_ui(ui, |ui| {
-                    for r in Rounding::ALL {
-                        ui.selectable_value(&mut rounding, r, r.label());
+            let code = Inline {
+                id: Id::new(("whir.timer", tid, "code")),
+                current: &t.code,
+                hint: "Add code",
+                width: code_width,
+                font,
+                color: theme.text_dim,
+            };
+            if let Some(code) = kit::inline_text(ui, code, theme) {
+                *change = Some(Box::new(move |tx| {
+                    if let Some(t) = tx.state.timer_mut(tid) {
+                        t.code = code;
                     }
-                });
-        });
-        note(
-            ui,
-            "For the timesheet only: entries keep the exact time.",
-            theme,
-        );
-        ui.add_space(6.0);
-        let minutes = |m: u32| match m {
-            0 => "Never".to_owned(),
-            m => format!("{m} minutes"),
-        };
-        ui.horizontal(|ui| {
-            ui.label("Ask whether time away counts after");
-            egui::ComboBox::from_id_salt("whir.away")
-                .icon(kit::combo_chevron)
-                .selected_text(minutes(away))
-                .show_ui(ui, |ui| {
-                    for m in [5, 10, 15, 20, 30, 45, 60, 0] {
-                        ui.selectable_value(&mut away, m, minutes(m));
-                    }
-                });
-        });
-        note(
-            ui,
-            "Away: no keyboard or mouse, a locked screen, or sleep.",
-            theme,
-        );
-        ui.add_space(6.0);
-        kit::checkbox(
-            ui,
-            &mut keep_out,
-            "Keep the dock out while a timer runs",
-            theme,
-        );
-        if (rounding, away, keep_out) != (o.rounding, o.away_minutes, o.keep_out) {
-            self.change(store, |tx| {
-                tx.state.options.rounding = rounding;
-                tx.state.options.away_minutes = away;
-                tx.state.options.keep_out = keep_out;
+                }));
+            }
+            kit::more_button(ui, theme, |ui| {
+                let (label, why) = if archived {
+                    ("Restore", "Offer it in the dock again")
+                } else {
+                    ("Archive", "No longer offered in the dock; its time stays")
+                };
+                if ui
+                    .add(kit::menu_entry(None, label, ""))
+                    .on_hover_text(why)
+                    .clicked()
+                {
+                    *change = Some(Box::new(move |tx| {
+                        if let Some(t) = tx.state.timer_mut(tid) {
+                            t.archived = !archived;
+                        }
+                    }));
+                    ui.close();
+                }
+                let delete = kit::menu_entry(Some(Icon::Delete), "Delete", "");
+                let delete = ui
+                    .add_enabled(!used, delete)
+                    .on_disabled_hover_text("It has time on it: archive it instead");
+                if delete.clicked() {
+                    *change = Some(Box::new(move |tx| {
+                        tx.state.timers.retain(|t| t.id != tid);
+                        if tx.state.last == Some(tid) {
+                            tx.state.last = None;
+                        }
+                    }));
+                    ui.close();
+                }
             });
+        });
+    });
+}
+
+/// The fields something new is named in, in the same columns as the rows
+/// around them. Enter or the tick adds it; Esc, or clicking away from it empty,
+/// doesn't.
+fn name_fields(ui: &mut Ui, n: &mut Naming, hint: &str, with_code: bool, theme: &Theme) -> Named {
+    let m = theme.metrics;
+    ui.spacing_mut().item_spacing.x = GAP;
+    ui.horizontal(|ui| {
+        // The tick is a tool, and takes up more than a row's ⋯.
+        let room = ui.available_width() - (m.tool_size - m.control_height);
+        let (name_width, code_width) = columns(room, m);
+        let name_width = if with_code {
+            name_width
+        } else {
+            name_width + code_width + GAP
+        };
+        let height = m.control_height;
+        let name = ui.add_sized(
+            vec2(name_width, height),
+            TextEdit::singleline(&mut n.name).hint_text(hint),
+        );
+        if std::mem::take(&mut n.focus) {
+            name.request_focus();
         }
-    }
+        let code = with_code.then(|| {
+            ui.add_sized(
+                vec2(code_width, height),
+                TextEdit::singleline(&mut n.code).hint_text("Code (optional)"),
+            )
+        });
+        let ready = !n.name.trim().is_empty();
+        let tick = toolbar::tool(ui, Icon::Check, "Add it (Enter)", ready, theme);
+        let left = name.lost_focus() || code.as_ref().is_some_and(|c| c.lost_focus());
+        let (enter, esc, pressed) = ui.input(|i| {
+            (
+                i.key_pressed(Key::Enter),
+                i.key_pressed(Key::Escape),
+                i.pointer.any_pressed(),
+            )
+        });
+        if tick || (left && enter && ready) {
+            Named::Done
+        } else if left && (esc || (pressed && !ready)) {
+            Named::Cancelled
+        } else {
+            Named::Waiting
+        }
+    })
+    .inner
 }

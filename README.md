@@ -7,7 +7,7 @@ it saves itself, no questions asked. A small capture dock takes screenshots, kee
 and opens each one ready to highlight and label.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~5.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
+- One portable folder: `whir.exe` (~6 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
 - No installer, no admin rights, no VC++ redistributable
 
 ## Using it
@@ -142,5 +142,16 @@ layered window. It draws only when something happens, and skips a frame that wou
 same. Its shadows have windows of their own that clicks pass through: a layered window catches
 the mouse wherever it isn't fully clear, so a shadow on the dock's own would be a dead strip
 around it.
+
+The theme picked in Settings is in `settings.ini`, which only the window writes, so the dock is
+told once the write has landed (`Changed::Theme`) and reads the file for itself. What's the
+dock's goes the other way: Settings reads `dock.ini` and asks the dock to change it.
+
+### The command palette
+
+`crates/whir/src/palette.rs` keeps no list of commands. `kit::read_menu` runs the menus with
+nothing drawn, each `kit::entry` noting down what it would have shown, so the palette has
+whatever the menus have, the open document's entries among them, and a document has nothing to
+do to be in it. Running one is the same pass again with that entry answering as though clicked.
 
 What's not there yet is listed at the end of the guide.

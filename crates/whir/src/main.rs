@@ -12,10 +12,12 @@ mod app;
 mod close_flow;
 mod dispatch;
 mod drawer;
+mod fuzzy;
 #[cfg(test)]
 mod gallery;
 mod keys;
 mod menus;
+mod palette;
 mod register;
 mod reltime;
 mod search_panel;
