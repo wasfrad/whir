@@ -1,6 +1,6 @@
 //! The timesheet: the week at a glance and where its time is put down. A
-//! row per project, a column per day, hours as they go on the timecard;
-//! click a day and type its hours, or add a project from the last row. The
+//! row per milestone, a column per day, hours as they go on the timecard;
+//! click a day and type its hours, or add a milestone from the last row. The
 //! entries behind a day are listed under it, and the week is closed out to
 //! CSV from here. The table gives way as the window narrows: see [`Columns`].
 
@@ -27,21 +27,21 @@ const DAY_MAX: f32 = 74.0;
 const DAY_MIN: f32 = 44.0;
 const TOTAL_MAX: f32 = 86.0;
 const TOTAL_MIN: f32 = 56.0;
-/// What customer and project need to have a column each.
+/// What project and milestone need to have a column each.
 const LABELS_MIN: f32 = 300.0;
 /// The least they can have between them, in one column.
 const LABEL_MIN: f32 = 150.0;
-const CUSTOMER_MAX: f32 = 220.0;
-/// How much of a shared column a customer's name can have: the project is what
+const PROJECT_MAX: f32 = 220.0;
+/// How much of a shared column a project's name can have: the milestone is what
 /// tells the rows apart.
-const CUSTOMER_SHARE: f32 = 0.45;
+const PROJECT_SHARE: f32 = 0.45;
 /// A day's column has room for its date from here up.
 const DATES_FROM: f32 = 60.0;
 /// From the table's sides to what's in it.
 const SIDE: f32 = 14.0;
 /// Below this the week's title and what can be done with it take a row each.
 const HEADER_WRAP: f32 = 640.0;
-/// The list of projects to add, and how many it shows.
+/// The list of milestones to add, and how many it shows.
 const PICKER_WIDTH: f32 = 340.0;
 const PICKER_ROWS: usize = 8;
 /// An entry's times.
@@ -53,14 +53,14 @@ const MIDNIGHT: u32 = 24 * 3600;
 type Span = (Stamp, Stamp, String);
 
 /// How wide the table's columns are in the room there is. The days give way
-/// first, then customer and project share a column; past that, the table stops
+/// first, then project and milestone share a column; past that, the table stops
 /// shrinking and scrolls sideways.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Columns {
     width: f32,
-    /// `None`: it shares the project's column.
-    customer: Option<f32>,
-    project: f32,
+    /// `None`: it shares the milestone's column.
+    project: Option<f32>,
+    milestone: f32,
     day: f32,
     total: f32,
 }
@@ -76,11 +76,11 @@ impl Columns {
             TOTAL_MAX
         };
         let labels = width - 7.0 * day - total;
-        let customer = (labels >= LABELS_MIN).then(|| (labels * 0.42).min(CUSTOMER_MAX).floor());
+        let project = (labels >= LABELS_MIN).then(|| (labels * 0.42).min(PROJECT_MAX).floor());
         Columns {
             width,
-            customer,
-            project: labels - customer.unwrap_or(0.0),
+            project,
+            milestone: labels - project.unwrap_or(0.0),
             day,
             total,
         }
@@ -104,11 +104,11 @@ impl Columns {
 pub struct View {
     /// The week shown.
     monday: i64,
-    /// The cell whose entries are listed: a timer, and a day (0 = Monday).
+    /// The cell whose entries are listed: a milestone, and a day (0 = Monday).
     pub(super) selected: Option<(u32, usize)>,
     /// Hours being typed into the selected cell.
     editing: Option<Editing>,
-    /// Projects added to the week from its last row (no time yet).
+    /// Milestones added to the week from its last row (no time yet).
     added: Vec<u32>,
     adder: Adder,
     pub(super) confirm_close: bool,
@@ -128,7 +128,7 @@ struct Editing {
     focus: bool,
 }
 
-/// The last row: the list of projects to add, or a new one in its dialog.
+/// The last row: the list of milestones to add, or a new one in its dialog.
 #[derive(Default)]
 struct Adder {
     query: String,
@@ -139,12 +139,12 @@ struct Adder {
     form: Option<Form>,
 }
 
-/// A new project, in its dialog.
+/// A new milestone, in its dialog.
 #[derive(Default)]
 struct Form {
-    /// `None`: a new one, called `new_customer`.
-    customer: Option<u32>,
-    new_customer: String,
+    /// `None`: a new one, called `new_project`.
+    project: Option<u32>,
+    new_project: String,
     name: String,
     code: String,
 }
@@ -156,16 +156,16 @@ enum Act {
     /// Put down what was typed, then perhaps go on to the cell beside it
     /// (with what that one shows).
     Commit {
-        timer: u32,
+        milestone: u32,
         day: usize,
         text: String,
         shown: String,
         next: Option<(usize, String)>,
     },
     Cancel,
-    /// A project's row, to put its hours in.
+    /// A milestone's row, to put its hours in.
     AddRow(u32),
-    NewProject(Form),
+    NewMilestone(Form),
 }
 
 /// "October 26 – November 1, 2026".
@@ -186,7 +186,7 @@ fn hours(h: f64) -> String {
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// A project's name, its code dimmed beside it; cut short to `width`.
+/// A milestone's name, its code dimmed beside it; cut short to `width`.
 fn name_job(name: &str, code: &str, width: f32, theme: &Theme) -> LayoutJob {
     let font = FontId::proportional(theme.metrics.body_text_size);
     let mut job = LayoutJob::default();
@@ -292,12 +292,19 @@ impl View {
     }
 
     /// Type into a cell, if it can be: not in a closed week, and not the
-    /// running project's today (its time is still going up).
-    fn edit(&mut self, timer: u32, day: usize, shown: String, closed: bool, live: bool) -> bool {
+    /// running milestone's today (its time is still going up).
+    fn edit(
+        &mut self,
+        milestone: u32,
+        day: usize,
+        shown: String,
+        closed: bool,
+        live: bool,
+    ) -> bool {
         if closed || live {
             return false;
         }
-        self.selected = Some((timer, day));
+        self.selected = Some((milestone, day));
         self.editing = Some(Editing {
             text: shown.clone(),
             shown,
@@ -306,12 +313,12 @@ impl View {
         true
     }
 
-    /// Put down `text` as `timer`'s hours on `day` (0 = Monday) of the week
+    /// Put down `text` as `milestone`'s hours on `day` (0 = Monday) of the week
     /// shown, unless it's what the cell showed already.
     pub(super) fn set_cell(
         &mut self,
         store: &mut Store,
-        timer: u32,
+        milestone: u32,
         day: usize,
         text: &str,
         shown: &str,
@@ -322,7 +329,7 @@ impl View {
         match typed_seconds(text) {
             Some(seconds) => {
                 let date = self.monday + day as i64;
-                self.change(store, |tx| tx.set_day(timer, date, seconds));
+                self.change(store, |tx| tx.set_day(milestone, date, seconds));
             }
             None => {
                 self.error = Some(format!(
@@ -365,7 +372,7 @@ impl View {
         note(
             ui,
             &format!(
-                "Exact {} · each day rounded to {} per project, as on the timecard. Click a day \
+                "Exact {} · each day rounded to {} per milestone, as on the timecard. Click a day \
                  to type its hours.",
                 format_clock(grid.total()),
                 rounding.label().to_lowercase()
@@ -375,14 +382,14 @@ impl View {
         ui.add_space(20.0);
 
         // The entries behind the chosen day.
-        if let Some((timer, day)) = self.selected {
-            self.entries(ui, store, &state, &week, timer, day, now, theme);
+        if let Some((milestone, day)) = self.selected {
+            self.entries(ui, store, &state, &week, milestone, day, now, theme);
             ui.add_space(20.0);
         }
 
         self.archive(ui, store, cx, theme);
         self.close_dialog(ui, store, &state, &week, now, cx, theme);
-        self.new_project_dialog(ui, store, &state, theme);
+        self.new_milestone_dialog(ui, store, &state, theme);
     }
 
     /// The week, where it stands, and what can be done with it.
@@ -561,7 +568,7 @@ impl View {
         let Some(r) = &state.running else { return };
         let monday = monday_of(now.day);
         let week = store.week(monday).clone();
-        let today = Grid::of(&week, Some(r), now).cell(r.timer, (now.day - monday) as usize);
+        let today = Grid::of(&week, Some(r), now).cell(r.milestone, (now.day - monday) as usize);
         let m = theme.metrics;
         let mut pause = false;
         kit::banner(ui, theme.accent, theme, |ui| {
@@ -573,7 +580,7 @@ impl View {
             let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
             ui.painter().circle_filled(dot.center(), 4.0, theme.accent);
             let font = FontId::proportional(m.body_text_size);
-            let what = kit::one_line(ui.painter(), &state.label(r.timer), font, room);
+            let what = kit::one_line(ui.painter(), &state.label(r.milestone), font, room);
             let (at, _) = ui.allocate_exact_size(what.size(), Sense::hover());
             ui.painter().galley(at.min, what, theme.text);
             ui.add_space(4.0);
@@ -613,8 +620,8 @@ impl View {
         let rounding = state.options.rounding;
         let closed = week.closed.is_some();
         let today = (0..7).find(|&d| self.monday + d as i64 == now.day);
-        // The running project's today: still going up, so not typed into.
-        let live = state.running.as_ref().map(|r| r.timer).zip(today);
+        // The running milestone's today: still going up, so not typed into.
+        let live = state.running.as_ref().map(|r| r.milestone).zip(today);
         let mut rows: Vec<u32> = grid.rows.iter().map(|(t, _)| *t).collect();
         for &t in &self.added {
             if !rows.contains(&t) {
@@ -638,7 +645,7 @@ impl View {
                 // Where day `d` starts (7: the total's column).
                 let x = |d: usize| left + columns.x(d);
                 let right = left + width;
-                let project_x = left + columns.customer.unwrap_or(0.0);
+                let milestone_x = left + columns.project.unwrap_or(0.0);
                 let painter = ui.painter().clone();
                 // The card and today's column go under everything: drawn last,
                 // once the table's height is known, in this place.
@@ -655,19 +662,19 @@ impl View {
                 };
                 painter.rect_filled(head, radius, theme.header_bg);
                 let y = head.center().y;
-                if columns.customer.is_some() {
+                if columns.project.is_some() {
                     painter.text(
                         pos2(left + SIDE, y),
                         Align2::LEFT_CENTER,
-                        "Customer",
+                        "Project",
                         body.clone(),
                         theme.text_dim,
                     );
                 }
                 painter.text(
-                    pos2(project_x + SIDE, y),
+                    pos2(milestone_x + SIDE, y),
                     Align2::LEFT_CENTER,
-                    "Project",
+                    "Milestone",
                     body.clone(),
                     theme.text_dim,
                 );
@@ -710,7 +717,7 @@ impl View {
                     );
                 }
                 for (i, &t) in rows.iter().enumerate() {
-                    let (customer, project) = state.names(t);
+                    let (project, milestone) = state.names(t);
                     let (row, row_resp) =
                         ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
                     if i > 0 {
@@ -726,15 +733,15 @@ impl View {
                             theme.drawer_item_hover.gamma_multiply(0.6),
                         );
                     }
-                    let code = state.timer(t).map_or("", |t| t.code.as_str());
+                    let code = state.milestone(t).map_or("", |t| t.code.as_str());
                     let middle = row.center().y;
                     let mut at_x = left + SIDE;
-                    let mut room = columns.project - 2.0 * SIDE;
-                    let (name_room, shared) = match columns.customer {
+                    let mut room = columns.milestone - 2.0 * SIDE;
+                    let (name_room, shared) = match columns.project {
                         Some(column) => (column - SIDE, false),
-                        None => (room * CUSTOMER_SHARE, !customer.is_empty()),
+                        None => (room * PROJECT_SHARE, !project.is_empty()),
                     };
-                    let name = kit::one_line(&painter, customer, body.clone(), name_room);
+                    let name = kit::one_line(&painter, project, body.clone(), name_room);
                     let mut elided = name.elided;
                     let width = name.size().x;
                     let at = pos2(at_x, middle - name.size().y / 2.0);
@@ -746,9 +753,9 @@ impl View {
                         room -= width + dot.size().x;
                         painter.galley(at, dot, theme.text_dim);
                     } else {
-                        at_x = project_x + SIDE;
+                        at_x = milestone_x + SIDE;
                     }
-                    let galley = painter.layout_job(name_job(project, code, room, theme));
+                    let galley = painter.layout_job(name_job(milestone, code, room, theme));
                     elided |= galley.elided;
                     let at = pos2(at_x, middle - galley.size().y / 2.0);
                     painter.galley(at, galley, theme.text);
@@ -787,7 +794,7 @@ impl View {
                     );
                 }
 
-                // The last row: another project for the week.
+                // The last row: another milestone for the week.
                 if !closed {
                     let (r, _) = ui.allocate_exact_size(vec2(width, ROW_H + 6.0), Sense::hover());
                     let line = Stroke::new(1.0, theme.separator.gamma_multiply(0.6));
@@ -870,7 +877,7 @@ impl View {
         ui: &mut egui::Ui,
         cell: Rect,
         pad: f32,
-        timer: u32,
+        milestone: u32,
         day: usize,
         shown: String,
         rounding: Rounding,
@@ -881,8 +888,8 @@ impl View {
     ) -> Option<Act> {
         let inset = (pad - 7.0).clamp(2.0, 5.0);
         let inner = cell.shrink2(vec2(inset, 4.0));
-        let id = Id::new(("whir.timesheet.cell", timer, day));
-        let selected = self.selected == Some((timer, day));
+        let id = Id::new(("whir.timesheet.cell", milestone, day));
+        let selected = self.selected == Some((milestone, day));
         if let Some(ed) = self.editing.as_mut().filter(|_| selected) {
             if ed.focus {
                 prime(ui.ctx(), id, &ed.text);
@@ -922,10 +929,10 @@ impl View {
             // The cell beside this one, along the row, and what it shows.
             let beside = |d: Option<usize>| {
                 d.filter(|&d| d < 7)
-                    .map(|d| (d, rounding.format(grid.cell(timer, d))))
+                    .map(|d| (d, rounding.format(grid.cell(milestone, d))))
             };
             let commit = |next| Act::Commit {
-                timer,
+                milestone,
                 day,
                 text: ed.text.clone(),
                 shown: ed.shown.clone(),
@@ -981,17 +988,21 @@ impl View {
             _ => response,
         };
         if response.clicked() {
-            return Some(Act::Edit(timer, day, shown));
+            return Some(Act::Edit(milestone, day, shown));
         }
         // Read-only, it still shows its entries.
         if !editable && ui.input(|i| i.pointer.primary_clicked()) && response.hovered() {
-            self.selected = if selected { None } else { Some((timer, day)) };
+            self.selected = if selected {
+                None
+            } else {
+                Some((milestone, day))
+            };
         }
         None
     }
 
-    /// The last row's button, and the list of projects behind it: found by a few
-    /// letters of their customer or name.
+    /// The last row's button, and the list of milestones behind it: found by a few
+    /// letters of their project or name.
     fn adder(
         &mut self,
         ui: &mut egui::Ui,
@@ -1006,7 +1017,7 @@ impl View {
                 .max_rect(area)
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        let button = kit::icon_action(&mut slot, Icon::Plus, "Add a project", theme);
+        let button = kit::icon_action(&mut slot, Icon::Plus, "Add a milestone", theme);
         if button.clicked() {
             self.adder = Adder {
                 focus: true,
@@ -1028,7 +1039,7 @@ impl View {
             });
             let field = ui.add(
                 TextEdit::singleline(&mut a.query)
-                    .hint_text("Find a project")
+                    .hint_text("Find a milestone")
                     .desired_width(f32::INFINITY)
                     .return_key(None),
             );
@@ -1039,14 +1050,14 @@ impl View {
                 a.selected = 0;
             }
             ui.add_space(4.0);
-            let projects: Vec<(u32, String, &str)> = state
-                .by_customer(false, false)
+            let milestones: Vec<(u32, String, &str)> = state
+                .by_project(false, false)
                 .into_iter()
-                .flat_map(|(_, timers)| timers)
+                .flat_map(|(_, milestones)| milestones)
                 .filter(|t| !rows.contains(&t.id))
                 .map(|t| (t.id, state.label(t.id), t.code.as_str()))
                 .collect();
-            let mut found = fuzzy::rank(&a.query, projects.iter().map(|p| p.1.as_str()));
+            let mut found = fuzzy::rank(&a.query, milestones.iter().map(|p| p.1.as_str()));
             found.truncate(PICKER_ROWS);
             let last = found.len().saturating_sub(1);
             a.selected = match (up, down) {
@@ -1060,47 +1071,47 @@ impl View {
             let colors = (theme.text, theme.accent);
             let mut picked = None;
             for (row, (i, hit)) in found.iter().enumerate() {
-                let (timer, label, code) = &projects[*i];
+                let (milestone, label, code) = &milestones[*i];
                 let words = fuzzy::job(label, &hit.at, &font, colors, PICKER_WIDTH);
                 let on = row == a.selected;
                 let icon = Some(Icon::People);
                 if kit::result_row(ui, icon, words, code, on, theme).clicked() {
-                    picked = Some(*timer);
+                    picked = Some(*milestone);
                 }
             }
             if found.is_empty() {
                 ui.add_space(4.0);
                 let why = if a.query.trim().is_empty() {
-                    "Every project is on the timecard."
+                    "Every milestone is on the timecard."
                 } else {
-                    "No project by that name."
+                    "No milestone by that name."
                 };
                 note(ui, why, theme);
                 ui.add_space(4.0);
             }
             if enter {
-                picked = picked.or(found.get(a.selected).map(|(i, _)| projects[*i].0));
+                picked = picked.or(found.get(a.selected).map(|(i, _)| milestones[*i].0));
             }
             ui.separator();
-            let words = fuzzy::job("New project…", &[], &font, colors, PICKER_WIDTH);
+            let words = fuzzy::job("New milestone…", &[], &font, colors, PICKER_WIDTH);
             let plus = Some(Icon::Plus);
             let new = kit::result_row(ui, plus, words, "", false, theme).clicked();
             if new {
                 a.form = Some(Form {
-                    customer: state.by_customer(false, true).first().map(|(c, _)| c.id),
+                    project: state.by_project(false, true).first().map(|(c, _)| c.id),
                     ..Form::default()
                 });
             }
-            if let Some(timer) = picked {
-                act = Some(Act::AddRow(timer));
+            if let Some(milestone) = picked {
+                act = Some(Act::AddRow(milestone));
             }
             picked.is_some() || new
         });
         act
     }
 
-    /// A new project: its customer (or a new one), its name and its code.
-    fn new_project_dialog(
+    /// A new milestone: its project (or a new one), its name and its code.
+    fn new_milestone_dialog(
         &mut self,
         ui: &mut egui::Ui,
         store: &mut Store,
@@ -1111,35 +1122,35 @@ impl View {
             return;
         };
         let ctx = ui.ctx().clone();
-        let customers: Vec<Option<u32>> = state
-            .by_customer(false, true)
+        let projects: Vec<Option<u32>> = state
+            .by_project(false, true)
             .iter()
             .map(|(c, _)| Some(c.id))
             .chain([None])
             .collect();
-        let name_of = |c: Option<u32>| match c.and_then(|c| state.customer(c)) {
+        let name_of = |c: Option<u32>| match c.and_then(|c| state.project(c)) {
             Some(c) => c.name.clone(),
-            None => "New customer…".to_owned(),
+            None => "New project…".to_owned(),
         };
         let mut add = false;
         let mut cancel = false;
-        let id = Id::new("whir.timesheet.new_project");
+        let id = Id::new("whir.timesheet.new_milestone");
         let modal = kit::dialog(&ctx, id, 360.0, theme, |ui| {
-            kit::dialog_title(ui, "New project", theme);
+            kit::dialog_title(ui, "New milestone", theme);
             ui.spacing_mut().item_spacing.y = 8.0;
-            let picked = kit::dropdown(ui, id.with("customer"), form.customer, &customers, name_of);
+            let picked = kit::dropdown(ui, id.with("project"), form.project, &projects, name_of);
             if let Some(c) = picked {
-                form.customer = c;
+                form.project = c;
             }
             let wide = f32::INFINITY;
-            if form.customer.is_none() {
-                let field = TextEdit::singleline(&mut form.new_customer)
-                    .hint_text("New customer's name")
+            if form.project.is_none() {
+                let field = TextEdit::singleline(&mut form.new_project)
+                    .hint_text("New project's name")
                     .desired_width(wide);
                 ui.add(field);
             }
             let field = TextEdit::singleline(&mut form.name)
-                .hint_text("Project")
+                .hint_text("Milestone")
                 .desired_width(wide);
             let name = ui.add(field);
             if !ui.ctx().memory(|m| m.focused().is_some()) {
@@ -1150,7 +1161,7 @@ impl View {
                 .desired_width(wide);
             ui.add(field);
             let named = !form.name.trim().is_empty()
-                && (form.customer.is_some() || !form.new_customer.trim().is_empty());
+                && (form.project.is_some() || !form.new_project.trim().is_empty());
             kit::dialog_actions(ui, |ui| {
                 cancel = kit::action(ui, "Cancel", theme).clicked();
                 ui.add_enabled_ui(named, |ui| {
@@ -1161,7 +1172,7 @@ impl View {
         });
         if add {
             if let Some(form) = self.adder.form.take() {
-                self.act(&ctx, store, Act::NewProject(form));
+                self.act(&ctx, store, Act::NewMilestone(form));
             }
         } else if cancel || modal.should_close() {
             self.adder.form = None;
@@ -1172,44 +1183,46 @@ impl View {
     fn act(&mut self, ctx: &egui::Context, store: &mut Store, act: Act) {
         let today = (0..7).find(|&d| self.monday + d as i64 == Stamp::now().day);
         match act {
-            Act::Edit(timer, day, shown) => {
+            Act::Edit(milestone, day, shown) => {
                 // A click on another cell came with this one's commit.
-                self.edit(timer, day, shown, false, false);
+                self.edit(milestone, day, shown, false, false);
             }
             Act::Commit {
-                timer,
+                milestone,
                 day,
                 text,
                 shown,
                 next,
             } => {
                 self.editing = None;
-                ctx.memory_mut(|m| m.surrender_focus(Id::new(("whir.timesheet.cell", timer, day))));
-                self.set_cell(store, timer, day, &text, &shown);
+                ctx.memory_mut(|m| {
+                    m.surrender_focus(Id::new(("whir.timesheet.cell", milestone, day)))
+                });
+                self.set_cell(store, milestone, day, &text, &shown);
                 if let Some((d, shown)) = next {
                     let live = store
                         .state()
                         .running
                         .as_ref()
-                        .is_some_and(|r| r.timer == timer && Some(d) == today);
-                    self.edit(timer, d, shown, false, live);
+                        .is_some_and(|r| r.milestone == milestone && Some(d) == today);
+                    self.edit(milestone, d, shown, false, live);
                 }
             }
             Act::Cancel => {
                 self.editing = None;
             }
-            Act::AddRow(timer) => {
-                self.added.push(timer);
+            Act::AddRow(milestone) => {
+                self.added.push(milestone);
                 self.adder = Adder::default();
-                self.edit(timer, today.unwrap_or(0), String::new(), false, false);
+                self.edit(milestone, today.unwrap_or(0), String::new(), false, false);
             }
-            Act::NewProject(form) => {
+            Act::NewMilestone(form) => {
                 let made = self.change(store, |tx| {
-                    let customer = form
-                        .customer
-                        .unwrap_or_else(|| tx.state.add_customer(form.new_customer.trim()));
+                    let project = form
+                        .project
+                        .unwrap_or_else(|| tx.state.add_project(form.new_project.trim()));
                     tx.state
-                        .add_timer(customer, form.name.trim(), form.code.trim())
+                        .add_milestone(project, form.name.trim(), form.code.trim())
                 });
                 if let Some(id) = made {
                     self.act(ctx, store, Act::AddRow(id));
@@ -1225,7 +1238,7 @@ impl View {
         store: &mut Store,
         state: &State,
         week: &Week,
-        timer: u32,
+        milestone: u32,
         day: usize,
         now: Stamp,
         theme: &Theme,
@@ -1234,7 +1247,7 @@ impl View {
         let date = self.monday + day as i64;
         let title = format!(
             "{} — {}",
-            state.label(timer),
+            state.label(milestone),
             format_date(&Stamp::midnight(date).local(), false)
         );
         let title = RichText::new(title)
@@ -1245,14 +1258,13 @@ impl View {
         let entries: Vec<Entry> = week
             .entries
             .iter()
-            .filter(|e| e.timer == timer && e.day() == date)
+            .filter(|e| e.milestone == milestone && e.day() == date)
             .cloned()
             .collect();
         let closed = week.closed.is_some();
-        let running = state
-            .running
-            .as_ref()
-            .filter(|r| r.timer == timer && r.start < Stamp::midnight(date + 1) && now.day >= date);
+        let running = state.running.as_ref().filter(|r| {
+            r.milestone == milestone && r.start < Stamp::midnight(date + 1) && now.day >= date
+        });
         if entries.is_empty() && running.is_none() {
             note(ui, "No entries.", theme);
             return;
@@ -1267,7 +1279,7 @@ impl View {
                 } else {
                     e.end.secs
                 };
-                let key = (e.timer, e.start.seconds(), e.end.seconds());
+                let key = (e.milestone, e.start.seconds(), e.end.seconds());
                 let id = |part: &str| Id::new(("whir.entry", key, part.to_owned()));
                 let from = clock_text(e.start.secs);
                 let to = clock_text(end_secs);
@@ -1368,7 +1380,7 @@ impl View {
                 };
                 let e = week.entries.remove(i);
                 if let Some((start, end, note)) = new {
-                    tx.add(e.timer, start, end, &note);
+                    tx.add(e.milestone, start, end, &note);
                 }
                 true
             });
@@ -1469,7 +1481,7 @@ impl View {
                 note(
                     ui,
                     &format!(
-                        "The running timer's time so far (since {}) goes in; it keeps running.",
+                        "The running milestone's time so far (since {}) goes in; it keeps running.",
                         format_hm(
                             &state
                                 .running
@@ -1536,8 +1548,8 @@ mod tests {
         let mut store = Store::open(dir.clone());
         let t = store
             .update(|tx| {
-                let c = tx.state.add_customer("Contoso");
-                tx.state.add_timer(c, "Automation", "")
+                let c = tx.state.add_project("Contoso");
+                tx.state.add_milestone(c, "Automation", "")
             })
             .unwrap();
         let mut view = View::new();
@@ -1560,7 +1572,7 @@ mod tests {
         assert!(view.error.is_some());
         assert_eq!(tuesday(&mut store), 0);
 
-        // Closed, or the running project's today: not typed into.
+        // Closed, or the running milestone's today: not typed into.
         assert!(!view.edit(t, 1, String::new(), true, false));
         assert!(!view.edit(t, 1, String::new(), false, true));
         assert!(view.editing.is_none());
@@ -1574,20 +1586,20 @@ mod tests {
         // All the room it could want: every column at its widest, two for names.
         let wide = Columns::fit(1120.0);
         assert_eq!((wide.day, wide.total), (DAY_MAX, TOTAL_MAX));
-        assert_eq!(wide.customer, Some(CUSTOMER_MAX.min(516.0 * 0.42).floor()));
+        assert_eq!(wide.project, Some(PROJECT_MAX.min(516.0 * 0.42).floor()));
         assert!(wide.dates());
 
-        // The days give way first, and customer and project stay apart.
+        // The days give way first, and project and milestone stay apart.
         let narrower = Columns::fit(800.0);
         assert!(narrower.day < DAY_MAX && narrower.day >= DAY_MIN);
-        assert!(narrower.customer.is_some());
+        assert!(narrower.project.is_some());
         assert!(!narrower.dates());
         assert_eq!(narrower.total, TOTAL_MIN);
 
         // Then they share a column.
         let shared = Columns::fit(600.0);
         assert_eq!(shared.day, DAY_MIN);
-        assert_eq!(shared.customer, None);
+        assert_eq!(shared.project, None);
 
         // And past the least it can be, the table stops shrinking.
         let least = LABEL_MIN + 7.0 * DAY_MIN + TOTAL_MIN;
@@ -1599,13 +1611,13 @@ mod tests {
     fn the_columns_always_add_up_to_the_table() {
         for room in (300..1400).step_by(7) {
             let c = Columns::fit(room as f32);
-            let labels = c.customer.unwrap_or(0.0) + c.project;
+            let labels = c.project.unwrap_or(0.0) + c.milestone;
             assert!(
                 (labels + 7.0 * c.day + c.total - c.width).abs() < 0.01,
                 "{room}: {c:?}"
             );
             assert!(
-                c.project >= LABEL_MIN.min(LABELS_MIN - CUSTOMER_MAX),
+                c.milestone >= LABEL_MIN.min(LABELS_MIN - PROJECT_MAX),
                 "{room}: {c:?}"
             );
             assert_eq!(c.x(0), labels, "{room}");

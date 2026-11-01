@@ -1,5 +1,5 @@
 //! How time is kept: what the timesheet rounds to, when the dock asks about
-//! time away, and whether it stays out while a timer runs.
+//! time away, and whether it stays out while a milestone runs.
 
 use whir_core::DocCx;
 use whir_core::kit;
@@ -27,7 +27,7 @@ pub fn ui(ui: &mut egui::Ui, store: Option<&mut Store>, cx: &mut DocCx<'_>, them
     let mut options = o;
     kit::group(ui, "", theme, |g| {
         if let Some(rounding) = g.choice(
-            "Round each project's day to",
+            "Round each milestone's day to",
             "For the timesheet only: entries keep the exact time.",
             o.rounding,
             &Rounding::ALL,
@@ -45,7 +45,7 @@ pub fn ui(ui: &mut egui::Ui, store: Option<&mut Store>, cx: &mut DocCx<'_>, them
             options.away_minutes = away;
         }
         g.switch(
-            "Keep the dock out while a timer runs",
+            "Keep the dock out while a milestone runs",
             "Otherwise it slides into the edge of the screen as usual.",
             &mut options.keep_out,
         );

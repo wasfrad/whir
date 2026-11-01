@@ -1,5 +1,5 @@
-//! Customers and their projects, what time is tracked against: a card for each
-//! customer, and everything on it edited where it stands.
+//! Projects and their milestones, what time is tracked against: a card for each
+//! project, and everything on it edited where it stands.
 
 use std::collections::HashSet;
 
@@ -7,7 +7,7 @@ use egui::{Align, Button, FontId, Id, Key, Layout, RichText, TextEdit, Ui, vec2}
 use whir_core::icons::{self, Icon};
 use whir_core::kit::{self, Card, Inline};
 use whir_core::theme::{Metrics, Theme};
-use whir_core::timesheet::{Customer, Store, Timer, Txn};
+use whir_core::timesheet::{Milestone, Project, Store, Txn};
 use whir_core::{DocCx, toolbar};
 
 use super::no_folder;
@@ -19,18 +19,18 @@ type Change = Box<dyn FnOnce(&mut Txn)>;
 const GAP: f32 = 8.0;
 /// Between cards.
 const CARD_GAP: f32 = 12.0;
-/// What "+ Project" takes up on a customer's row.
+/// What "+ Milestone" takes up on a project's row.
 const ADD_WIDTH: f32 = 84.0;
 
 #[derive(Default)]
 pub struct View {
-    /// A new customer, while it's being named.
-    new_customer: Option<Naming>,
-    /// The customer a project is being added to, and the project.
-    new_project: Option<(u32, Naming)>,
-    /// Customers whose archived projects are showing.
+    /// A new project, while it's being named.
+    new_project: Option<Naming>,
+    /// The project a milestone is being added to, and the milestone.
+    new_milestone: Option<(u32, Naming)>,
+    /// Projects whose archived milestones are showing.
     archived: HashSet<u32>,
-    /// Timers with time in any week (those can be archived, not deleted).
+    /// Milestones with time in any week (those can be archived, not deleted).
     used: Option<HashSet<u32>>,
     error: Option<String>,
 }
@@ -60,7 +60,7 @@ enum Named {
     Cancelled,
 }
 
-/// How wide a project's name and code are, in a row `width` wide with its ⋯.
+/// How wide a milestone's name and code are, in a row `width` wide with its ⋯.
 fn columns(width: f32, m: Metrics) -> (f32, f32) {
     let code = (width * 0.3).clamp(90.0, 170.0);
     (width - code - m.control_height - 2.0 * GAP, code)
@@ -80,18 +80,18 @@ impl View {
         theme: &Theme,
     ) {
         let Some(store) = store else {
-            no_folder(ui, "Customers & projects", theme);
+            no_folder(ui, "Projects & milestones", theme);
             return;
         };
         kit::page_header(
             ui,
-            "Customers & projects",
-            "Each project can be timed from the capture dock, or have its hours typed into \
-             the timesheet. A code is the project or assignment ID that goes on the timesheet.",
+            "Projects & milestones",
+            "Each milestone can be timed from the capture dock, or have its hours typed into \
+             the timesheet. A code is the milestone or assignment ID that goes on the timesheet.",
             theme,
             |ui| {
-                if kit::primary(ui, "New customer", theme).clicked() {
-                    self.new_customer = Some(Naming::new());
+                if kit::primary(ui, "New project", theme).clicked() {
+                    self.new_project = Some(Naming::new());
                 }
             },
         );
@@ -103,9 +103,10 @@ impl View {
         }
 
         let used = self.used.get_or_insert_with(|| {
-            let mut used: HashSet<u32> = store.state().running.iter().map(|r| r.timer).collect();
+            let mut used: HashSet<u32> =
+                store.state().running.iter().map(|r| r.milestone).collect();
             for m in store.mondays() {
-                used.extend(store.week(m).entries.iter().map(|e| e.timer));
+                used.extend(store.week(m).entries.iter().map(|e| e.milestone));
             }
             used
         });
@@ -113,24 +114,24 @@ impl View {
         let state = store.state().clone();
         let mut change: Option<Change> = None;
 
-        if self.new_customer.is_some() {
-            kit::card(ui, theme, |c| self.naming_customer(c, &mut change));
+        if self.new_project.is_some() {
+            kit::card(ui, theme, |c| self.naming_project(c, &mut change));
             ui.add_space(CARD_GAP);
-        } else if state.customers.is_empty() {
+        } else if state.projects.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 kit::empty_state(
                     ui,
                     Icon::People,
-                    "No customers yet",
-                    "Add one, then give it the projects you'd like to time.",
+                    "No projects yet",
+                    "Add one, then give it the milestones you'd like to time.",
                     theme,
                 );
             });
         }
-        for (customer, timers) in state.by_customer(true, true) {
+        for (project, milestones) in state.by_project(true, true) {
             kit::card(ui, theme, |c| {
-                self.customer(c, customer, &timers, &used, &mut change);
+                self.project(c, project, &milestones, &used, &mut change);
             });
             ui.add_space(CARD_GAP);
         }
@@ -142,46 +143,46 @@ impl View {
         }
     }
 
-    fn naming_customer(&mut self, c: &mut Card<'_>, change: &mut Option<Change>) {
+    fn naming_project(&mut self, c: &mut Card<'_>, change: &mut Option<Change>) {
         let theme = c.theme;
-        let Some(n) = &mut self.new_customer else {
+        let Some(n) = &mut self.new_project else {
             return;
         };
-        let named = c.field_row(|ui| name_fields(ui, n, "New customer", false, theme));
+        let named = c.field_row(|ui| name_fields(ui, n, "New project", false, theme));
         match named {
             Named::Waiting => {}
-            Named::Cancelled => self.new_customer = None,
+            Named::Cancelled => self.new_project = None,
             Named::Done => {
                 let name = std::mem::take(&mut n.name);
-                self.new_customer = None;
+                self.new_project = None;
                 *change = Some(Box::new(move |tx| {
-                    tx.state.add_customer(&name);
+                    tx.state.add_project(&name);
                 }));
             }
         }
     }
 
-    /// A customer's card: its name, its projects, then the archived ones if
+    /// A project's card: its name, its milestones, then the archived ones if
     /// they've been asked for.
-    fn customer(
+    fn project(
         &mut self,
         c: &mut Card<'_>,
-        customer: &Customer,
-        timers: &[&Timer],
+        project: &Project,
+        milestones: &[&Milestone],
         used: &HashSet<u32>,
         change: &mut Option<Change>,
     ) {
         let theme = c.theme;
         let m = theme.metrics;
-        let cid = customer.id;
+        let cid = project.id;
         c.field_row(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             ui.horizontal(|ui| {
                 let width = ui.available_width() - m.control_height - ADD_WIDTH - 2.0 * GAP;
                 let field = Inline {
-                    id: Id::new(("whir.customer", cid)),
-                    current: &customer.name,
-                    hint: "Customer",
+                    id: Id::new(("whir.project", cid)),
+                    current: &project.name,
+                    hint: "Project",
                     width,
                     font: kit::strong(m.body_text_size),
                     color: theme.text,
@@ -190,52 +191,52 @@ impl View {
                     && !name.is_empty()
                 {
                     *change = Some(Box::new(move |tx| {
-                        if let Some(c) = tx.state.customer_mut(cid) {
+                        if let Some(c) = tx.state.project_mut(cid) {
                             c.name = name;
                         }
                     }));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     kit::more_button(ui, theme, |ui| {
-                        let delete = kit::menu_entry(Some(Icon::Delete), "Delete customer", "");
+                        let delete = kit::menu_entry(Some(Icon::Delete), "Delete project", "");
                         let delete = ui
-                            .add_enabled(timers.is_empty(), delete)
-                            .on_disabled_hover_text("It still has projects");
+                            .add_enabled(milestones.is_empty(), delete)
+                            .on_disabled_hover_text("It still has milestones");
                         if delete.clicked() {
                             *change = Some(Box::new(move |tx| {
-                                tx.state.customers.retain(|c| c.id != cid)
+                                tx.state.projects.retain(|c| c.id != cid)
                             }));
                             ui.close();
                         }
                     });
-                    if kit::icon_action(ui, Icon::Plus, "Project", theme).clicked() {
-                        self.new_project = Some((cid, Naming::new()));
+                    if kit::icon_action(ui, Icon::Plus, "Milestone", theme).clicked() {
+                        self.new_milestone = Some((cid, Naming::new()));
                     }
                 });
             });
         });
 
-        let (old, current): (Vec<&Timer>, Vec<&Timer>) =
-            timers.iter().copied().partition(|t| t.archived);
+        let (old, current): (Vec<&Milestone>, Vec<&Milestone>) =
+            milestones.iter().copied().partition(|t| t.archived);
         for t in &current {
-            project(c, t, used.contains(&t.id), change);
+            milestone(c, t, used.contains(&t.id), change);
         }
-        if let Some((_, n)) = self.new_project.as_mut().filter(|(on, _)| *on == cid) {
-            let named = c.field_row(|ui| name_fields(ui, n, "New project", true, theme));
+        if let Some((_, n)) = self.new_milestone.as_mut().filter(|(on, _)| *on == cid) {
+            let named = c.field_row(|ui| name_fields(ui, n, "New milestone", true, theme));
             match named {
                 Named::Waiting => {}
-                Named::Cancelled => self.new_project = None,
+                Named::Cancelled => self.new_milestone = None,
                 Named::Done => {
                     let (name, code) = (std::mem::take(&mut n.name), std::mem::take(&mut n.code));
-                    self.new_project = None;
+                    self.new_milestone = None;
                     *change = Some(Box::new(move |tx| {
-                        tx.state.add_timer(cid, &name, &code);
+                        tx.state.add_milestone(cid, &name, &code);
                     }));
                 }
             }
         } else if current.is_empty() && old.is_empty() {
             c.row(|ui| {
-                ui.label(RichText::new("No projects yet").color(theme.text_dim));
+                ui.label(RichText::new("No milestones yet").color(theme.text_dim));
             });
         }
         if old.is_empty() {
@@ -258,14 +259,14 @@ impl View {
         }
         if open {
             for t in old {
-                project(c, t, used.contains(&t.id), change);
+                milestone(c, t, used.contains(&t.id), change);
             }
         }
     }
 }
 
-/// A project's row: its name and code, and what else can be done with it.
-fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>) {
+/// A milestone's row: its name and code, and what else can be done with it.
+fn milestone(c: &mut Card<'_>, t: &Milestone, used: bool, change: &mut Option<Change>) {
     let theme = c.theme;
     let m = theme.metrics;
     let tid = t.id;
@@ -277,9 +278,9 @@ fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>)
             let font = FontId::proportional(m.body_text_size);
             let color = if archived { theme.text_dim } else { theme.text };
             let name = Inline {
-                id: Id::new(("whir.timer", tid, "name")),
+                id: Id::new(("whir.milestone", tid, "name")),
                 current: &t.name,
-                hint: "Project",
+                hint: "Milestone",
                 width: name_width,
                 font: font.clone(),
                 color,
@@ -288,13 +289,13 @@ fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>)
                 && !name.is_empty()
             {
                 *change = Some(Box::new(move |tx| {
-                    if let Some(t) = tx.state.timer_mut(tid) {
+                    if let Some(t) = tx.state.milestone_mut(tid) {
                         t.name = name;
                     }
                 }));
             }
             let code = Inline {
-                id: Id::new(("whir.timer", tid, "code")),
+                id: Id::new(("whir.milestone", tid, "code")),
                 current: &t.code,
                 hint: "Add code",
                 width: code_width,
@@ -303,7 +304,7 @@ fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>)
             };
             if let Some(code) = kit::inline_text(ui, code, theme) {
                 *change = Some(Box::new(move |tx| {
-                    if let Some(t) = tx.state.timer_mut(tid) {
+                    if let Some(t) = tx.state.milestone_mut(tid) {
                         t.code = code;
                     }
                 }));
@@ -320,7 +321,7 @@ fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>)
                     .clicked()
                 {
                     *change = Some(Box::new(move |tx| {
-                        if let Some(t) = tx.state.timer_mut(tid) {
+                        if let Some(t) = tx.state.milestone_mut(tid) {
                             t.archived = !archived;
                         }
                     }));
@@ -332,7 +333,7 @@ fn project(c: &mut Card<'_>, t: &Timer, used: bool, change: &mut Option<Change>)
                     .on_disabled_hover_text("It has time on it: archive it instead");
                 if delete.clicked() {
                     *change = Some(Box::new(move |tx| {
-                        tx.state.timers.retain(|t| t.id != tid);
+                        tx.state.milestones.retain(|t| t.id != tid);
                         if tx.state.last == Some(tid) {
                             tx.state.last = None;
                         }

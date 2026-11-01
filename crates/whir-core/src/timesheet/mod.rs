@@ -1,4 +1,4 @@
-//! Time tracking: customers and their projects, timers started and stopped
+//! Time tracking: projects and their milestones, milestones started and stopped
 //! from the dock, and a timesheet per week (Monday to Sunday) that is closed
 //! out to CSV when it is handed in.
 //!
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use export::{csv_paths, entries_csv, timesheet_csv, timesheet_tsv};
 pub use model::{
-    Customer, Entry, Grid, Options, Rounding, Running, State, Timer, Week, split_days, week_of,
+    Entry, Grid, Milestone, Options, Project, Rounding, Running, State, Week, split_days, week_of,
 };
 pub use store::{Store, Txn};
 

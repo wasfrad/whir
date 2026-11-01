@@ -1,10 +1,10 @@
 //! The timesheet on disk, shared by two processes: the dock starts and stops
-//! timers, the window edits entries and closes weeks. Each change is made
+//! milestones, the window edits entries and closes weeks. Each change is made
 //! under a named mutex, from a fresh read of the files it touches, and
 //! written atomically; readers read a file again whenever it has changed.
 //!
 //! ```text
-//! <dir>\.whir\timers.txt       State: customers, timers, options, what runs
+//! <dir>\.whir\timers.txt       State: projects, milestones, options, what runs
 //! <dir>\.whir\2026-10-26.txt   that week's finished entries (named for its Monday)
 //! <dir>\2026-10-26 *.csv       a closed week's timesheet (see `export`)
 //! ```
@@ -26,7 +26,7 @@ const DATA_FOLDER: &str = ".whir";
 const STATE_FILE: &str = "timers.txt";
 /// How long a change waits for the other process to finish one of its own.
 const LOCK_WAIT_MS: u32 = 3000;
-/// A timer stopped (or switched) within this many seconds of starting leaves
+/// A milestone stopped (or switched) within this many seconds of starting leaves
 /// nothing behind. Only nothing at all: the dock shows a running stopwatch,
 /// and pausing must never take back seconds it has shown.
 const MIN_ENTRY_SECS: i64 = 1;
@@ -162,7 +162,7 @@ impl Store {
         changed
     }
 
-    /// The timers, the options and what is running, as last read.
+    /// The milestones, the options and what is running, as last read.
     pub fn state(&self) -> &State {
         &self.state.value
     }
@@ -332,21 +332,21 @@ impl Txn<'_> {
         self.week_mut(monday)
     }
 
-    /// Add time on `timer` (cut at midnight, into the weeks it falls in).
-    pub fn add(&mut self, timer: u32, start: Stamp, end: Stamp, note: &str) {
-        for piece in split_days(timer, start, end, note) {
+    /// Add time on `milestone` (cut at midnight, into the weeks it falls in).
+    pub fn add(&mut self, milestone: u32, start: Stamp, end: Stamp, note: &str) {
+        for piece in split_days(milestone, start, end, note) {
             self.week_mut(week_of(piece.start)).insert(piece);
         }
     }
 
-    /// Make `timer`'s finished time on `day` exactly `seconds`, as typed into
+    /// Make `milestone`'s finished time on `day` exactly `seconds`, as typed into
     /// the timesheet: more is one entry added after the day's last one (or
     /// from nine), kept before midnight; less is cut from its latest entries
-    /// back. The running timer's time isn't touched.
-    pub fn set_day(&mut self, timer: u32, day: i64, seconds: i64) {
+    /// back. The running milestone's time isn't touched.
+    pub fn set_day(&mut self, milestone: u32, day: i64, seconds: i64) {
         let seconds = seconds.clamp(0, 24 * 3600);
         let week = self.week_mut(week_of(Stamp::midnight(day)));
-        let mine = |e: &Entry| e.timer == timer && e.day() == day;
+        let mine = |e: &Entry| e.milestone == milestone && e.day() == day;
         let has: i64 = week
             .entries
             .iter()
@@ -366,7 +366,7 @@ impl Txn<'_> {
                 .min(Stamp::midnight(day + 1).plus(-length))
                 .max(Stamp::midnight(day));
             week.insert(Entry {
-                timer,
+                milestone,
                 start,
                 end: start.plus(length),
                 note: String::new(),
@@ -396,46 +396,46 @@ impl Txn<'_> {
         (index < week.entries.len()).then(|| week.entries.remove(index))
     }
 
-    /// Stop the running timer at `at`, keeping its time.
+    /// Stop the running milestone at `at`, keeping its time.
     pub fn stop(&mut self, at: Stamp) {
         if let Some(r) = self.state.running.take()
             && at.since(r.start) >= MIN_ENTRY_SECS
         {
-            self.add(r.timer, r.start, at, &r.note);
+            self.add(r.milestone, r.start, at, &r.note);
         }
     }
 
-    /// Start `timer` at `at` (stopping whatever else runs).
-    pub fn start(&mut self, timer: u32, at: Stamp) {
+    /// Start `milestone` at `at` (stopping whatever else runs).
+    pub fn start(&mut self, milestone: u32, at: Stamp) {
         if self
             .state
             .running
             .as_ref()
-            .is_some_and(|r| r.timer == timer)
+            .is_some_and(|r| r.milestone == milestone)
         {
             return;
         }
         self.stop(at);
         self.state.running = Some(Running {
-            timer,
+            milestone,
             start: at,
             note: String::new(),
         });
-        self.state.last = Some(timer);
+        self.state.last = Some(milestone);
     }
 
-    /// Pause, or resume the timer that ran last.
+    /// Pause, or resume the milestone that ran last.
     pub fn toggle(&mut self, at: Stamp) {
         match (&self.state.running, self.state.last) {
             (Some(_), _) => self.stop(at),
-            (None, Some(last)) if self.state.timer(last).is_some_and(|t| !t.archived) => {
+            (None, Some(last)) if self.state.milestone(last).is_some_and(|t| !t.archived) => {
                 self.start(last, at)
             }
             _ => {}
         }
     }
 
-    /// What the running timer's time is for.
+    /// What the running milestone's time is for.
     pub fn set_note(&mut self, note: &str) {
         if let Some(r) = &mut self.state.running {
             r.note = note.trim().to_owned();
@@ -443,7 +443,7 @@ impl Txn<'_> {
     }
 
     /// The time since `since` didn't count (the user was away): the running
-    /// timer stops then, and runs again from `now`.
+    /// milestone stops then, and runs again from `now`.
     pub fn drop_away(&mut self, since: Stamp, now: Stamp) {
         let Some(r) = self.state.running.clone() else {
             return;
@@ -473,19 +473,19 @@ mod tests {
     }
 
     #[test]
-    fn a_timer_runs_stops_and_lands_in_its_week() {
+    fn a_milestone_runs_stops_and_lands_in_its_week() {
         let mut store = temp_store("runs");
         let m = monday();
         let t = store
             .update(|tx| {
-                let c = tx.state.add_customer("Acme");
-                tx.state.add_timer(c, "Onboarding", "PRJ-1")
+                let c = tx.state.add_project("Acme");
+                tx.state.add_milestone(c, "Onboarding", "PRJ-1")
             })
             .unwrap();
         store
             .update(|tx| tx.start(t, Stamp::at(m, 9, 0, 0)))
             .unwrap();
-        assert_eq!(store.state().running.as_ref().unwrap().timer, t);
+        assert_eq!(store.state().running.as_ref().unwrap().milestone, t);
         store
             .update(|tx| {
                 tx.set_note(" kickoff ");
@@ -513,10 +513,10 @@ mod tests {
         let m = monday();
         let (a, b) = store
             .update(|tx| {
-                let c = tx.state.add_customer("Acme");
+                let c = tx.state.add_project("Acme");
                 (
-                    tx.state.add_timer(c, "A", ""),
-                    tx.state.add_timer(c, "B", ""),
+                    tx.state.add_milestone(c, "A", ""),
+                    tx.state.add_milestone(c, "B", ""),
                 )
             })
             .unwrap();
@@ -537,14 +537,14 @@ mod tests {
         let spans: Vec<(u32, i64)> = week
             .entries
             .iter()
-            .map(|e| (e.timer, e.seconds()))
+            .map(|e| (e.milestone, e.seconds()))
             .collect();
         assert_eq!(spans, [(a, 3600), (b, 10), (a, 3590)]);
         // Resume starts the last one again.
         store
             .update(|tx| tx.toggle(Stamp::at(m, 12, 0, 0)))
             .unwrap();
-        assert_eq!(store.state().running.as_ref().unwrap().timer, b);
+        assert_eq!(store.state().running.as_ref().unwrap().milestone, b);
         let _ = std::fs::remove_dir_all(store.dir());
     }
 
@@ -556,15 +556,15 @@ mod tests {
         store
             .update(|tx| {
                 tx.add(1, at(9, 0), at(10, 0), "one");
-                tx.add(2, at(10, 0), at(11, 30), "other project");
+                tx.add(2, at(10, 0), at(11, 30), "other milestone");
                 tx.add(1, at(13, 0), at(13, 45), "two");
             })
             .unwrap();
-        let day = |store: &mut Store, timer: u32| -> Vec<(Stamp, Stamp)> {
+        let day = |store: &mut Store, milestone: u32| -> Vec<(Stamp, Stamp)> {
             let week = store.week(m).clone();
             week.entries
                 .iter()
-                .filter(|e| e.timer == timer && e.day() == tue)
+                .filter(|e| e.milestone == milestone && e.day() == tue)
                 .map(|e| (e.start, e.end))
                 .collect()
         };
@@ -581,7 +581,7 @@ mod tests {
         // Less: cut from the latest back, across entries.
         store.update(|tx| tx.set_day(1, tue, 3000)).unwrap();
         assert_eq!(day(&mut store, 1), [(at(9, 0), at(9, 50))]);
-        // The other project is untouched throughout.
+        // The other milestone is untouched throughout.
         assert_eq!(day(&mut store, 2), [(at(10, 0), at(11, 30))]);
         // Nothing: all gone.
         store.update(|tx| tx.set_day(1, tue, 0)).unwrap();
@@ -610,23 +610,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(store.dir());
     }
 
-    fn day_of(store: &mut Store, timer: u32, d: i64) -> Vec<(Stamp, Stamp)> {
+    fn day_of(store: &mut Store, milestone: u32, d: i64) -> Vec<(Stamp, Stamp)> {
         let week = store.week(week_of(Stamp::midnight(d))).clone();
         week.entries
             .iter()
-            .filter(|e| e.timer == timer && e.day() == d)
+            .filter(|e| e.milestone == milestone && e.day() == d)
             .map(|e| (e.start, e.end))
             .collect()
     }
 
     #[test]
-    fn a_timer_left_running_over_the_weekend_splits_into_both_weeks() {
+    fn a_milestone_left_running_over_the_weekend_splits_into_both_weeks() {
         let mut store = temp_store("weekend");
         let m = monday();
         store
             .update(|tx| {
                 tx.state.running = Some(Running {
-                    timer: 1,
+                    milestone: 1,
                     start: Stamp::at(m + 6, 22, 0, 0),
                     note: "late".into(),
                 });
@@ -647,7 +647,7 @@ mod tests {
         store
             .update(|tx| {
                 tx.state.running = Some(Running {
-                    timer: 1,
+                    milestone: 1,
                     start: Stamp::at(m, 9, 0, 0),
                     note: "n".into(),
                 });
@@ -667,7 +667,7 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join(STATE_FILE), "not a timesheet\n").unwrap();
         let mut store = Store::open(store_dir.clone());
-        assert!(store.update(|tx| tx.state.add_customer("x")).is_err());
+        assert!(store.update(|tx| tx.state.add_project("x")).is_err());
         assert_eq!(
             std::fs::read_to_string(data.join(STATE_FILE)).unwrap(),
             "not a timesheet\n"
@@ -682,7 +682,7 @@ mod tests {
         let calls = Rc::new(Cell::new(0));
         let seen = calls.clone();
         let mut store = temp_store("notify").on_change(move || seen.set(seen.get() + 1));
-        store.update(|tx| tx.state.add_customer("x")).unwrap();
+        store.update(|tx| tx.state.add_project("x")).unwrap();
         store.update(|_| ()).unwrap();
         assert_eq!(calls.get(), 1);
         let _ = std::fs::remove_dir_all(store.dir());

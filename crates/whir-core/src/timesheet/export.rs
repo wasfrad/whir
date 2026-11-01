@@ -1,7 +1,7 @@
 //! Closing out a week: its timesheet written as CSV files next to the data,
 //! for Excel, for whir's own table view, and for keeping.
 //!
-//! - `2026-10-26 timesheet.csv`: a row per project, a column per day, hours
+//! - `2026-10-26 timesheet.csv`: a row per milestone, a column per day, hours
 //!   rounded as the options say (what goes on the timecard), with the notes.
 //! - `2026-10-26 entries.csv`: every entry, to the second.
 
@@ -50,7 +50,7 @@ fn timesheet(state: &State, grid: &Grid, week: &Week, sep: &str) -> String {
         out.push_str(&cells.join(sep));
         out.push_str("\r\n");
     };
-    let mut header = vec!["Customer".into(), "Project".into(), "Code".into()];
+    let mut header = vec!["Project".into(), "Milestone".into(), "Code".into()];
     for (d, name) in DAYS.iter().enumerate() {
         header.push(format!(
             "{name} {}",
@@ -60,16 +60,16 @@ fn timesheet(state: &State, grid: &Grid, week: &Week, sep: &str) -> String {
     header.extend(["Total".into(), "Notes".into()]);
     line(header);
 
-    // Customer, then project, by name.
+    // Project, then milestone, by name.
     let mut rows: Vec<u32> = grid.rows.iter().map(|(t, _)| *t).collect();
     rows.sort_by_key(|&t| {
         let (c, p) = state.names(t);
         (c.to_lowercase(), p.to_lowercase())
     });
     for t in rows {
-        let (customer, project) = state.names(t);
-        let code = state.timer(t).map_or("", |t| t.code.as_str());
-        let mut cells = vec![customer.to_owned(), project.to_owned(), code.to_owned()];
+        let (project, milestone) = state.names(t);
+        let code = state.milestone(t).map_or("", |t| t.code.as_str());
+        let mut cells = vec![project.to_owned(), milestone.to_owned(), code.to_owned()];
         for d in 0..7 {
             cells.push(rounding.format(grid.cell(t, d)));
         }
@@ -93,14 +93,14 @@ fn hours(h: f64) -> String {
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// A project's notes for the week: "Mon: kickoff, review; Wed: fixes".
-fn notes(week: &Week, timer: u32) -> String {
+/// A milestone's notes for the week: "Mon: kickoff, review; Wed: fixes".
+fn notes(week: &Week, milestone: u32) -> String {
     let mut days: Vec<String> = Vec::new();
     for (d, name) in DAYS.iter().enumerate() {
         let mut seen: Vec<&str> = Vec::new();
         for e in &week.entries {
             let note = e.note.trim();
-            if e.timer == timer
+            if e.milestone == milestone
                 && e.day() == week.monday + d as i64
                 && !note.is_empty()
                 && !seen.contains(&note)
@@ -122,7 +122,7 @@ pub fn timesheet_csv(state: &State, week: &Week) -> String {
 }
 
 /// The timesheet as tab-separated text, for pasting into Excel or an email;
-/// the running timer's time so far included.
+/// the running milestone's time so far included.
 pub fn timesheet_tsv(state: &State, week: &Week, running: Option<&Running>, now: Stamp) -> String {
     let grid = Grid::of(week, running, now);
     timesheet(state, &grid, week, "\t")
@@ -130,15 +130,15 @@ pub fn timesheet_tsv(state: &State, week: &Week, running: Option<&Running>, now:
 
 /// Every entry of the week.
 pub fn entries_csv(state: &State, week: &Week) -> String {
-    let mut out = String::from("\u{feff}Date,Start,End,Hours,Customer,Project,Code,Note\r\n");
+    let mut out = String::from("\u{feff}Date,Start,End,Hours,Project,Milestone,Code,Note\r\n");
     let time = |s: Stamp| {
         let full = s.format();
         full.split_once('T')
             .map_or(full.clone(), |(_, t)| t.to_owned())
     };
     for e in &week.entries {
-        let (customer, project) = state.names(e.timer);
-        let code = state.timer(e.timer).map_or("", |t| t.code.as_str());
+        let (project, milestone) = state.names(e.milestone);
+        let code = state.milestone(e.milestone).map_or("", |t| t.code.as_str());
         let end = if e.end.day > e.start.day {
             "24:00:00".to_owned()
         } else {
@@ -149,8 +149,8 @@ pub fn entries_csv(state: &State, week: &Week) -> String {
             time(e.start),
             end,
             format!("{:.2}", e.seconds() as f64 / 3600.0),
-            customer.to_owned(),
             project.to_owned(),
+            milestone.to_owned(),
             code.to_owned(),
             e.note.clone(),
         ];
@@ -163,7 +163,7 @@ pub fn entries_csv(state: &State, week: &Week) -> String {
 
 impl Txn<'_> {
     /// Close out the week starting `monday`: write its CSVs and mark it
-    /// closed. A timer running in it keeps running; its time so far is
+    /// closed. A milestone running in it keeps running; its time so far is
     /// written as an entry first, so the timesheet has it. Returns the
     /// timesheet CSV's path.
     pub fn close_week(&mut self, monday: i64, now: Stamp) -> Result<PathBuf, String> {
@@ -172,7 +172,7 @@ impl Txn<'_> {
         {
             let note = r.note.clone();
             self.stop(now);
-            self.start(r.timer, now);
+            self.start(r.milestone, now);
             self.set_note(&note);
         }
         let state = self.state.clone();
@@ -205,10 +205,10 @@ mod tests {
     fn sample() -> (State, Week) {
         let m = days_from_civil(2026, 10, 26);
         let mut s = State::default();
-        let acme = s.add_customer("Acme, Inc.");
-        let globex = s.add_customer("Globex");
-        let onboard = s.add_timer(acme, "Onboarding", "PRJ-1");
-        let migrate = s.add_timer(globex, "Migration \"v2\"", "");
+        let acme = s.add_project("Acme, Inc.");
+        let globex = s.add_project("Globex");
+        let onboard = s.add_milestone(acme, "Onboarding", "PRJ-1");
+        let migrate = s.add_milestone(globex, "Migration \"v2\"", "");
         let mut w = Week::new(m);
         for (t, d, from, to, note) in [
             (migrate, 0, (9, 0), (9, 50), "plan"),
@@ -218,7 +218,7 @@ mod tests {
             (onboard, 2, (10, 0), (10, 30), "review"),
         ] {
             w.insert(Entry {
-                timer: t,
+                milestone: t,
                 start: Stamp::at(m + d, from.0, from.1, 0),
                 end: Stamp::at(m + d, to.0, to.1, 0),
                 note: note.into(),
@@ -228,14 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn the_timesheet_has_a_row_per_project_and_rounded_days() {
+    fn the_timesheet_has_a_row_per_milestone_and_rounded_days() {
         let (s, w) = sample();
         let csv = timesheet_csv(&s, &w);
         let lines: Vec<&str> = csv.trim_start_matches('\u{feff}').lines().collect();
         assert_eq!(
             lines,
             [
-                "Customer,Project,Code,Mon 2026-10-26,Tue 2026-10-27,Wed 2026-10-28,\
+                "Project,Milestone,Code,Mon 2026-10-26,Tue 2026-10-27,Wed 2026-10-28,\
                  Thu 2026-10-29,Fri 2026-10-30,Sat 2026-10-31,Sun 2026-11-01,Total,Notes",
                 "\"Acme, Inc.\",Onboarding,PRJ-1,1.75,,0.5,,,,,2.25,Mon: kickoff; Wed: review",
                 "Globex,\"Migration \"\"v2\"\"\",,0.75,,,,,,,0.75,Mon: plan",
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_writes_both_files_and_keeps_the_timer_running() {
+    fn closing_writes_both_files_and_keeps_the_milestone_running() {
         let dir = std::env::temp_dir().join(format!("whir-time-close-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut store = Store::open(dir.clone());
@@ -265,8 +265,8 @@ mod tests {
         let friday_noon = Stamp::at(m + 4, 12, 0, 0);
         let sheet = store
             .update(|tx| {
-                let c = tx.state.add_customer("Acme");
-                let t = tx.state.add_timer(c, "Onboarding", "");
+                let c = tx.state.add_project("Acme");
+                let t = tx.state.add_milestone(c, "Onboarding", "");
                 tx.start(t, Stamp::at(m + 4, 9, 0, 0));
                 tx.set_note("all morning");
                 tx.close_week(m, friday_noon)

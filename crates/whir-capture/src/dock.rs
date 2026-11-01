@@ -1,13 +1,13 @@
 //! The dock: a small bar on an edge of the screen. Only a grip shows until
 //! the pointer rests on it; then it slides out: Capture, Delay, and a
-//! stopwatch (▶ / ⏸, today's time on the project to the second, the
-//! customer over the project, which opens a picker) with a ⌄ that opens
+//! stopwatch (▶ / ⏸, today's time on the milestone to the second, the
+//! project over the milestone, which opens a picker) with a ⌄ that opens
 //! today's times. It can be dragged to any edge of any monitor, and
 //! remembers where.
 //!
 //! Under it, a panel (a second window) shows what must be seen: the todos
 //! (notes flagged in whir), the "were you away?" question, "switch
-//! projects?", and today's times or the picker when open. While there is
+//! milestones?", and today's times or the picker when open. While there is
 //! something to show, or a timer runs, the dock stays out.
 //!
 //! It never takes the keyboard or becomes the active window: clicking it must
@@ -216,7 +216,7 @@ struct Dock {
     panel: Panel,
     /// Today's times or the picker, open.
     view: Option<View>,
-    /// A project picked while another runs: "switch?".
+    /// A milestone picked while another runs: "switch?".
     confirm: Option<u32>,
     clock: Clock,
     /// The open todos: title, note, flagged since. Newest first.
@@ -577,12 +577,12 @@ impl Dock {
                 let _ = KillTimer(Some(self.hwnd), TIMER_TICK);
             }
         }
-        // A project picked to switch to may be running now (or gone).
+        // A milestone picked to switch to may be running now (or gone).
         if self.confirm.is_some()
             && !self
                 .clock
                 .running()
-                .is_some_and(|r| Some(r.timer) != self.confirm)
+                .is_some_and(|r| Some(r.milestone) != self.confirm)
         {
             self.confirm = None;
         }
@@ -961,8 +961,8 @@ impl Dock {
                 self.clock.toggle();
                 self.settle();
             }
-            // Nothing to play yet: choose a project.
-            Slot::Play | Slot::Project => self.choose(),
+            // Nothing to play yet: choose a milestone.
+            Slot::Play | Slot::Milestone => self.choose(),
             Slot::More => {
                 let today = self.view != Some(View::Today);
                 self.set_view(today.then_some(View::Today));
@@ -971,11 +971,11 @@ impl Dock {
         }
     }
 
-    /// The picker; or, with no projects to pick from, where they're set up.
+    /// The picker; or, with no milestones to pick from, where they're set up.
     fn choose(&mut self) {
-        if self.clock.state().is_some() && !self.clock.has_projects() {
+        if self.clock.state().is_some() && !self.clock.has_milestones() {
             self.set_view(None);
-            open_settings("timers");
+            open_settings("milestones");
             return;
         }
         let picker = self.view != Some(View::Picker);
@@ -1142,7 +1142,7 @@ impl Dock {
             Hit::Keep => self.clock.keep_away(),
             Hit::Drop => self.clock.drop_away(),
             Hit::Timesheet => open_settings("timesheet"),
-            Hit::Projects => open_settings("timers"),
+            Hit::Milestones => open_settings("milestones"),
             // The note, in whir; the first not listed for "more".
             Hit::Todo(i) => self.open_todo(i),
             Hit::MoreTodos => self.open_todo(TODOS_SHOWN),
@@ -1391,7 +1391,7 @@ fn open_whir() {
     }
 }
 
-/// A page of whir's Settings (the timesheet, the timers), in the running
+/// A page of whir's Settings (the timesheet, the milestones), in the running
 /// window or a new one.
 fn open_settings(page: &str) {
     if let Some(hwnd) = ipc::find_main_window()

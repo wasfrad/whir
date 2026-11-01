@@ -87,8 +87,8 @@ const SCENES: &[Scene] = &[
         s.app.open_settings("timesheet")
     })
     .fluid(),
-    Scene::new("settings-timers", "notes", |s, _| {
-        s.app.open_settings("timers")
+    Scene::new("settings-milestones", "notes", |s, _| {
+        s.app.open_settings("milestones")
     })
     .fluid(),
     Scene::new("settings-tracking", "notes", |s, _| {
@@ -108,20 +108,20 @@ const SCENES: &[Scene] = &[
         s.app.open_settings("startup")
     })
     .fluid(),
-    Scene::new("settings-timers-menu", "notes", |s, _| {
-        s.app.open_settings("timers");
+    Scene::new("settings-milestones-menu", "notes", |s, _| {
+        s.app.open_settings("milestones");
         s.settle();
         s.click(pos2(929.0, 239.0), PointerButton::Primary);
     }),
-    Scene::new("settings-timers-adding", "notes", |s, _| {
-        s.app.open_settings("timers");
+    Scene::new("settings-milestones-adding", "notes", |s, _| {
+        s.app.open_settings("milestones");
         s.settle();
         s.click(pos2(871.0, 291.0), PointerButton::Primary);
         s.settle();
         s.text("Rail contract");
     }),
-    Scene::new("settings-timers-archived", "notes", |s, _| {
-        s.app.open_settings("timers");
+    Scene::new("settings-milestones-archived", "notes", |s, _| {
+        s.app.open_settings("milestones");
         s.settle();
         s.click(pos2(292.0, 492.0), PointerButton::Primary);
     }),
@@ -132,7 +132,7 @@ const SCENES: &[Scene] = &[
         s.settle();
         s.text("sch");
     }),
-    Scene::new("settings-timesheet-new-project", "notes", |s, _| {
+    Scene::new("settings-timesheet-new-milestone", "notes", |s, _| {
         s.app.open_settings("timesheet");
         s.settle();
         s.click(pos2(295.0, 332.0), PointerButton::Primary);
@@ -724,42 +724,44 @@ fn screenshot(variant: usize) -> Vec<u8> {
     .expect("encode")
 }
 
-/// A week with customers, projects and hours in it, and what a page has to
-/// cope with: long names, no code, a customer with no projects, an archived
-/// project, a week already closed.
+/// A week with projects, milestones and hours in it, and what a page has to
+/// cope with: long names, no code, a project with no milestones, an archived
+/// milestone, a week already closed.
 fn timesheet(dir: PathBuf) {
     let now = Stamp::now();
     let monday = monday_of(now.day);
     let mut store = Store::open(dir);
     store
         .update(|tx| {
-            let northwind = tx.state.add_customer("Northwind Fuels");
-            let tailspin = tx.state.add_customer("Tailspin Logistics");
+            let northwind = tx.state.add_project("Northwind Fuels");
+            let tailspin = tx.state.add_project("Tailspin Logistics");
             let contoso = tx
                 .state
-                .add_customer("Contoso Midstream Partners of the Northeast");
-            tx.state.add_customer("Fabrikam");
-            let timers = [
-                tx.state.add_timer(northwind, "Rack audit", "NW-104"),
-                tx.state.add_timer(northwind, "Pricing model", "NW-118"),
-                tx.state.add_timer(tailspin, "Freight review", "TS-022"),
-                tx.state.add_timer(
+                .add_project("Contoso Midstream Partners of the Northeast");
+            tx.state.add_project("Fabrikam");
+            let milestones = [
+                tx.state.add_milestone(northwind, "Rack audit", "NW-104"),
+                tx.state.add_milestone(northwind, "Pricing model", "NW-118"),
+                tx.state.add_milestone(tailspin, "Freight review", "TS-022"),
+                tx.state.add_milestone(
                     contoso,
                     "Terminal automation rollout, phase two and beyond",
                     "CMP-2291",
                 ),
             ];
-            tx.state.add_timer(tailspin, "Driver scheduling", "");
-            let old = tx.state.add_timer(northwind, "Q2 reconciliation", "NW-087");
-            if let Some(t) = tx.state.timer_mut(old) {
+            tx.state.add_milestone(tailspin, "Driver scheduling", "");
+            let old = tx
+                .state
+                .add_milestone(northwind, "Q2 reconciliation", "NW-087");
+            if let Some(t) = tx.state.milestone_mut(old) {
                 t.archived = true;
             }
-            for (t, timer) in timers.iter().enumerate() {
+            for (t, milestone) in milestones.iter().enumerate() {
                 for day in 0..5 {
                     let hours = 1 + (t as i64 + day) % 4;
-                    tx.set_day(*timer, monday + day, hours * 3600);
+                    tx.set_day(*milestone, monday + day, hours * 3600);
                 }
-                tx.set_day(*timer, monday - 14, 2 * 3600);
+                tx.set_day(*milestone, monday - 14, 2 * 3600);
             }
             tx.set_day(old, monday - 14, 3 * 3600);
             tx.close_week(monday - 14, now).expect("closed week");
@@ -944,7 +946,7 @@ fn a_change_of_look_leaves_nothing_of_the_old_one() {
     for (name, path) in documents {
         let open = |s: &mut Stage| match path {
             Some(path) => s.open(&[path]),
-            None => s.app.open_settings("timers"),
+            None => s.app.open_settings("milestones"),
         };
         for (from_dark, mode) in [(true, Mode::Light), (false, Mode::Dark)] {
             // Changed while it's showing.
@@ -1015,18 +1017,18 @@ fn on_disk() -> Store {
 fn hours_are_typed_along_a_row_with_the_keyboard() {
     let Some(_f) = live() else { return };
     let store = on_disk();
-    let timer = store
+    let milestone = store
         .state()
-        .timers
+        .milestones
         .iter()
         .find(|t| t.name == "Pricing model")
-        .expect("the fixture's project")
+        .expect("the fixture's milestone")
         .id;
     let monday = monday_of(Stamp::now().day);
     let cell = |d: usize| {
         let mut store = on_disk();
         let week = store.week(monday).clone();
-        Grid::of(&week, None, Stamp::now()).cell(timer, d)
+        Grid::of(&week, None, Stamp::now()).cell(milestone, d)
     };
     let (mon, tue, wed) = (cell(0), cell(1), cell(2));
     assert_ne!(mon, 12600);
@@ -1079,10 +1081,10 @@ fn hours_are_typed_along_a_row_with_the_keyboard() {
     s.settle();
     let rack = on_disk()
         .state()
-        .timers
+        .milestones
         .iter()
         .find(|t| t.name == "Rack audit")
-        .expect("the fixture's project")
+        .expect("the fixture's milestone")
         .id;
     let mut store = on_disk();
     let week = store.week(monday).clone();
@@ -1093,31 +1095,28 @@ fn hours_are_typed_along_a_row_with_the_keyboard() {
 
 #[test]
 #[ignore = "drives the whole app"]
-fn customers_and_projects_are_changed_where_they_stand() {
+fn projects_and_milestones_are_changed_where_they_stand() {
     let Some(_f) = live() else { return };
     let mut s = Stage::new(true, 1.0);
-    s.app.open_settings("timers");
+    s.app.open_settings("milestones");
     s.settle();
-    let customer = |name: &str| {
+    let project = |name: &str| {
         let store = on_disk();
         store
             .state()
-            .customers
+            .projects
             .iter()
             .find(|c| c.name == name)
             .map(|c| c.id)
     };
 
-    // A new customer: named, and Enter.
+    // A new project: named, and Enter.
     s.click(pos2(900.0, 111.0), PointerButton::Primary);
     s.settle();
     s.text("Aardvark Oil");
     s.key(Modifiers::NONE, Key::Enter);
     s.settle();
-    assert!(
-        customer("Aardvark Oil").is_some(),
-        "Enter added the customer"
-    );
+    assert!(project("Aardvark Oil").is_some(), "Enter added the project");
 
     // Esc doesn't add one.
     s.click(pos2(900.0, 111.0), PointerButton::Primary);
@@ -1125,22 +1124,22 @@ fn customers_and_projects_are_changed_where_they_stand() {
     s.text("Never mind");
     s.key(Modifiers::NONE, Key::Escape);
     s.settle();
-    assert_eq!(customer("Never mind"), None, "Esc called it off");
+    assert_eq!(project("Never mind"), None, "Esc called it off");
 
-    // Its card comes first, with its + Project: name one, with Enter.
+    // Its card comes first, with its + Milestone: name one, with Enter.
     s.click(pos2(871.0, 203.0), PointerButton::Primary);
     s.settle();
     s.text("Pipeline survey");
     s.key(Modifiers::NONE, Key::Enter);
     s.settle();
-    let aardvark = customer("Aardvark Oil").expect("the new customer");
+    let aardvark = project("Aardvark Oil").expect("the new project");
     let store = on_disk();
     let added = store
         .state()
-        .timers
+        .milestones
         .iter()
         .find(|t| t.name == "Pipeline survey");
-    assert_eq!(added.map(|t| t.customer), Some(aardvark));
+    assert_eq!(added.map(|t| t.project), Some(aardvark));
 
     // A name changes where it stands.
     s.click(pos2(300.0, 203.0), PointerButton::Primary);
@@ -1150,10 +1149,10 @@ fn customers_and_projects_are_changed_where_they_stand() {
     s.key(Modifiers::NONE, Key::Enter);
     s.settle();
     assert!(
-        customer("Aardvark Petroleum").is_some(),
+        project("Aardvark Petroleum").is_some(),
         "Enter kept the name"
     );
-    assert_eq!(customer("Aardvark Oil"), None);
+    assert_eq!(project("Aardvark Oil"), None);
 
     // Esc puts one back.
     s.click(pos2(300.0, 203.0), PointerButton::Primary);
@@ -1162,8 +1161,8 @@ fn customers_and_projects_are_changed_where_they_stand() {
     s.text("Nothing like it");
     s.key(Modifiers::NONE, Key::Escape);
     s.settle();
-    assert_eq!(customer("Nothing like it"), None, "Esc put the name back");
-    assert!(customer("Aardvark Petroleum").is_some());
+    assert_eq!(project("Nothing like it"), None, "Esc put the name back");
+    assert!(project("Aardvark Petroleum").is_some());
 }
 
 /// Every icon at the sizes it's used, named: a codepoint that exists can

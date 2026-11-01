@@ -1,4 +1,4 @@
-//! Design tokens and font setup: the single swap point for re_ui-style theming later.
+//! Design tokens and font setup.
 //!
 //! Everything visual that isn't egui's own widget styling lives here, so a future
 //! vendored design system only has to replace this module.
@@ -227,8 +227,8 @@ pub struct Theme {
     pub image_glyph: Color32,
     pub pdf_glyph: Color32,
     pub csv_glyph: Color32,
-    /// A project's name beside its customer's (the capture dock's time).
-    pub project: Color32,
+    /// A milestone's name beside its project's (the capture dock's time).
+    pub milestone: Color32,
 
     pub metrics: Metrics,
 }
@@ -392,7 +392,7 @@ impl Theme {
             image_glyph: rgb(0x5b, 0xa4, 0xf5),
             pdf_glyph: rgb(0xf0, 0x60, 0x55),
             csv_glyph: rgb(0x4c, 0xc3, 0x84),
-            project: rgb(0xe8, 0xa3, 0x3d),
+            milestone: rgb(0xe8, 0xa3, 0x3d),
             metrics: Metrics::default(),
         }
     }
@@ -473,7 +473,7 @@ impl Theme {
             pdf_glyph: rgb(0xd4, 0x38, 0x2c),
             csv_glyph: rgb(0x16, 0x8f, 0x57),
             // Darker than the glyph: small text on white needs the contrast.
-            project: rgb(0xa8, 0x5f, 0x00),
+            milestone: rgb(0xa8, 0x5f, 0x00),
             metrics: Metrics::default(),
         }
     }
@@ -489,7 +489,7 @@ impl Theme {
     }
 
     /// Apply to egui's own widget styling: every stock button, field, menu and
-    /// tooltip gets its look from here. The recipe follows rerun's `re_ui`.
+    /// tooltip gets its look from here.
     pub fn apply(&self, ctx: &egui::Context) {
         let m = self.metrics;
         let mut visuals = if self.dark {

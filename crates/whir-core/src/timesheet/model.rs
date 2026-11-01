@@ -1,33 +1,33 @@
-//! What is tracked: customers, their projects (the timers), and the time
+//! What is tracked: projects, their milestones (the milestones), and the time
 //! spent on them. Pure data and arithmetic; the files are in `format`, the
 //! locking and writing in `store`.
 
 use crate::time::{Stamp, monday_of};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Customer {
+pub struct Project {
     pub id: u32,
     pub name: String,
 }
 
-/// A project of a customer's: what time is tracked against.
+/// A milestone of a project's: what time is tracked against.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Timer {
+pub struct Milestone {
     pub id: u32,
-    pub customer: u32,
+    pub project: u32,
     pub name: String,
-    /// The project's code elsewhere (Certinia's project or assignment ID),
+    /// The milestone's code elsewhere (Certinia's milestone or assignment ID),
     /// carried into the timesheet; may be empty.
     pub code: String,
     /// Kept for the weeks it has time in, but no longer offered.
     pub archived: bool,
 }
 
-/// A stretch of time on one timer. Kept within one day: [`split_days`] cuts
+/// A stretch of time on one milestone. Kept within one day: [`split_days`] cuts
 /// a longer one at midnight, so every day's total is the sum of its entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    pub timer: u32,
+    pub milestone: u32,
     pub start: Stamp,
     /// After `start`, and no later than the next midnight.
     pub end: Stamp,
@@ -45,15 +45,15 @@ impl Entry {
     }
 }
 
-/// The timer that is running.
+/// The milestone that is running.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Running {
-    pub timer: u32,
+    pub milestone: u32,
     pub start: Stamp,
     pub note: String,
 }
 
-/// How a day's time on a project is rounded for the timesheet. The entries
+/// How a day's time on a milestone is rounded for the timesheet. The entries
 /// themselves always keep the exact seconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rounding {
@@ -121,7 +121,7 @@ pub struct Options {
     /// Minutes without input (or asleep) before the dock asks whether that
     /// time counts; 0 = never ask.
     pub away_minutes: u32,
-    /// The dock stays out (not slid into the edge) while a timer runs.
+    /// The dock stays out (not slid into the edge) while a milestone runs.
     pub keep_out: bool,
 }
 
@@ -135,70 +135,70 @@ impl Default for Options {
     }
 }
 
-/// Everything but the finished entries: the timers, the options and what is
+/// Everything but the finished entries: the milestones, the options and what is
 /// running (`timers.txt`). Small, so the dock can read it every time.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct State {
-    pub customers: Vec<Customer>,
-    pub timers: Vec<Timer>,
+    pub projects: Vec<Project>,
+    pub milestones: Vec<Milestone>,
     pub options: Options,
     pub running: Option<Running>,
-    /// The timer that ran last: what "resume" starts again.
+    /// The milestone that ran last: what "resume" starts again.
     pub last: Option<u32>,
     /// Lines this build doesn't understand (a newer whir's), kept as they are.
     pub other: Vec<String>,
 }
 
 impl State {
-    pub fn timer(&self, id: u32) -> Option<&Timer> {
-        self.timers.iter().find(|t| t.id == id)
+    pub fn milestone(&self, id: u32) -> Option<&Milestone> {
+        self.milestones.iter().find(|t| t.id == id)
     }
 
-    pub fn timer_mut(&mut self, id: u32) -> Option<&mut Timer> {
-        self.timers.iter_mut().find(|t| t.id == id)
+    pub fn milestone_mut(&mut self, id: u32) -> Option<&mut Milestone> {
+        self.milestones.iter_mut().find(|t| t.id == id)
     }
 
-    pub fn customer(&self, id: u32) -> Option<&Customer> {
-        self.customers.iter().find(|c| c.id == id)
+    pub fn project(&self, id: u32) -> Option<&Project> {
+        self.projects.iter().find(|c| c.id == id)
     }
 
-    pub fn customer_mut(&mut self, id: u32) -> Option<&mut Customer> {
-        self.customers.iter_mut().find(|c| c.id == id)
+    pub fn project_mut(&mut self, id: u32) -> Option<&mut Project> {
+        self.projects.iter_mut().find(|c| c.id == id)
     }
 
-    /// The customer's name and the project's: what a timer is called.
-    pub fn names(&self, timer: u32) -> (&str, &str) {
-        match self.timer(timer) {
+    /// The project's name and the milestone's: what a milestone is called.
+    pub fn names(&self, milestone: u32) -> (&str, &str) {
+        match self.milestone(milestone) {
             Some(t) => (
-                self.customer(t.customer).map_or("", |c| c.name.as_str()),
+                self.project(t.project).map_or("", |c| c.name.as_str()),
                 t.name.as_str(),
             ),
-            None => ("", "(deleted timer)"),
+            None => ("", "(deleted milestone)"),
         }
     }
 
     /// "Acme Corp · Onboarding".
-    pub fn label(&self, timer: u32) -> String {
-        match self.names(timer) {
-            ("", project) => project.to_owned(),
-            (customer, project) => format!("{customer} · {project}"),
+    pub fn label(&self, milestone: u32) -> String {
+        match self.names(milestone) {
+            ("", milestone) => milestone.to_owned(),
+            (project, milestone) => format!("{project} · {milestone}"),
         }
     }
 
-    pub fn add_customer(&mut self, name: &str) -> u32 {
-        let id = self.customers.iter().map(|c| c.id).max().unwrap_or(0) + 1;
-        self.customers.push(Customer {
+    pub fn add_project(&mut self, name: &str) -> u32 {
+        let id = self.projects.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+        self.projects.push(Project {
             id,
             name: one_line(name),
         });
         id
     }
 
-    pub fn add_timer(&mut self, customer: u32, name: &str, code: &str) -> u32 {
-        let id = self.timers.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        self.timers.push(Timer {
+    pub fn add_milestone(&mut self, project: u32, name: &str, code: &str) -> u32 {
+        let id = self.milestones.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        self.milestones.push(Milestone {
             id,
-            customer,
+            project,
             name: one_line(name),
             code: one_line(code),
             archived: false,
@@ -206,21 +206,21 @@ impl State {
         id
     }
 
-    /// Customers by name, each with its timers by name; archived timers only
-    /// if `archived`, and customers without timers to show only if `empty`.
-    pub fn by_customer(&self, archived: bool, empty: bool) -> Vec<(&Customer, Vec<&Timer>)> {
-        let mut customers: Vec<&Customer> = self.customers.iter().collect();
-        customers.sort_by_key(|c| c.name.to_lowercase());
-        customers
+    /// Projects by name, each with its milestones by name; archived milestones only
+    /// if `archived`, and projects without milestones to show only if `empty`.
+    pub fn by_project(&self, archived: bool, empty: bool) -> Vec<(&Project, Vec<&Milestone>)> {
+        let mut projects: Vec<&Project> = self.projects.iter().collect();
+        projects.sort_by_key(|c| c.name.to_lowercase());
+        projects
             .into_iter()
             .filter_map(|c| {
-                let mut timers: Vec<&Timer> = self
-                    .timers
+                let mut milestones: Vec<&Milestone> = self
+                    .milestones
                     .iter()
-                    .filter(|t| t.customer == c.id && (archived || !t.archived))
+                    .filter(|t| t.project == c.id && (archived || !t.archived))
                     .collect();
-                timers.sort_by_key(|t| t.name.to_lowercase());
-                (empty || !timers.is_empty()).then_some((c, timers))
+                milestones.sort_by_key(|t| t.name.to_lowercase());
+                (empty || !milestones.is_empty()).then_some((c, milestones))
             })
             .collect()
     }
@@ -271,14 +271,14 @@ impl Week {
     }
 }
 
-/// `start..end` on `timer`, cut at each midnight in between.
-pub fn split_days(timer: u32, start: Stamp, end: Stamp, note: &str) -> Vec<Entry> {
+/// `start..end` on `milestone`, cut at each midnight in between.
+pub fn split_days(milestone: u32, start: Stamp, end: Stamp, note: &str) -> Vec<Entry> {
     let mut pieces = Vec::new();
     let mut from = start;
     while from < end {
         let to = end.min(Stamp::midnight(from.day + 1));
         pieces.push(Entry {
-            timer,
+            milestone,
             start: from,
             end: to,
             note: note.to_owned(),
@@ -288,7 +288,7 @@ pub fn split_days(timer: u32, start: Stamp, end: Stamp, note: &str) -> Vec<Entry
     pieces
 }
 
-/// Seconds per timer per day of one week (Monday first), the running timer's
+/// Seconds per milestone per day of one week (Monday first), the running milestone's
 /// time so far included.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Grid {
@@ -307,7 +307,7 @@ impl Grid {
             grid.add(e);
         }
         if let Some(r) = running {
-            for piece in split_days(r.timer, r.start, now, "") {
+            for piece in split_days(r.milestone, r.start, now, "") {
                 grid.add(&piece);
             }
         }
@@ -319,20 +319,20 @@ impl Grid {
         if !(0..7).contains(&d) {
             return;
         }
-        let row = match self.rows.iter().position(|(t, _)| *t == e.timer) {
+        let row = match self.rows.iter().position(|(t, _)| *t == e.milestone) {
             Some(i) => i,
             None => {
-                self.rows.push((e.timer, [0; 7]));
+                self.rows.push((e.milestone, [0; 7]));
                 self.rows.len() - 1
             }
         };
         self.rows[row].1[d as usize] += e.seconds();
     }
 
-    pub fn cell(&self, timer: u32, day: usize) -> i64 {
+    pub fn cell(&self, milestone: u32, day: usize) -> i64 {
         self.rows
             .iter()
-            .find(|(t, _)| *t == timer)
+            .find(|(t, _)| *t == milestone)
             .map_or(0, |(_, days)| days[day])
     }
 
@@ -345,8 +345,10 @@ impl Grid {
     }
 
     /// A row's hours, each day rounded on its own (as the timesheet has them).
-    pub fn rounded_row(&self, timer: u32, rounding: Rounding) -> f64 {
-        (0..7).map(|d| rounding.hours(self.cell(timer, d))).sum()
+    pub fn rounded_row(&self, milestone: u32, rounding: Rounding) -> f64 {
+        (0..7)
+            .map(|d| rounding.hours(self.cell(milestone, d)))
+            .sum()
     }
 
     pub fn rounded_day(&self, day: usize, rounding: Rounding) -> f64 {
@@ -404,24 +406,24 @@ mod tests {
         assert_eq!(pieces[1].seconds(), 24 * 3600);
         assert_eq!(pieces[2].seconds(), 90 * 60);
         assert_eq!(pieces[2].end, end);
-        assert!(pieces.iter().all(|p| p.note == "late" && p.timer == 7));
+        assert!(pieces.iter().all(|p| p.note == "late" && p.milestone == 7));
         assert!(split_days(7, end, start, "").is_empty());
     }
 
     #[test]
-    fn the_grid_adds_up_entries_and_the_running_timer() {
+    fn the_grid_adds_up_entries_and_the_running_milestone() {
         let m = monday();
         let mut week = Week::new(m);
-        for (timer, day, from, to) in [(1, 0, 9, 10), (2, 0, 10, 12), (1, 2, 13, 14)] {
+        for (milestone, day, from, to) in [(1, 0, 9, 10), (2, 0, 10, 12), (1, 2, 13, 14)] {
             week.insert(Entry {
-                timer,
+                milestone,
                 start: Stamp::at(m + day, from, 0, 0),
                 end: Stamp::at(m + day, to, 0, 0),
                 note: String::new(),
             });
         }
         let running = Running {
-            timer: 2,
+            milestone: 2,
             start: Stamp::at(m + 2, 23, 0, 0),
             note: String::new(),
         };
@@ -443,7 +445,7 @@ mod tests {
         let mut week = Week::new(m);
         for h in [11, 9, 10] {
             week.insert(Entry {
-                timer: 1,
+                milestone: 1,
                 start: Stamp::at(m, h, 0, 0),
                 end: Stamp::at(m, h, 30, 0),
                 note: String::new(),
@@ -453,14 +455,14 @@ mod tests {
         assert_eq!(hours, [9, 10, 11]);
 
         let mut s = State::default();
-        let acme = s.add_customer("  Acme\n Corp ");
-        let t = s.add_timer(acme, "On\tboarding", "PRJ-1");
+        let acme = s.add_project("  Acme\n Corp ");
+        let t = s.add_milestone(acme, "On\tboarding", "PRJ-1");
         assert_eq!(s.label(t), "Acme Corp · On boarding");
-        let z = s.add_timer(acme, "Zeta", "");
-        s.timer_mut(z).unwrap().archived = true;
-        let shown = s.by_customer(false, false);
+        let z = s.add_milestone(acme, "Zeta", "");
+        s.milestone_mut(z).unwrap().archived = true;
+        let shown = s.by_project(false, false);
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].1.len(), 1);
-        assert_eq!(s.by_customer(true, false)[0].1.len(), 2);
+        assert_eq!(s.by_project(true, false)[0].1.len(), 2);
     }
 }

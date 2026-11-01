@@ -1,7 +1,7 @@
 //! Where the dock sits: flush against one edge of a monitor's work area,
 //! somewhere along it, with only a grip showing until it slides out; where
 //! things are on its bar; and where its panel (todos, today's times, the
-//! project picker) goes beside it.
+//! milestone picker) goes beside it.
 
 use crate::geom::{Point, Rect};
 use crate::monitors::Monitor;
@@ -44,10 +44,10 @@ pub enum Slot {
     Delay,
     /// Play or pause the stopwatch.
     Play,
-    /// Today's time on the project (only to read).
+    /// Today's time on the milestone (only to read).
     Time,
-    /// The customer over the project: opens the picker.
-    Project,
+    /// The project over the milestone: opens the picker.
+    Milestone,
     /// The ⌄ that opens today's times.
     More,
 }
@@ -58,7 +58,7 @@ impl Slot {
         Slot::Delay,
         Slot::Play,
         Slot::Time,
-        Slot::Project,
+        Slot::Milestone,
         Slot::More,
     ];
 }
@@ -81,7 +81,7 @@ pub struct Layout {
     /// Between the capture buttons and the stopwatch (a hairline in it).
     pub gap: i32,
     pub time: i32,
-    pub project: i32,
+    pub milestone: i32,
     pub more: i32,
     /// The panel's width: the bar's, so they line up.
     pub panel: i32,
@@ -99,7 +99,7 @@ pub fn layout(dpi: u32) -> Layout {
         space: px(2),
         gap: px(9),
         time: px(66),
-        project: px(172),
+        milestone: px(172),
         more: px(24),
         panel: 0,
         panel_gap: px(6),
@@ -116,7 +116,7 @@ impl Layout {
         let extent = |s: Slot| match s {
             Slot::Capture | Slot::Delay | Slot::Play => self.button,
             Slot::Time => self.time,
-            Slot::Project => self.project,
+            Slot::Milestone => self.milestone,
             Slot::More => self.more,
         };
         let mut x = self.pad;

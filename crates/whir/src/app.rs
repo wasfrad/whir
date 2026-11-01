@@ -272,7 +272,7 @@ impl App {
         self.active = self.push_tab(doc);
     }
 
-    /// Settings, at `page` ("timesheet", "timers", "startup"): a tab of its
+    /// Settings, at `page` ("timesheet", "milestones", "startup"): a tab of its
     /// own, the one already open if there is one.
     pub fn open_settings(&mut self, page: &str) {
         if let Some(i) = self

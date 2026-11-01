@@ -55,11 +55,11 @@ pub fn area(r: Rect, scale: f32) -> Area {
     )
 }
 
-/// Where the project is on the bar; with none to show (no time either),
+/// Where the milestone is on the bar; with none to show (no time either),
 /// what to do for one takes the time's place too.
-fn project_rect(l: &Layout, edge: Edge, strip: &Strip) -> Rect {
-    let r = l.slot_rect(edge, Slot::Project);
-    match strip.project {
+fn milestone_rect(l: &Layout, edge: Edge, strip: &Strip) -> Rect {
+    let r = l.slot_rect(edge, Slot::Milestone);
+    match strip.milestone {
         Some(_) => r,
         None => Rect::new(l.slot_rect(edge, Slot::Time).left, r.top, r.right, r.bottom),
     }
@@ -199,7 +199,7 @@ pub fn show(ui: &mut Ui, bar: &Bar, theme: &Theme) -> Option<Slot> {
         painter.rect_filled(chip, m.control_radius, theme.drawer_item_active);
     }
     let response = button(ui, r, Slot::Play, false, theme);
-    let (glyph, color) = match (&strip.project, strip.playing) {
+    let (glyph, color) = match (&strip.milestone, strip.playing) {
         (_, true) => (Icon::Pause, theme.accent),
         (Some(_), false) => (Icon::Play, theme.text),
         (None, false) => (Icon::Play, theme.text_dim),
@@ -224,21 +224,21 @@ pub fn show(ui: &mut Ui, bar: &Bar, theme: &Theme) -> Option<Slot> {
         );
     }
 
-    // The customer over the project, or what to do for one.
-    let r = at(project_rect(&l, edge, strip));
-    let response = button(ui, r, Slot::Project, false, theme);
+    // The project over the milestone, or what to do for one.
+    let r = at(milestone_rect(&l, edge, strip));
+    let response = button(ui, r, Slot::Milestone, false, theme);
     let inset = 6.0;
     let width = r.width() - inset * 2.0;
-    match &strip.project {
-        Some((customer, project)) => {
-            let top = kit::one_line(&painter, customer, semibold(m.body_text_size), width);
-            let under = kit::one_line(&painter, project, regular(m.small_text_size), width);
+    match &strip.milestone {
+        Some((project, milestone)) => {
+            let top = kit::one_line(&painter, project, semibold(m.body_text_size), width);
+            let under = kit::one_line(&painter, milestone, regular(m.small_text_size), width);
             let height = top.size().y + under.size().y;
             let y = r.center().y - height / 2.0;
             let x = r.left() + inset;
             let below = y + top.size().y;
             painter.galley(pos2(x, y), top, theme.text);
-            painter.galley(pos2(x, below), under, theme.project);
+            painter.galley(pos2(x, below), under, theme.milestone);
         }
         None => {
             let hint = kit::one_line(&painter, strip.hint, regular(m.body_text_size), width);
@@ -246,7 +246,7 @@ pub fn show(ui: &mut Ui, bar: &Bar, theme: &Theme) -> Option<Slot> {
             painter.galley(pos2(r.left() + inset, y), hint, theme.text_dim);
         }
     }
-    press(Slot::Project, response);
+    press(Slot::Milestone, response);
 
     // The ⌄ points at the panel: down to open it below, up to close.
     let r = at(l.slot_rect(edge, Slot::More));
@@ -276,19 +276,19 @@ mod tests {
 
     fn strip(playing: bool) -> Strip {
         Strip {
-            project: Some(("Aardvark Oil".into(), "Customer Meetings".into())),
+            milestone: Some(("Aardvark Oil".into(), "Project Meetings".into())),
             playing,
             time: "1:12:40".into(),
-            hint: "Choose a project",
+            hint: "Choose a milestone",
         }
     }
 
     fn none() -> Strip {
         Strip {
-            project: None,
+            milestone: None,
             playing: false,
             time: String::new(),
-            hint: "Choose a project",
+            hint: "Choose a milestone",
         }
     }
 
@@ -326,17 +326,17 @@ mod tests {
                 s.pixel(x, y)
             };
             // Opaque in the middle of the bar; text drawn on it (darker than
-            // the light background somewhere in the project's slot).
+            // the light background somewhere in the milestone's slot).
             let r = b.layout.bar_rect(edge);
             assert_eq!(
                 at((r.left + r.right) / 2, r.top + 2) >> 24,
                 0xff,
                 "{edge:?}"
             );
-            let p = b.layout.slot_rect(edge, Slot::Project);
+            let p = b.layout.slot_rect(edge, Slot::Milestone);
             let inked =
                 (p.top..p.bottom).any(|y| (p.left..p.right).any(|x| (at(x, y) >> 8) & 0xff < 0x80));
-            assert!(inked, "{edge:?}: no project name");
+            assert!(inked, "{edge:?}: no milestone name");
         }
     }
 
@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn with_no_project_the_time_is_a_way_to_choose_one() {
+    fn with_no_milestone_the_time_is_a_way_to_choose_one() {
         let theme = Theme::dark();
         let b = bar(Edge::Top, 96, none());
         let mut stage = Stage::new(&theme, 1.0);
@@ -390,7 +390,7 @@ mod tests {
         stage.button(at, true);
         frame(&mut stage, &b, &theme);
         stage.button(at, false);
-        assert_eq!(frame(&mut stage, &b, &theme), Some(Slot::Project));
+        assert_eq!(frame(&mut stage, &b, &theme), Some(Slot::Milestone));
     }
 
     /// `cargo test -p whir-capture -- --ignored preview` writes the bar, in
@@ -414,7 +414,7 @@ mod tests {
                     let mut stage = Stage::new(&theme, dpi as f32 / 96.0);
                     frame(&mut stage, &b, &theme);
                     if what == "paused" {
-                        let r = b.layout.slot_rect(edge, Slot::Project);
+                        let r = b.layout.slot_rect(edge, Slot::Milestone);
                         stage.pointer_moved(((r.left + r.right) / 2, (r.top + r.bottom) / 2));
                         frame(&mut stage, &b, &theme);
                         std::thread::sleep(std::time::Duration::from_millis(120));

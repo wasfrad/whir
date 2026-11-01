@@ -1,5 +1,5 @@
 //! Finding things by a few letters of their name: the command palette, and the
-//! timesheet's list of projects.
+//! timesheet's list of milestones.
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Color32, FontId};

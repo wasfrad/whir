@@ -1,20 +1,21 @@
 //! The files, as text: one record per line, a version header first, names
 //! and notes quoted. Lines this build doesn't understand are kept as they
-//! are, so an older whir never drops a newer one's data.
+//! are, so an older whir never drops a newer one's data. `project` and
+//! `milestone` lines were once `customer` and `timer`, and are still read.
 //!
 //! ```text
 //! whir-time 1                              whir-week 1
 //! option rounding 0.25                     closed 2026-11-02T09:14:00
 //! option away 10                           entry 7 2026-10-26T09:02:11 2026-10-26T10:15:40 "Kickoff"
 //! option keep-out on
-//! customer 3 "Acme Corp"
-//! timer 7 3 "Onboarding" "PRJ-00123"
-//! timer 9 3 "Support" "" archived
+//! project 3 "Acme Corp"
+//! milestone 7 3 "Onboarding" "PRJ-00123"
+//! milestone 9 3 "Support" "" archived
 //! last 7
 //! running 7 2026-10-26T10:15:40 "Notes so far"
 //! ```
 
-use super::model::{Customer, Entry, Rounding, Running, State, Timer, Week};
+use super::model::{Entry, Milestone, Project, Rounding, Running, State, Week};
 use crate::marks::{quote, unquote};
 use crate::time::Stamp;
 
@@ -86,15 +87,15 @@ fn state_line(state: &mut State, line: &str) -> bool {
             Err(_) => return false,
         },
         ["option", "keep-out", v @ ("on" | "off")] => state.options.keep_out = *v == "on",
-        ["customer", _, name] => match id(1) {
-            Some(id) => state.customers.push(Customer {
+        ["project" | "customer", _, name] => match id(1) {
+            Some(id) => state.projects.push(Project {
                 id,
                 name: (*name).to_owned(),
             }),
             None => return false,
         },
-        ["timer", _, _, name, code, flags @ ..] => {
-            let (Some(id), Some(customer)) = (id(1), id(2)) else {
+        ["milestone" | "timer", _, _, name, code, flags @ ..] => {
+            let (Some(id), Some(project)) = (id(1), id(2)) else {
                 return false;
             };
             let archived = match flags {
@@ -102,9 +103,9 @@ fn state_line(state: &mut State, line: &str) -> bool {
                 ["archived"] => true,
                 _ => return false,
             };
-            state.timers.push(Timer {
+            state.milestones.push(Milestone {
                 id,
-                customer,
+                project,
                 name: (*name).to_owned(),
                 code: (*code).to_owned(),
                 archived,
@@ -115,11 +116,11 @@ fn state_line(state: &mut State, line: &str) -> bool {
             None => return false,
         },
         ["running", _, start, note] => {
-            let (Some(timer), Some(start)) = (id(1), Stamp::parse(start)) else {
+            let (Some(milestone), Some(start)) = (id(1), Stamp::parse(start)) else {
                 return false;
             };
             state.running = Some(Running {
-                timer,
+                milestone,
                 start,
                 note: (*note).to_owned(),
             });
@@ -137,14 +138,14 @@ pub fn serialize_state(state: &State) -> String {
         o.away_minutes,
         if o.keep_out { "on" } else { "off" }
     );
-    for c in &state.customers {
-        out.push_str(&format!("customer {} {}\n", c.id, quote(&c.name)));
+    for c in &state.projects {
+        out.push_str(&format!("project {} {}\n", c.id, quote(&c.name)));
     }
-    for t in &state.timers {
+    for t in &state.milestones {
         out.push_str(&format!(
-            "timer {} {} {} {}{}\n",
+            "milestone {} {} {} {}{}\n",
             t.id,
-            t.customer,
+            t.project,
             quote(&t.name),
             quote(&t.code),
             if t.archived { " archived" } else { "" }
@@ -156,7 +157,7 @@ pub fn serialize_state(state: &State) -> String {
     if let Some(r) = &state.running {
         out.push_str(&format!(
             "running {} {} {}\n",
-            r.timer,
+            r.milestone,
             r.start.format(),
             quote(&r.note)
         ));
@@ -187,9 +188,9 @@ fn week_line(week: &mut Week, line: &str) -> bool {
             Some(at) => week.closed = Some(at),
             None => return false,
         },
-        ["entry", timer, start, end, note] => {
-            let (Ok(timer), Some(start), Some(end)) =
-                (timer.parse(), Stamp::parse(start), Stamp::parse(end))
+        ["entry", milestone, start, end, note] => {
+            let (Ok(milestone), Some(start), Some(end)) =
+                (milestone.parse(), Stamp::parse(start), Stamp::parse(end))
             else {
                 return false;
             };
@@ -199,7 +200,7 @@ fn week_line(week: &mut Week, line: &str) -> bool {
                 return false;
             }
             week.insert(Entry {
-                timer,
+                milestone,
                 start,
                 end,
                 note: (*note).to_owned(),
@@ -218,7 +219,7 @@ pub fn serialize_week(week: &Week) -> String {
     for e in &week.entries {
         out.push_str(&format!(
             "entry {} {} {} {}\n",
-            e.timer,
+            e.milestone,
             e.start.format(),
             e.end.format(),
             quote(&e.note)
@@ -240,8 +241,8 @@ mod tests {
     #[test]
     fn words_are_split_and_quotes_kept_together() {
         assert_eq!(
-            words(r#"timer 7 3 "Acme \"West\" Corp" "" archived"#).unwrap(),
-            ["timer", "7", "3", "Acme \"West\" Corp", "", "archived"]
+            words(r#"milestone 7 3 "Acme \"West\" Corp" "" archived"#).unwrap(),
+            ["milestone", "7", "3", "Acme \"West\" Corp", "", "archived"]
         );
         assert_eq!(words(r#"a "b\\" c"#).unwrap(), ["a", "b\\", "c"]);
         assert_eq!(words("  ").unwrap(), Vec::<String>::new());
@@ -251,22 +252,62 @@ mod tests {
     #[test]
     fn state_round_trips() {
         let mut s = State::default();
-        let acme = s.add_customer("Acme \"West\"");
-        let t = s.add_timer(acme, "Onboarding", "PRJ-00123");
-        let u = s.add_timer(acme, "Support", "");
-        s.timer_mut(u).unwrap().archived = true;
+        let acme = s.add_project("Acme \"West\"");
+        let t = s.add_milestone(acme, "Onboarding", "PRJ-00123");
+        let u = s.add_milestone(acme, "Support", "");
+        s.milestone_mut(u).unwrap().archived = true;
         s.options.rounding = Rounding::Tenth;
         s.options.away_minutes = 15;
         s.options.keep_out = false;
         s.last = Some(t);
         s.running = Some(Running {
-            timer: t,
+            milestone: t,
             start: Stamp::at(days_from_civil(2026, 10, 26), 10, 15, 40),
             note: "line one\nline two".to_owned(),
         });
         s.other.push("future thing 1".to_owned());
         let text = serialize_state(&s);
         assert_eq!(parse_state(&text), Some(s));
+    }
+
+    /// Timesheets from before these were called projects and milestones.
+    #[test]
+    fn the_old_names_are_still_read_and_written_anew() {
+        let old = "whir-time 1
+                   customer 3 \"Acme\"
+                   timer 7 3 \"Onboarding\" \"PRJ-1\"
+                   timer 9 3 \"Support\" \"\" archived
+                   last 7
+";
+        let state = parse_state(old).unwrap();
+        assert!(state.other.is_empty(), "{:?}", state.other);
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.projects[0].name, "Acme");
+        assert_eq!(state.milestones.len(), 2);
+        assert_eq!(state.milestones[0].project, 3);
+        assert_eq!(state.milestones[0].code, "PRJ-1");
+        assert!(state.milestones[1].archived);
+
+        let new = serialize_state(&state);
+        assert!(
+            new.contains(
+                "project 3 \"Acme\"
+"
+            ),
+            "{new}"
+        );
+        assert!(
+            new.contains(
+                "milestone 7 3 \"Onboarding\" \"PRJ-1\"
+"
+            ),
+            "{new}"
+        );
+        assert!(
+            !new.contains("customer") && !new.contains("timer "),
+            "{new}"
+        );
+        assert_eq!(parse_state(&new).unwrap(), state);
     }
 
     #[test]
@@ -281,12 +322,12 @@ mod tests {
 
     #[test]
     fn nonsense_lines_are_kept_not_lost() {
-        let text = "whir-time 1\noption rounding 0.3\ntimer x 1 \"a\" \"\"\ncustomer 1 \"ok\"\n";
+        let text = "whir-time 1\noption rounding 0.3\nmilestone x 1 \"a\" \"\"\nproject 1 \"ok\"\n";
         let s = parse_state(text).unwrap();
-        assert_eq!(s.customers.len(), 1);
+        assert_eq!(s.projects.len(), 1);
         assert_eq!(s.options.rounding, Rounding::Quarter);
-        assert_eq!(s.other, ["option rounding 0.3", "timer x 1 \"a\" \"\""]);
-        assert!(serialize_state(&s).contains("timer x 1"));
+        assert_eq!(s.other, ["option rounding 0.3", "milestone x 1 \"a\" \"\""]);
+        assert!(serialize_state(&s).contains("milestone x 1"));
     }
 
     #[test]
@@ -295,13 +336,13 @@ mod tests {
         let mut w = Week::new(m);
         w.closed = Some(Stamp::at(m + 7, 9, 14, 0));
         w.insert(Entry {
-            timer: 7,
+            milestone: 7,
             start: Stamp::at(m, 9, 2, 11),
             end: Stamp::at(m, 10, 15, 40),
             note: "Kickoff call".to_owned(),
         });
         w.insert(Entry {
-            timer: 9,
+            milestone: 9,
             start: Stamp::at(m + 6, 23, 0, 0),
             end: Stamp::midnight(m + 7),
             note: String::new(),

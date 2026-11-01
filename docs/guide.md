@@ -4,7 +4,7 @@ A fast, lean Windows app for the files that matter at work: **images, PDFs, CSVs
 notes**. Double-click a file and it's on screen; open another and it becomes a tab in
 the same window. Start whir on its own and you get a blank note to type into — it saves
 itself, no questions asked. A small capture dock takes screenshots, keeps them, and
-opens each one ready to highlight and label; it also times your work against projects
+opens each one ready to highlight and label; it also times your work against milestones
 and keeps the week's timesheet.
 
 This folder is the whole program: `whir.exe`, `pdfium.dll` (loaded only when a PDF is
@@ -48,7 +48,7 @@ open document, and the strip along the bottom says how the document stands.
 - **Capture, in the strip along the bottom · Tools › Capture screenshot**: take a screenshot
 - **Tools › Capture dock**: open the capture dock
 - **Ctrl+Shift+P · Tools › Command palette**: find anything by a few letters: every command in the menus, including the open document's, your notes, and the pages of Settings. ↑ ↓ and Enter pick, Esc closes
-- **Ctrl+, · Tools › Settings**: Settings: the timesheet, customers & projects, time tracking, appearance, PDFs & images, capture & dock, startup & window
+- **Ctrl+, · Tools › Settings**: Settings: the timesheet, projects & milestones, time tracking, appearance, PDFs & images, capture & dock, startup & window
 - **View › Theme · Settings › Appearance**: System, Light or Dark; the capture dock follows
 - **Ctrl+Shift+F · F4 / Shift+F4**: find in all tabs · next / previous result, in any file
 - **Ctrl+W / Ctrl+F4 / middle-click a tab**: close the tab (closing the last one closes whir)
@@ -258,13 +258,13 @@ Right-click a cell → **Find "…" in all tabs** searches for its value as a wh
 
 ## Time tracking
 
-Time is tracked against projects, each a customer's, from the capture dock. After its
-camera and delay buttons it is a stopwatch: ▶ / ⏸, today's time on the project to the
-second, and the customer over the project.
+Time is tracked against milestones, each a project's, from the capture dock. After its
+camera and delay buttons it is a stopwatch: ▶ / ⏸, today's time on the milestone to the
+second, and the project over the milestone.
 
-- **▶ · ⏸**: time the project · pause (it carries on from the same time when played again, and starts over each day)
-- **The customer and project**: pick another project: every customer's, with today's time on each. Picked, it starts; if another is running, the dock asks **Switch** or **Keep it running** first (one runs at a time)
-- **⌄**: today's times: each project with time today, and the day's total (click it for the timesheet)
+- **▶ · ⏸**: time the milestone · pause (it carries on from the same time when played again, and starts over each day)
+- **The project and milestone**: pick another milestone: every project's, with today's time on each. Picked, it starts; if another is running, the dock asks **Switch** or **Keep it running** first (one runs at a time)
+- **⌄**: today's times: each milestone with time today, and the day's total (click it for the timesheet)
 
 While a timer runs the dock stays out, so the time is always in sight (an option), and
 the tray icon's tooltip says what's running. Leave the PC (no keyboard or mouse for ten
@@ -276,31 +276,31 @@ however short.
 ### The timesheet
 
 Settings (Ctrl+, or Tools › Timesheet) opens on the week at a glance, and that's
-where time is put down too: a row per project, with its customer and code, a column per
-day, in hours rounded the way they go on the timecard (to 0.25 h per project per day by
-default; 0.1 h or exact in **Time tracking**). The running project's today is marked and
+where time is put down too: a row per milestone, with its project and code, a column per
+day, in hours rounded the way they go on the timecard (to 0.25 h per milestone per day by
+default; 0.1 h or exact in **Time tracking**). The running milestone's today is marked and
 counts up, and a line above the table shows it to the second, with **Pause**.
 
-The table fits itself to the window: the days narrow first, then customer and project
+The table fits itself to the window: the days narrow first, then project and milestone
 share a column. In a very narrow window it scrolls sideways.
 
 - **‹ › · This week**: previous / next week · back to this one
-- **Click a day · type `2`, `1.5`, `1:30` or `90m` · Enter**: that day's hours on the project (more is added after the day's last entry; less is taken off the latest; empty or `0` clears it)
+- **Click a day · type `2`, `1.5`, `1:30` or `90m` · Enter**: that day's hours on the milestone (more is added after the day's last entry; less is taken off the latest; empty or `0` clears it)
 - **Tab / Shift+Tab · Esc**: put them down and go to the next / previous day · leave it as it was
-- **Add a project, in the last row**: find a project by a few letters of its customer or name, or make a new one, then type its hours
+- **Add a milestone, in the last row**: find a milestone by a few letters of its project or name, or make a new one, then type its hours
 - **Below the table**: the chosen day's entries: change a start or an end (`9:05`, `1:20 pm`, `1320`), the note, or delete it
 - **Copy**: the week as a table, to paste into Excel or an email
-- **Close week…**: close it out: writes `<Monday> timesheet.csv` (the hours per project per day, with each day's notes) and `<Monday> entries.csv` (every entry, to the second) to the Time folder
+- **Close week…**: close it out: writes `<Monday> timesheet.csv` (the hours per milestone per day, with each day's notes) and `<Monday> entries.csv` (every entry, to the second) to the Time folder
 - **Reopen · Closed weeks**: open a closed week again · every closed week with its hours, its CSV a click away (it opens in whir as a table)
 
 On Monday the timesheet says when last week is still open, with a way straight to it. A
 closed week can be read but not changed until it's reopened.
 
-**Customers & projects** is where timers are set up: a card for each customer, with its
-projects and codes. Click a name or a code to change it where it stands; Enter keeps it
-and Esc puts it back. The ⋯ at the end of a row has the rest: a project with time in it is
+**Projects & milestones** is where they're set up: a card for each project, with its
+milestones and codes. Click a name or a code to change it where it stands; Enter keeps it
+and Esc puts it back. The ⋯ at the end of a row has the rest: a milestone with time in it is
 archived (no longer offered in the dock, its time kept) rather than deleted, and archived
-projects fold away at the bottom of their customer's card.
+milestones fold away at the bottom of their project's card.
 
 **Time tracking** has the rounding, when the dock asks about time away, and whether it
 stays out while a timer runs.
@@ -315,7 +315,7 @@ without losing anything.
 
 - `Documents\whir`: notes and new tables; the todo flags in `.whir\todos.txt`
 - `Documents\whir\Screenshots`: captures; their highlights and text in `.whir`
-- `Documents\whir\Time`: the timesheet (the data in a hidden `.whir` folder, one small text file for the projects and what's running and one per week, Monday to Sunday) and the CSVs of closed weeks. Set `WHIR_TIME_DIR` to keep it elsewhere.
+- `Documents\whir\Time`: the timesheet (the data in a hidden `.whir` folder, one small text file for the milestones and what's running and one per week, Monday to Sunday) and the CSVs of closed weeks. Set `WHIR_TIME_DIR` to keep it elsewhere.
 - `%LOCALAPPDATA%\whir\settings.ini`: whir's settings, the theme and the minimap's on/off among them
 - `%LOCALAPPDATA%\whir\dock.ini`: the dock's place, delay and hotkey (change the last two in **Settings › Capture & dock**)
 - `%LOCALAPPDATA%\whir\views.txt`: where each PDF was left (the last 500)
@@ -325,7 +325,7 @@ without losing anything.
 
 - `whir.exe <files>`: open them (in the running window, if there is one)
 - `--register` · `--unregister`: add · remove the "Open with" entries (unregistering also stops whir starting with Windows)
-- `--settings timesheet` (or `timers`, `tracking`, `appearance`, `pdfs`, `capture`, `startup`): open that page of Settings
+- `--settings timesheet` (or `milestones`, `tracking`, `appearance`, `pdfs`, `capture`, `startup`): open that page of Settings
 - `--dock` · `--dock-hide` · `--dock-start` · `--dock-capture` · `--dock-quit`: show the dock (even when hidden) · leave only its tray icon · start it without showing it · capture at once · close it
 - `--warp`: draw with Windows' software renderer instead of the graphics driver (try it if the window doesn't draw properly, or on a weak or remote machine)
 

@@ -16,7 +16,7 @@ pub enum DocKind {
     Csv,
     Note,
     Error,
-    /// whir's own Settings page (the timesheet, the timers, startup).
+    /// whir's own Settings page (the timesheet, the milestones, startup).
     Settings,
 }
 

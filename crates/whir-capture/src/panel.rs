@@ -1,6 +1,6 @@
 //! The dock's panel, under its bar: the todo card, the "were you away?"
-//! question, "switch projects?", and either today's times (the ⌄) or the
-//! project picker (the project on the bar). Rows of fixed heights in points, so
+//! question, "switch milestones?", and either today's times (the ⌄) or the
+//! milestone picker (the milestone on the bar). Rows of fixed heights in points, so
 //! the panel's size is known before anything is drawn, and its window placed
 //! to fit; egui draws them, with the window's buttons and fades.
 
@@ -18,7 +18,7 @@ use crate::geom::Rect;
 /// What a click on part of the panel does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
-    /// Time this project (picked from the list).
+    /// Time this milestone (picked from the list).
     Pick(u32),
     /// Yes: stop the running one and time this instead.
     Switch(u32),
@@ -30,8 +30,8 @@ pub enum Hit {
     Drop,
     /// Open the timesheet in whir.
     Timesheet,
-    /// Set up customers and projects in whir.
-    Projects,
+    /// Set up projects and milestones in whir.
+    Milestones,
     /// Open that todo's note.
     Todo(usize),
     /// Mark it done.
@@ -43,22 +43,22 @@ pub enum Hit {
 /// What the panel is open to, besides what must be seen anyway.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
-    /// Today's time on each project (the ⌄).
+    /// Today's time on each milestone (the ⌄).
     Today,
-    /// Every project, to pick one (the project on the bar).
+    /// Every milestone, to pick one (the milestone on the bar).
     Picker,
 }
 
-/// A project with time today.
+/// A milestone with time today.
 pub struct DayRow {
-    pub customer: String,
     pub project: String,
+    pub milestone: String,
     /// "1:02:33".
     pub time: String,
     pub running: bool,
 }
 
-pub struct ProjectRow {
+pub struct MilestoneRow {
     pub id: u32,
     pub name: String,
     /// Its time today, "1:02:33" (empty for none).
@@ -67,16 +67,16 @@ pub struct ProjectRow {
 }
 
 pub struct Group {
-    pub customer: String,
-    pub projects: Vec<ProjectRow>,
+    pub project: String,
+    pub milestones: Vec<MilestoneRow>,
 }
 
-/// Picking another project while one runs: say so first.
+/// Picking another milestone while one runs: say so first.
 pub struct Confirm {
     pub to: u32,
     /// "Contoso · Automation".
     pub to_label: String,
-    /// "Aardvark Oil · Customer Meetings".
+    /// "Aardvark Oil · Project Meetings".
     pub from_label: String,
     /// Its time today.
     pub from_time: String,
@@ -137,11 +137,11 @@ struct Line {
 enum Look {
     Heading(String),
     Row(Line),
-    /// Customer, project and time, in columns.
+    /// Project, milestone and time, in columns.
     Day {
         dot: bool,
-        customer: String,
         project: String,
+        milestone: String,
         time: String,
     },
     Button {
@@ -302,8 +302,8 @@ pub fn layout(model: &Model, width: i32) -> Vec<Item> {
             for d in &model.today {
                 let look = Look::Day {
                     dot: d.running,
-                    customer: d.customer.clone(),
                     project: d.project.clone(),
+                    milestone: d.milestone.clone(),
                     time: d.time.clone(),
                 };
                 push(full(y, line), look, None);
@@ -327,9 +327,9 @@ pub fn layout(model: &Model, width: i32) -> Vec<Item> {
                 y += line;
             }
             for g in &model.groups {
-                push(full(y, heading), Look::Heading(g.customer.clone()), None);
+                push(full(y, heading), Look::Heading(g.project.clone()), None);
                 y += heading;
-                for t in &g.projects {
+                for t in &g.milestones {
                     let look = Look::Row(Line {
                         dot: Some(t.running),
                         right: t.today.clone(),
@@ -352,15 +352,15 @@ pub fn layout(model: &Model, width: i32) -> Vec<Item> {
                     y += rule;
                 }
                 let label = if model.groups.is_empty() {
-                    "Add customers and projects…"
+                    "Add projects and milestones…"
                 } else {
-                    "Customers & projects…"
+                    "Projects & milestones…"
                 };
                 let look = Look::Row(Line {
                     icon: Some((Icon::Plus, Tone::Accent)),
                     ..row(label, Tone::Normal)
                 });
-                push(full(y, line), look, Some(Hit::Projects));
+                push(full(y, line), look, Some(Hit::Milestones));
                 y += line;
             }
         }
@@ -510,8 +510,8 @@ fn draw_item(ui: &mut Ui, i: usize, item: &Item, r: Area, theme: &Theme) -> bool
         }
         Look::Day {
             dot: running,
-            customer,
             project,
+            milestone,
             time,
         } => {
             let x = r.left() + 8.0;
@@ -527,15 +527,15 @@ fn draw_item(ui: &mut Ui, i: usize, item: &Item, r: Area, theme: &Theme) -> bool
             kit::tabular(ui.painter(), at, align, time, &clock, theme.accent);
             let names = end - width - 10.0 - x;
             let split = x + names * 0.4;
-            words(ui, r, x, split - 6.0, customer, clock, theme.text);
+            words(ui, r, x, split - 6.0, project, clock, theme.text);
             words(
                 ui,
                 r,
                 split,
                 x + names,
-                project,
+                milestone,
                 regular(body),
-                theme.project,
+                theme.milestone,
             );
         }
         Look::Tick => {
@@ -571,20 +571,20 @@ mod tests {
             confirm: Some(Confirm {
                 to: 9,
                 to_label: "Contoso · Automation".into(),
-                from_label: "Aardvark Oil · Customer Meetings".into(),
+                from_label: "Aardvark Oil · Project Meetings".into(),
                 from_time: "1:12:40".into(),
             }),
             view: Some(View::Picker),
             today: vec![
                 DayRow {
-                    customer: "Aardvark Oil".into(),
-                    project: "Customer Meetings".into(),
+                    project: "Aardvark Oil".into(),
+                    milestone: "Project Meetings".into(),
                     time: "1:12:40".into(),
                     running: true,
                 },
                 DayRow {
-                    customer: "Contoso".into(),
-                    project: "Fuel Reconciliation".into(),
+                    project: "Contoso".into(),
+                    milestone: "Fuel Reconciliation".into(),
                     time: "2:03:11".into(),
                     running: false,
                 },
@@ -593,17 +593,17 @@ mod tests {
             total: "3:15:51".into(),
             groups: vec![
                 Group {
-                    customer: "Aardvark Oil".into(),
-                    projects: vec![ProjectRow {
+                    project: "Aardvark Oil".into(),
+                    milestones: vec![MilestoneRow {
                         id: 7,
-                        name: "Customer Meetings".into(),
+                        name: "Project Meetings".into(),
                         today: "1:12:40".into(),
                         running: true,
                     }],
                 },
                 Group {
-                    customer: "Contoso".into(),
-                    projects: vec![ProjectRow {
+                    project: "Contoso".into(),
+                    milestones: vec![MilestoneRow {
                         id: 9,
                         name: "Automation".into(),
                         today: String::new(),
@@ -640,7 +640,7 @@ mod tests {
             Hit::KeepRunning,
             Hit::Pick(7),
             Hit::Pick(9),
-            Hit::Projects,
+            Hit::Milestones,
         ] {
             assert!(hits.contains(&h), "{h:?} missing");
         }
@@ -682,7 +682,7 @@ mod tests {
             ..Model::default()
         };
         let items = layout(&empty, 380);
-        assert!(items.iter().any(|i| i.hit == Some(Hit::Projects)));
+        assert!(items.iter().any(|i| i.hit == Some(Hit::Milestones)));
     }
 
     fn frame(stage: &mut Stage, items: &[Item], size: (i32, i32), theme: &Theme) -> Option<Hit> {

@@ -1,12 +1,12 @@
 //! whir's Settings: a tab of its own. The timesheet (the week at a glance,
-//! its entries, closing it out), the timers (customers and their projects),
+//! its entries, closing it out), the milestones (projects and their milestones),
 //! how time is kept, how whir looks, how PDFs and images open, the capture dock,
 //! and how whir starts.
 
 mod appearance;
 mod capture;
+mod milestones;
 mod startup;
-mod timers;
 mod timesheet;
 mod tracking;
 mod viewing;
@@ -24,7 +24,7 @@ use whir_platform::ipc::{self, Changed};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Timesheet,
-    Timers,
+    Milestones,
     Tracking,
     Appearance,
     Viewing,
@@ -35,7 +35,7 @@ pub enum Section {
 /// The sections down the left, in the two groups they make: your time, then
 /// how whir behaves.
 const GROUPS: [&[Section]; 2] = [
-    &[Section::Timesheet, Section::Timers, Section::Tracking],
+    &[Section::Timesheet, Section::Milestones, Section::Tracking],
     &[
         Section::Appearance,
         Section::Viewing,
@@ -61,7 +61,7 @@ impl Section {
     pub fn name(self) -> &'static str {
         match self {
             Section::Timesheet => "timesheet",
-            Section::Timers => "timers",
+            Section::Milestones => "milestones",
             Section::Tracking => "tracking",
             Section::Appearance => "appearance",
             Section::Viewing => "pdfs",
@@ -74,7 +74,7 @@ impl Section {
     pub fn keywords(self) -> &'static str {
         match self {
             Section::Timesheet => "week hours timecard entries close",
-            Section::Timers => "customers projects codes archive",
+            Section::Milestones => "projects milestones codes archive",
             Section::Tracking => "rounding round away idle keep dock",
             Section::Appearance => "theme dark light mode note text size font",
             Section::Viewing => "pdf image zoom fit minimap remember reopen",
@@ -87,7 +87,8 @@ impl Section {
     pub fn from_name(name: &str) -> Option<Section> {
         match name.to_ascii_lowercase().as_str() {
             "timesheet" | "time" | "week" => Some(Section::Timesheet),
-            "timers" | "projects" | "customers" => Some(Section::Timers),
+            // "timers" and "customers" are what this page used to be called.
+            "milestones" | "projects" | "timers" | "customers" => Some(Section::Milestones),
             "tracking" | "options" => Some(Section::Tracking),
             "appearance" | "theme" => Some(Section::Appearance),
             "viewing" | "pdf" | "pdfs" | "images" | "zoom" => Some(Section::Viewing),
@@ -100,7 +101,7 @@ impl Section {
     pub fn icon(self) -> Icon {
         match self {
             Section::Timesheet => Icon::Calendar,
-            Section::Timers => Icon::People,
+            Section::Milestones => Icon::Flag,
             Section::Tracking => Icon::Stopwatch,
             Section::Appearance => Icon::Palette,
             Section::Viewing => Icon::Picture,
@@ -112,7 +113,7 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::Timesheet => "Timesheet",
-            Section::Timers => "Customers & projects",
+            Section::Milestones => "Projects & milestones",
             Section::Tracking => "Time tracking",
             Section::Appearance => "Appearance",
             Section::Viewing => "PDFs & images",
@@ -129,7 +130,7 @@ pub struct SettingsDoc {
     /// The timesheet as of this [`ts::generation`].
     generation: u64,
     sheet: timesheet::View,
-    timers: timers::View,
+    milestones: milestones::View,
     capture: capture::View,
 }
 
@@ -146,7 +147,7 @@ impl SettingsDoc {
             store,
             generation: ts::generation(),
             sheet: timesheet::View::new(),
-            timers: timers::View::default(),
+            milestones: milestones::View::default(),
             capture: capture::View::default(),
         };
         if let Some(s) = &mut doc.store {
@@ -165,7 +166,7 @@ impl SettingsDoc {
             s.refresh();
         }
         self.sheet.forget();
-        self.timers.forget();
+        self.milestones.forget();
         self.capture.forget();
     }
 }
@@ -229,7 +230,9 @@ impl Document for SettingsDoc {
                     ui.set_max_width(ui.available_width().min(widest));
                     match self.section {
                         Section::Timesheet => self.sheet.ui(ui, self.store.as_mut(), cx, &theme),
-                        Section::Timers => self.timers.ui(ui, self.store.as_mut(), cx, &theme),
+                        Section::Milestones => {
+                            self.milestones.ui(ui, self.store.as_mut(), cx, &theme)
+                        }
                         Section::Tracking => tracking::ui(ui, self.store.as_mut(), cx, &theme),
                         Section::Appearance => appearance::ui(ui, cx, &theme),
                         Section::Viewing => viewing::ui(ui, cx, &theme),
@@ -239,7 +242,7 @@ impl Document for SettingsDoc {
                 });
             });
 
-        // A running timer's time goes on: the timesheet shows its seconds.
+        // A running milestone's time goes on: the timesheet shows its seconds.
         let running = self
             .store
             .as_ref()
@@ -458,12 +461,12 @@ mod tests {
         let mut store = Store::open(dir.clone());
         let now = Stamp::now();
         let monday = monday_of(now.day);
-        let timer = store
+        let milestone = store
             .update(|tx| {
-                let acme = tx.state.add_customer("Acme");
-                let t = tx.state.add_timer(acme, "Onboarding", "PRJ-1");
-                tx.state.add_timer(acme, "Support", "");
-                tx.state.add_customer("Nobody yet");
+                let acme = tx.state.add_project("Acme");
+                let t = tx.state.add_milestone(acme, "Onboarding", "PRJ-1");
+                tx.state.add_milestone(acme, "Support", "");
+                tx.state.add_project("Nobody yet");
                 tx.add(
                     t,
                     Stamp::at(monday, 9, 0, 0),
@@ -492,14 +495,14 @@ mod tests {
         h.frame();
         h.frame();
         // A day's entries, and the close-out question.
-        h.doc.sheet.selected = Some((timer, 0));
+        h.doc.sheet.selected = Some((milestone, 0));
         h.frame();
         h.doc.show_section("timesheet");
         h.frame();
         h.doc.sheet.confirm_close = true;
         h.frame();
         for section in [
-            "timers",
+            "milestones",
             "tracking",
             "appearance",
             "viewing",
