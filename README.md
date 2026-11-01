@@ -76,7 +76,8 @@ cargo test --workspace
 scripts\dist.ps1           # release build -> dist\whir\ and dist\whir-<version>-win-x64.zip
 ```
 
-`cargo run -p whir -- <files>` works for development. Debug builds find `pdfium.dll` in `vendor\`.
+`cargo run -p whir -- <files>` works for development. Debug builds find `pdfium.dll` in `vendor\`,
+and don't start the capture dock with the window (`cargo run -p whir -- --dock` does).
 
 Diagnostics:
 - A panic is written to `%LOCALAPPDATA%\whir\crash.log`.

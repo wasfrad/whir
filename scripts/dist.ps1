@@ -6,11 +6,13 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    # A running capture dock is whir.exe too, and would keep it from being replaced.
+    # A capture dock running from what this replaces would keep it from being replaced.
     # It is asked to close by its own exe (one old enough not to know the flag
-    # can't be running a dock, and would take the flag for a file to open).
+    # can't be running a dock, and would take the flag for a file to open). A whir
+    # installed anywhere else is none of this script's business.
+    $replaced = (Join-Path $root "dist\whir\whir.exe"), (Join-Path $root "target\release\whir.exe")
     Get-CimInstance Win32_Process -Filter "Name = 'whir.exe'" |
-        Where-Object { $_.CommandLine -match '--dock' } |
+        Where-Object { $_.CommandLine -match '--dock' -and $replaced -contains $_.ExecutablePath } |
         Select-Object -First 1 |
         ForEach-Object { & $_.ExecutablePath --dock-quit | Out-Null; Start-Sleep -Milliseconds 300 }
     # Panic messages carry source paths, which would put the builder's home folder in
