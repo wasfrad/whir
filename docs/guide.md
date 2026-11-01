@@ -249,7 +249,7 @@ cells, so it runs at roughly disk speed, even on files of hundreds of megabytes.
 ### Find in all tabs
 
 Ctrl+Shift+F opens a results panel along the bottom of the window and searches every
-open table at once — say, a price across a week of rack files. Matches are grouped by
+open table at once — say, a price across a week of exports. Matches are grouped by
 file, each with its row, column and the rest of the row; click one (or use ↑ ↓ in the
 list, or F4 / Shift+F4 from anywhere) to switch to that tab with the cell selected.
 Click a file to fold it; drag the panel's top edge to resize it; Esc closes it. Each
