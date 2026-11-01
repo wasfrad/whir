@@ -1,7 +1,13 @@
 # whir
 
 A fast, lean, native Windows app for everyday work. Double-click a file and it's on
-screen, and each new file becomes a tab in the same window. It does five things well:
+screen, and each new file becomes a tab in the same window.
+
+![whir finding text in a PDF, timing the work from its dock, taking a screenshot of a chart and highlighting it, then closing the week's timesheet and opening it as a CSV](docs/demo.gif)
+
+*Recorded in real time. The report and the timesheet are sample data.*
+
+It does five things well:
 
 - **Fast PDF viewer:** a 66-page PDF is on screen in about 150 ms, with text selection,
   search and a page minimap.
