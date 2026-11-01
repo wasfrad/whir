@@ -13,7 +13,11 @@ try {
         Where-Object { $_.CommandLine -match '--dock' } |
         Select-Object -First 1 |
         ForEach-Object { & $_.ExecutablePath --dock-quit | Out-Null; Start-Sleep -Milliseconds 300 }
-    cargo build --release -p whir
+    # Panic messages carry source paths, which would put the builder's home folder in
+    # the exe. (--config adds to the static CRT flag in .cargo/config.toml; RUSTFLAGS
+    # would replace it.)
+    $remap = "--remap-path-prefix=$env:USERPROFILE=~"
+    cargo build --release -p whir --config "target.x86_64-pc-windows-msvc.rustflags=['$remap']"
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
     $pdfium = Join-Path $root "vendor\pdfium\bin\pdfium.dll"
