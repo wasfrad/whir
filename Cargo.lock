@@ -653,11 +653,11 @@ dependencies = [
 name = "whir-capture"
 version = "0.1.0"
 dependencies = [
+ "egui",
  "whir-core",
  "whir-image",
  "whir-platform",
  "windows",
- "windows-numerics",
 ]
 
 [[package]]

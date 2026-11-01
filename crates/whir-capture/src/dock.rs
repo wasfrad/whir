@@ -12,6 +12,11 @@
 //!
 //! It never takes the keyboard or becomes the active window: clicking it must
 //! not disturb whatever is about to be captured (an open menu, a tooltip).
+//! (Only its menus do, as Windows' own do.)
+//!
+//! What's on it is drawn with egui, in the window's look, by [`crate::stage`];
+//! this is the windows around that: where they are, when they move, what's
+//! pressed. Shadows have windows of their own, which clicks pass through.
 //!
 //! It stays above every other window, full-screen ones included. Being
 //! topmost isn't enough for that: whichever topmost window came forward last
@@ -22,9 +27,11 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::time::Duration;
 
 use std::path::PathBuf;
 
+use egui::CornerRadius;
 use whir_core::icons::Icon;
 use whir_core::theme::Theme;
 use whir_core::time::Stamp;
@@ -43,33 +50,33 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, UnregisterHotKey,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CheckMenuRadioItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, GetCursorPos,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-    IsIconic, KillTimer, LoadCursorW, MF_BYCOMMAND, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG,
-    SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, ShowWindowAsync, SystemParametersInfoW,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND,
+    GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    HWND_TOPMOST, IDC_ARROW, IsIconic, KillTimer, LoadCursorW, MSG, PM_REMOVE, PeekMessageW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG, SPI_GETCLIENTAREAANIMATION,
+    SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, ShowWindowAsync, SystemParametersInfoW, TranslateMessage, ULW_ALPHA,
     UpdateLayeredWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_CONTEXTMENU,
     WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NULL, WM_POWERBROADCAST,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_POWERBROADCAST, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 use crate::Command;
-use crate::clock::{Clock, Strip};
+use crate::bar::{self, Bar};
+use crate::clock::Clock;
 use crate::config::{DELAYS, DockConfig, Hotkey, Spot, format_hotkey};
 use crate::geom::{Point, Rect};
 use crate::instance::{self, Role, WM_LAUNCHED};
+use crate::menu::Entry;
 use crate::monitors::{self, Monitor};
-use crate::paint::{Canvas, Surface};
-use crate::panel::{self, Hit, View, rgb};
+use crate::paint::{self, Shadow, Surface};
+use crate::panel::{self, Hit, View};
 use crate::place::{self, Edge, Layout, Slot};
-use crate::text::{self, Align, Font, Text};
+use crate::stage::{Drew, Stage};
 use crate::tray::{self, Tray};
 
 const WM_MOUSEHOVER: u32 = 0x02A1;
@@ -90,6 +97,11 @@ const TIMER_RAISE: usize = 4;
 const TIMER_KEEP_ON_TOP: usize = 5;
 /// While a timer runs: the stopwatch, and whether the user is away.
 const TIMER_TICK: usize = 6;
+/// The next frame of a fade.
+const TIMER_BAR_FRAME: usize = 7;
+const TIMER_PANEL_FRAME: usize = 8;
+/// The panel coming in.
+const TIMER_PANEL_FADE: usize = 9;
 const HOTKEY: i32 = 1;
 
 /// Milliseconds the pointer rests on the grip before the dock opens, and how
@@ -109,6 +121,9 @@ const RAISE_AGAIN_MS: u32 = 250;
 const KEEP_ON_TOP_MS: u32 = 2000;
 /// The stopwatch shows seconds.
 const TICK_MS: u32 = 1000;
+/// How the panel fades in behind the slide: a step every so many milliseconds.
+const PANEL_FADE_MS: u32 = 16;
+const PANEL_FADE_STEP: u8 = 51;
 /// Todos listed on the panel (the rest are counted).
 const TODOS_SHOWN: usize = 3;
 
@@ -116,13 +131,57 @@ const TODOS_SHOWN: usize = 3;
 static DOCK: AtomicIsize = AtomicIsize::new(0);
 
 const PANEL_CLASS: PCWSTR = w!("whir.dock.panel.v1");
+const SHADE_CLASS: PCWSTR = w!("whir.dock.shade.v1");
 
-const CAMERA: char = Icon::Camera.glyph();
-const STOPWATCH: char = Icon::Stopwatch.glyph();
-const PLAY: char = Icon::Play.glyph();
-const PAUSE: char = Icon::Pause.glyph();
-const CHEVRON_DOWN: char = Icon::ChevronDown.glyph();
-const CHEVRON_UP: char = Icon::ChevronUp.glyph();
+/// How far a shadow reaches, in points: its blur, and its drop.
+const SHADOW_REACH: f32 = 22.0;
+
+/// A shadow, on a window of its own that clicks pass through. A layered window
+/// catches the mouse wherever it isn't fully clear, so a shadow drawn on the
+/// dock's own windows would be a dead strip around them, all day.
+struct Shade {
+    hwnd: HWND,
+    /// What it's a picture of, as last drawn.
+    made: Option<((i32, i32), Shadow)>,
+    picture: Option<Surface>,
+    shown: bool,
+}
+
+impl Shade {
+    fn new(hwnd: HWND) -> Shade {
+        Shade {
+            hwnd,
+            made: None,
+            picture: None,
+            shown: false,
+        }
+    }
+
+    /// `rect` of the picture, from `from`, at `alpha`.
+    fn show(&mut self, size: (i32, i32), s: Shadow, rect: Rect, from: Point, alpha: u8) {
+        if self.made != Some((size, s)) {
+            self.picture = paint::shadow(size, s);
+            self.made = Some((size, s));
+        }
+        if let Some(picture) = &self.picture {
+            present_layered(self.hwnd, picture, rect, from, alpha);
+        }
+        if !self.shown {
+            self.shown = true;
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+    }
+
+    fn hide(&mut self) {
+        if std::mem::take(&mut self.shown) {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+    }
+}
 
 struct Dock {
     hwnd: HWND,
@@ -132,14 +191,17 @@ struct Dock {
     edge: Edge,
     offset: u16,
     layout: Layout,
+    theme: Theme,
     /// The whole strip, drawn; the window shows a slice of it.
-    surface: Option<Surface>,
+    stage: Stage,
+    shade: Shade,
     /// Pixels of the strip's depth showing: from the grip to all of it.
     visible: i32,
     open: bool,
-    hover: Option<Slot>,
-    /// Where the button went down (on screen), and on which of ours.
-    pressed: Option<(Point, Option<Slot>)>,
+    /// Where the button went down, on screen.
+    pressed: Option<Point>,
+    /// Clicked in the last frame.
+    clicked: Option<Slot>,
     dragging: bool,
     tracking: bool,
     /// Seconds left before a delayed capture.
@@ -164,15 +226,21 @@ struct Dock {
 /// The panel's window and what is on it.
 struct Panel {
     hwnd: HWND,
+    stage: Stage,
+    shade: Shade,
     items: Vec<panel::Item>,
     /// On screen; empty while hidden.
     rect: Rect,
     /// It is below the strip (the ▾ points at it).
     below: bool,
-    hover: Option<usize>,
-    pressed: Option<usize>,
+    corners: CornerRadius,
+    /// Clicked in the last frame.
+    clicked: Option<Hit>,
     tracking: bool,
-    scroll: i32,
+    /// Start at the top again, in the next frame.
+    from_top: bool,
+    /// How far it has faded in.
+    alpha: u8,
 }
 
 fn cursor() -> Point {
@@ -191,8 +259,22 @@ fn theme() -> Theme {
     }
 }
 
+/// Windows hasn't been told to do without animations.
+fn animations_on() -> bool {
+    let mut on = BOOL(1);
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut on as *mut BOOL as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    on.as_bool()
+}
+
 /// Put `surface` on `hwnd`'s screen at `rect`, from `from` in the picture.
-fn present_layered(hwnd: HWND, surface: &Surface, rect: Rect, from: Point, alpha: u8) {
+pub fn present_layered(hwnd: HWND, surface: &Surface, rect: Rect, from: Point, alpha: u8) {
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
@@ -224,7 +306,8 @@ fn present_layered(hwnd: HWND, surface: &Surface, rect: Rect, from: Point, alpha
 }
 
 impl Dock {
-    fn new(hwnd: HWND, panel: HWND) -> Dock {
+    fn new(hwnd: HWND, panel: HWND, shades: [HWND; 2]) -> Dock {
+        let theme = theme();
         let mut dock = Dock {
             hwnd,
             config: DockConfig::load(),
@@ -233,11 +316,12 @@ impl Dock {
             edge: Edge::Left,
             offset: 500,
             layout: place::layout(96),
-            surface: None,
+            stage: Stage::new(&theme, 1.0),
+            shade: Shade::new(shades[0]),
             visible: 0,
             open: false,
-            hover: None,
             pressed: None,
+            clicked: None,
             dragging: false,
             tracking: false,
             countdown: None,
@@ -248,18 +332,22 @@ impl Dock {
             tip: String::new(),
             panel: Panel {
                 hwnd: panel,
+                stage: Stage::new(&theme, 1.0),
+                shade: Shade::new(shades[1]),
                 items: Vec::new(),
                 rect: Rect::default(),
                 below: true,
-                hover: None,
-                pressed: None,
+                corners: CornerRadius::ZERO,
+                clicked: None,
                 tracking: false,
-                scroll: 0,
+                from_top: false,
+                alpha: 255,
             },
             view: None,
             confirm: None,
             clock: Clock::new(),
             todos: Vec::new(),
+            theme,
         };
         dock.load_todos();
         dock.relayout();
@@ -297,6 +385,12 @@ impl Dock {
         self.layout = place::layout(self.monitors.get(self.monitor).map_or(96, |m| m.dpi));
         self.visible = self.goal();
         self.panel.below = self.edge != Edge::Bottom;
+        let theme = theme();
+        if theme.dark != self.theme.dark {
+            self.stage.set_theme(&theme);
+            self.panel.stage.set_theme(&theme);
+            self.theme = theme;
+        }
         self.render();
     }
 
@@ -310,39 +404,108 @@ impl Dock {
         place::anchor(self.work(), self.edge, self.offset, &self.layout)
     }
 
+    /// Pixels per point on our monitor.
     fn scale(&self) -> f32 {
-        self.layout.button as f32 / 34.0
+        self.monitors.get(self.monitor).map_or(96, |m| m.dpi) as f32 / 96.0
     }
 
-    /// Draw the whole dock: the bar and its grip.
-    fn render(&mut self) {
+    /// Draw the whole dock: the bar and its grip. True if the picture changed.
+    fn render(&mut self) -> bool {
         let bar = Bar {
             edge: self.edge,
             layout: self.layout,
             strip: self.clock.strip(Stamp::now()),
-            hover: self.hover,
             countdown: self.countdown,
             delay: self.config.delay,
             today: self.view == Some(View::Today),
             below: self.panel.below,
         };
-        if let Some(surface) = draw_bar(&bar, &theme()) {
-            self.surface = Some(surface);
+        self.stage.set_scale(self.scale());
+        let (theme, mut clicked) = (&self.theme, None);
+        let size = self.layout.size(self.edge);
+        let drew = self.stage.run(size, |ui| {
+            clicked = bar::show(ui, &bar, theme).or(clicked);
+        });
+        self.clicked = clicked.or(self.clicked);
+        self.next_frame(TIMER_BAR_FRAME, &drew);
+        drew.changed
+    }
+
+    /// A fade goes on: another frame soon.
+    fn next_frame(&self, timer: usize, drew: &Drew) {
+        if let Some(wait) = drew.again {
+            let ms = wait.max(Duration::from_millis(10)).as_millis() as u32;
+            unsafe {
+                SetTimer(Some(self.hwnd), timer, ms, None);
+            }
         }
     }
 
     /// Put the right slice of the strip on screen.
-    fn present(&self) {
-        let Some(surface) = &self.surface else { return };
+    fn present(&mut self) {
+        let Some(surface) = self.stage.surface() else {
+            return;
+        };
         let (on_screen, from) = place::viewport(self.edge, self.anchor(), self.visible);
         // Closed, it is a little see-through.
         let alpha = if self.open { 255 } else { 205 };
         present_layered(self.hwnd, surface, on_screen, from, alpha);
+        self.present_shade();
+    }
+
+    /// How a shadow falls around `shape`, in a picture of `full`, on this monitor.
+    fn shadow_of(&self, shape: Rect, full: Rect) -> ((i32, i32), Shadow) {
+        let s = self.scale();
+        let look = self.theme.popup_shadow();
+        let shadow = Shadow {
+            shape: shape.translate(-full.left, -full.top),
+            radius: self.theme.metrics.corner_radius * s,
+            drop: (look.offset[1] as f32 * s).round() as i32,
+            blur: look.blur as f32 * s,
+            strength: look.color.a() as f32 / 255.0,
+        };
+        ((full.width(), full.height()), shadow)
+    }
+
+    /// The strip's shadow comes out with it, and isn't there when it's in.
+    fn present_shade(&mut self) {
+        let (depth, grip) = (self.layout.depth(self.edge), self.layout.grip);
+        if self.config.hidden || self.capturing || self.visible <= grip {
+            self.shade.hide();
+            return;
+        }
+        let anchor = self.anchor();
+        let reach = (SHADOW_REACH * self.scale()).round() as i32;
+        let screen = self
+            .monitors
+            .get(self.monitor)
+            .map_or(self.work(), |m| m.rect);
+        let full = place::shadow_rect(anchor, reach, Some(self.edge)).intersect(screen);
+        let (size, shadow) = self.shadow_of(anchor, full);
+        let (rect, from) = place::shadow_viewport(self.edge, full, depth - self.visible);
+        let alpha = 255 * (self.visible - grip) / (depth - grip).max(1);
+        self.shade.show(size, shadow, rect, from, alpha as u8);
+    }
+
+    /// The panel's shadow, all around it but for a side against the screen.
+    fn present_panel_shade(&mut self) {
+        let shape = self.panel.rect;
+        let reach = (SHADOW_REACH * self.scale()).round() as i32;
+        let screen = self
+            .monitors
+            .get(self.monitor)
+            .map_or(self.work(), |m| m.rect);
+        let against = self.edge.is_side().then_some(self.edge);
+        let full = place::shadow_rect(shape, reach, against).intersect(screen);
+        let (size, shadow) = self.shadow_of(shape, full);
+        let alpha = self.panel.alpha;
+        self.panel.shade.show(size, shadow, full, (0, 0), alpha);
     }
 
     fn redraw(&mut self) {
-        self.render();
-        self.present();
+        if self.render() {
+            self.present();
+        }
     }
 
     /// On screen, unless hidden (then only the tray icon shows).
@@ -363,6 +526,7 @@ impl Dock {
             self.config.save();
         }
         self.show();
+        self.present_shade();
         self.raise();
         self.settle();
     }
@@ -441,9 +605,12 @@ impl Dock {
         }
         let s = self.scale();
         let width = self.layout.panel;
-        let items = panel::layout(&model, width, s);
-        let want = panel::height(&items, s);
-        let (rect, below) = place::panel_rect(self.work(), self.edge, self.anchor(), (width, want));
+        let points = (width as f32 / s).round() as i32;
+        let items = panel::layout(&model, points);
+        let want = (panel::height(&items) as f32 * s).ceil() as i32;
+        let gap = self.layout.panel_gap;
+        let (rect, below) =
+            place::panel_rect(self.work(), self.edge, self.anchor(), (width, want), gap);
         if rect.height() <= 0 {
             self.hide_panel();
             return;
@@ -452,30 +619,85 @@ impl Dock {
             self.panel.below = below;
             self.redraw();
         }
-        let p = &mut self.panel;
-        p.scroll = p.scroll.clamp(0, (want - rect.height()).max(0));
-        if p.hover.is_some_and(|h| h >= items.len()) {
-            p.hover = None;
-        }
         // Square where it meets the screen's edge.
-        let r = 9.0 * s;
-        let radii = match self.edge {
-            Edge::Left => [0.0, r, r, 0.0],
-            Edge::Right => [r, 0.0, 0.0, r],
-            Edge::Top | Edge::Bottom => [r; 4],
+        let r = self.theme.metrics.corner_radius as u8;
+        let p = &mut self.panel;
+        p.corners = match self.edge {
+            Edge::Left => CornerRadius {
+                ne: r,
+                se: r,
+                ..CornerRadius::ZERO
+            },
+            Edge::Right => CornerRadius {
+                nw: r,
+                sw: r,
+                ..CornerRadius::ZERO
+            },
+            Edge::Top | Edge::Bottom => CornerRadius::same(r),
         };
-        let size = (rect.width(), rect.height());
-        if let Some(surface) = panel::draw(&items, size, p.scroll, p.hover, radii, &theme(), s) {
-            present_layered(p.hwnd, &surface, rect, (0, 0), 255);
+        p.items = items;
+        let shown = !p.rect.is_empty();
+        let moved = p.rect != rect;
+        p.rect = rect;
+        p.stage.set_scale(s);
+        if !shown {
+            p.alpha = if animations_on() {
+                PANEL_FADE_STEP
+            } else {
+                255
+            };
         }
-        if p.rect.is_empty() {
+        self.draw_panel(moved);
+        self.present_panel_shade();
+        if !shown {
             unsafe {
-                let _ = ShowWindow(p.hwnd, SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(self.panel.hwnd, SW_SHOWNOACTIVATE);
+                if self.panel.alpha < 255 {
+                    SetTimer(Some(self.hwnd), TIMER_PANEL_FADE, PANEL_FADE_MS, None);
+                }
             }
         }
-        p.items = items;
-        p.rect = rect;
         self.raise();
+    }
+
+    /// One step of the panel fading in.
+    fn fade_panel(&mut self) {
+        let p = &mut self.panel;
+        p.alpha = p.alpha.saturating_add(PANEL_FADE_STEP);
+        if p.alpha == 255 || p.rect.is_empty() {
+            p.alpha = 255;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_PANEL_FADE);
+            }
+        }
+        if let Some(surface) = p.stage.surface()
+            && !p.rect.is_empty()
+        {
+            present_layered(p.hwnd, surface, p.rect, (0, 0), p.alpha);
+            self.present_panel_shade();
+        }
+    }
+
+    /// A frame of the panel as it stands, shown if it's new or `moved`.
+    fn draw_panel(&mut self, moved: bool) {
+        let p = &mut self.panel;
+        if p.rect.is_empty() {
+            return;
+        }
+        let (items, corners, theme) = (&p.items, p.corners, &self.theme);
+        let from_top = std::mem::take(&mut p.from_top);
+        let size = (p.rect.width(), p.rect.height());
+        let mut clicked = None;
+        let drew = p.stage.run(size, |ui| {
+            clicked = panel::show(ui, items, corners, from_top, theme).or(clicked);
+        });
+        p.clicked = clicked.or(p.clicked);
+        if (drew.changed || moved)
+            && let Some(surface) = p.stage.surface()
+        {
+            present_layered(p.hwnd, surface, p.rect, (0, 0), p.alpha);
+        }
+        self.next_frame(TIMER_PANEL_FRAME, &drew);
     }
 
     fn hide_panel(&mut self) {
@@ -484,23 +706,15 @@ impl Dock {
                 let _ = ShowWindow(self.panel.hwnd, SW_HIDE);
             }
         }
+        self.panel.shade.hide();
         self.panel.rect = Rect::default();
-        self.panel.hover = None;
+        self.panel.stage.pointer_gone();
     }
 
-    /// What there is to click under a point of the window.
-    fn slot_at(&self, client: Point) -> Option<Slot> {
+    /// A point of the window, in the picture of the whole strip it shows part of.
+    fn on_strip(&self, client: Point) -> Point {
         let (_, from) = place::viewport(self.edge, self.anchor(), self.visible);
-        let p = (client.0 + from.0, client.1 + from.1);
-        let (l, edge) = (&self.layout, self.edge);
-        // With no project, "choose one" spans where the time would be.
-        if self.clock.selected().is_none() && l.slot_rect(edge, Slot::Time).contains(p) {
-            return Some(Slot::Project);
-        }
-        Slot::ALL
-            .into_iter()
-            .filter(|s| s.clickable())
-            .find(|&s| l.slot_rect(edge, s).contains(p))
+        (client.0 + from.0, client.1 + from.1)
     }
 
     fn set_open(&mut self, open: bool) {
@@ -509,26 +723,19 @@ impl Dock {
         }
         self.open = open;
         if !open {
-            self.hover = None;
+            self.stage.pointer_gone();
             self.view = None;
             self.confirm = None;
             self.hide_panel();
         }
         // The stopwatch isn't drawn while the dock is in.
         self.render();
-        let mut animate = BOOL(1);
-        unsafe {
-            let _ = SystemParametersInfoW(
-                SPI_GETCLIENTAREAANIMATION,
-                0,
-                Some(&mut animate as *mut BOOL as *mut _),
-                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-            );
-            if animate.as_bool() {
+        if animations_on() {
+            unsafe {
                 SetTimer(Some(self.hwnd), TIMER_SLIDE, 15, None);
-            } else {
-                self.visible = self.goal();
             }
+        } else {
+            self.visible = self.goal();
         }
         self.present();
         if open && self.visible == self.goal() {
@@ -584,10 +791,19 @@ impl Dock {
             return;
         }
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
-            if !self.panel.rect.is_empty() {
-                let _ = SetWindowPos(self.panel.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        // Shadows first: each goes above the last.
+        let panel = !self.panel.rect.is_empty();
+        let order = [
+            (self.shade.hwnd, self.shade.shown),
+            (self.panel.shade.hwnd, self.panel.shade.shown),
+            (self.hwnd, true),
+            (self.panel.hwnd, panel),
+        ];
+        for (hwnd, shown) in order {
+            if shown {
+                unsafe {
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                }
             }
         }
     }
@@ -639,24 +855,23 @@ impl Dock {
         if !self.tracking {
             self.tracking = Dock::track(self.hwnd, true);
         }
-        if let Some((from, _)) = self.pressed
+        if let Some(from) = self.pressed
             && !self.dragging
         {
             let at = cursor();
             let far = 2 * unsafe { GetSystemMetrics(SM_CXDRAG) }.max(2);
             self.dragging = (at.0 - from.0).abs() > far || (at.1 - from.1).abs() > far;
             if self.dragging {
+                self.stage.call_off_press();
                 self.hide_panel();
             }
         }
         if self.dragging {
             self.drag_to(cursor());
         } else if self.open {
-            let hover = self.slot_at(client);
-            if hover != self.hover {
-                self.hover = hover;
-                self.redraw();
-            }
+            let at = self.on_strip(client);
+            self.stage.pointer_moved(at);
+            self.redraw();
         }
     }
 
@@ -667,7 +882,6 @@ impl Dock {
         };
         let turned = edge != self.edge || monitor != self.monitor;
         (self.monitor, self.edge, self.offset) = (monitor, edge, offset);
-        self.hover = None;
         if turned {
             // Another edge is another shape; another monitor, maybe another scale.
             self.layout = place::layout(self.monitors[monitor].dpi);
@@ -679,10 +893,17 @@ impl Dock {
         self.present();
     }
 
+    fn pressed_at(&mut self, client: Point) {
+        self.pressed = Some(cursor());
+        let at = self.on_strip(client);
+        self.stage.button(at, true);
+        self.redraw();
+    }
+
     fn released(&mut self, client: Point) {
-        let Some((_, on)) = self.pressed.take() else {
+        if self.pressed.take().is_none() {
             return;
-        };
+        }
         if std::mem::take(&mut self.dragging) {
             self.config.spot = self.monitors.get(self.monitor).map(|m| Spot {
                 monitor: m.device.clone(),
@@ -692,10 +913,13 @@ impl Dock {
             self.config.save();
             self.update_panel();
             self.linger(self.linger_ms());
-        } else if let Some(slot) = on
-            && self.slot_at(client) == Some(slot)
-        {
-            self.press(slot);
+        } else {
+            let at = self.on_strip(client);
+            self.stage.button(at, false);
+            self.redraw();
+            if let Some(slot) = self.clicked.take() {
+                self.press(slot);
+            }
         }
     }
 
@@ -739,7 +963,7 @@ impl Dock {
         if view.is_some() {
             // What the window may have changed since.
             self.clock.refresh();
-            self.panel.scroll = 0;
+            self.panel.from_top = true;
         }
         self.settle();
     }
@@ -832,35 +1056,31 @@ impl Dock {
         if !self.panel.tracking {
             self.panel.tracking = Dock::track(self.panel.hwnd, false);
         }
-        let hover = panel::hit_at(&self.panel.items, client, self.panel.scroll);
-        if hover != self.panel.hover {
-            self.panel.hover = hover;
-            self.update_panel();
-        }
+        self.panel.stage.pointer_moved(client);
+        self.draw_panel(false);
     }
 
     fn panel_left(&mut self) {
         self.panel.tracking = false;
-        if self.panel.hover.take().is_some() {
-            self.update_panel();
-        }
+        self.panel.stage.pointer_gone();
+        self.draw_panel(false);
         self.linger(self.linger_ms());
     }
 
     fn panel_scrolled(&mut self, delta: i32) {
-        let row = (30.0 * self.scale()).round() as i32;
-        self.panel.scroll = (self.panel.scroll - delta * 3 * row / 120).max(0);
-        self.update_panel();
+        self.panel.stage.wheel(delta as f32 / 120.0);
+        self.draw_panel(false);
+    }
+
+    fn panel_pressed(&mut self, client: Point) {
+        self.panel.stage.button(client, true);
+        self.draw_panel(false);
     }
 
     fn panel_released(&mut self, client: Point) {
-        let Some(pressed) = self.panel.pressed.take() else {
-            return;
-        };
-        if panel::hit_at(&self.panel.items, client, self.panel.scroll) != Some(pressed) {
-            return;
-        }
-        let Some(hit) = self.panel.items.get(pressed).and_then(|i| i.hit) else {
+        self.panel.stage.button(client, false);
+        self.draw_panel(false);
+        let Some(hit) = self.panel.clicked.take() else {
             return;
         };
         match hit {
@@ -908,165 +1128,6 @@ impl Dock {
     }
 }
 
-/// What the bar shows, besides its shape.
-struct Bar {
-    edge: Edge,
-    layout: Layout,
-    strip: Strip,
-    hover: Option<Slot>,
-    /// Seconds left before a delayed capture.
-    countdown: Option<u32>,
-    delay: u32,
-    /// Today's times are open (the ⌄ is lit).
-    today: bool,
-    /// The panel is below the bar (the ⌄ points at it).
-    below: bool,
-}
-
-/// Where the project is on the bar; with none to show (no time either),
-/// what to do for one takes the time's place too.
-fn project_rect(l: &Layout, edge: Edge, strip: &Strip) -> Rect {
-    let r = l.slot_rect(edge, Slot::Project);
-    match strip.project {
-        Some(_) => r,
-        None => Rect::new(l.slot_rect(edge, Slot::Time).left, r.top, r.right, r.bottom),
-    }
-}
-
-/// The whole dock, drawn: the bar and its grip.
-fn draw_bar(bar: &Bar, theme: &Theme) -> Option<Surface> {
-    let (text, dim, accent) = (rgb(theme.text), rgb(theme.text_dim), rgb(theme.accent));
-    let (edge, l) = (bar.edge, bar.layout);
-    let s = l.button as f32 / 34.0;
-    let px = |v: f32| (v * s).round() as i32;
-    let (w, h) = l.size(edge);
-    let mut surface = Surface::new(w, h)?;
-    let strip = &bar.strip;
-    let mut texts = Vec::new();
-    {
-        let mut c = surface.canvas();
-        // Rounded on the side away from the screen edge; a hairline around it.
-        let r = 9.0 * s;
-        let (radii, inner) = match edge {
-            Edge::Left => ([0.0, r, r, 0.0], Rect::new(0, 1, w - 1, h - 1)),
-            Edge::Right => ([r, 0.0, 0.0, r], Rect::new(1, 1, w, h - 1)),
-            Edge::Top => ([0.0, 0.0, r, r], Rect::new(1, 0, w - 1, h - 1)),
-            Edge::Bottom => ([r, r, 0.0, 0.0], Rect::new(1, 1, w - 1, h)),
-        };
-        c.round_rect(Rect::new(0, 0, w, h), radii, rgb(theme.drawer_border), 1.0);
-        let fill = radii.map(|v| (v - 1.0).max(0.0));
-        c.round_rect(inner, fill, rgb(theme.drawer_bg), 1.0);
-
-        // The grip: three dots, like the notes drawer's spine.
-        let grip = l.grip_rect(edge);
-        let middle = (
-            (grip.left + grip.right) as f32 / 2.0,
-            (grip.top + grip.bottom) as f32 / 2.0,
-        );
-        for step in [-1.0, 0.0, 1.0] {
-            let d = step * 6.0 * s;
-            let at = if edge.is_side() {
-                (middle.0, middle.1 + d)
-            } else {
-                (middle.0 + d, middle.1)
-            };
-            c.dot(at, 1.5 * s, rgb(theme.drawer_grip));
-        }
-
-        if let Some(slot) = bar.hover.filter(|s| s.clickable()) {
-            let hover = rgb(theme.drawer_item_hover);
-            let r = match slot {
-                Slot::Project => project_rect(&l, edge, strip),
-                _ => l.slot_rect(edge, slot),
-            };
-            c.round_rect(r, [6.0 * s; 4], hover, 1.0);
-        }
-        c.round_rect(l.divider(edge), [0.0; 4], rgb(theme.drawer_border), 1.0);
-
-        // An icon in the middle of `r`; with no icon font at all, a
-        // plain dot still says "press me".
-        let icon = |c: &mut Canvas, texts: &mut Vec<Text>, r: Rect, glyph, size, color| {
-            if text::has_icons() {
-                let font = Font::icons(size * s);
-                texts.push(Text::new(glyph, font, color, r).align(Align::Center));
-            } else {
-                let (x, y) = (
-                    (r.left + r.right) as f32 / 2.0,
-                    (r.top + r.bottom) as f32 / 2.0,
-                );
-                c.dot((x, y), 5.0 * s, color);
-            }
-        };
-        let big = |text: String, color, r| {
-            Text::new(text, Font::ui(15.0 * s).semibold(), color, r).align(Align::Center)
-        };
-        for slot in Slot::ALL {
-            let r = l.slot_rect(edge, slot);
-            match slot {
-                // Counting down: the seconds left, where the camera was.
-                Slot::Capture => match bar.countdown {
-                    Some(n) => texts.push(big(n.to_string(), accent, r)),
-                    None => icon(&mut c, &mut texts, r, CAMERA, 17.0, text),
-                },
-                Slot::Delay => match bar.delay {
-                    0 => icon(&mut c, &mut texts, r, STOPWATCH, 17.0, dim),
-                    secs => texts.push(big(format!("{secs}s"), accent, r)),
-                },
-                Slot::Play => {
-                    let (glyph, color) = match (&strip.project, strip.playing) {
-                        (_, true) => (PAUSE, accent),
-                        (Some(_), false) => (PLAY, text),
-                        (None, false) => (PLAY, dim),
-                    };
-                    icon(&mut c, &mut texts, r, glyph, 16.0, color);
-                }
-                Slot::Time => {
-                    let color = if strip.playing { accent } else { dim };
-                    let font = Font::ui(15.0 * s).semibold().tabular();
-                    texts.push(Text::new(&strip.time, font, color, r).align(Align::Center));
-                }
-                // The customer over the project, or what to do for one.
-                Slot::Project => {
-                    let r = project_rect(&l, edge, strip);
-                    let (left, right) = (r.left + px(6.0), r.right - px(4.0));
-                    match &strip.project {
-                        Some((customer, project)) => {
-                            let mid = (r.top + r.bottom) / 2;
-                            texts.push(Text::new(
-                                customer,
-                                Font::ui(13.0 * s).semibold(),
-                                text,
-                                Rect::new(left, r.top + px(1.0), right, mid + px(1.0)),
-                            ));
-                            texts.push(Text::new(
-                                project,
-                                Font::ui(11.5 * s),
-                                rgb(theme.project),
-                                Rect::new(left, mid, right, r.bottom - px(2.0)),
-                            ));
-                        }
-                        None => texts.push(Text::new(
-                            strip.hint,
-                            Font::ui(12.5 * s),
-                            dim,
-                            Rect::new(left, r.top, right, r.bottom),
-                        )),
-                    }
-                }
-                Slot::More => {
-                    // The ⌄ points at the panel: down to open it below, up to close.
-                    let down = bar.below != bar.today;
-                    let glyph = if down { CHEVRON_DOWN } else { CHEVRON_UP };
-                    let color = if bar.today { accent } else { dim };
-                    icon(&mut c, &mut texts, r, glyph, 12.0, color);
-                }
-            }
-        }
-    }
-    surface.draw_text(&texts, None);
-    Some(surface)
-}
-
 /// One capture, with the dock out of the picture. Not under a borrow of the
 /// dock: selecting runs its own message loop, which comes back in here.
 fn capture(dock: &RefCell<Dock>, hwnd: HWND) {
@@ -1079,9 +1140,10 @@ fn capture(dock: &RefCell<Dock>, hwnd: HWND) {
         d.open = false;
         d.view = None;
         d.confirm = None;
-        d.hover = None;
+        d.stage.pointer_gone();
         d.visible = d.layout.grip;
         d.hide_panel();
+        d.shade.hide();
         d.render();
     }
     let result = unsafe {
@@ -1092,7 +1154,7 @@ fn capture(dock: &RefCell<Dock>, hwnd: HWND) {
         let _ = DwmFlush();
         let result = crate::capture();
         {
-            let d = dock.borrow();
+            let mut d = dock.borrow_mut();
             d.present();
             d.show();
         }
@@ -1129,81 +1191,55 @@ const MENU_AUTOSTART: usize = 32;
 const MENU_QUIT: usize = 40;
 
 /// The right-click menu. Also not under a borrow: a menu is a message loop.
-fn menu(dock: &RefCell<Dock>, hwnd: HWND) {
-    let (delay, hotkey, registered) = {
+fn menu(dock: &RefCell<Dock>) {
+    let (delay, hotkey, registered, theme) = {
         let mut d = dock.borrow_mut();
         d.register_hotkey();
         d.menu_open = true;
-        (d.config.delay, d.config.hotkey, d.hotkey_registered)
+        (
+            d.config.delay,
+            d.config.hotkey,
+            d.hotkey_registered,
+            d.theme.clone(),
+        )
     };
-    let picked = unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            dock.borrow_mut().menu_open = false;
-            return;
-        };
-        let item = |flags, id: usize, text: &str| {
-            let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
-        };
-        match hotkey.map(format_hotkey) {
-            Some(keys) if registered => item(MF_STRING, MENU_CAPTURE, &format!("Capture\t{keys}")),
-            Some(keys) => {
-                item(MF_STRING, MENU_CAPTURE, "Capture");
-                item(
-                    MF_STRING | MF_GRAYED,
-                    0,
-                    &format!("{keys} is in use by another app"),
-                );
-            }
-            None => item(MF_STRING, MENU_CAPTURE, "Capture"),
+    let capture = Entry::item(MENU_CAPTURE, "Capture").icon(Icon::Camera);
+    let mut entries = Vec::new();
+    match hotkey.map(format_hotkey) {
+        Some(keys) if registered => entries.push(capture.shortcut(keys)),
+        Some(keys) => {
+            entries.push(capture);
+            entries.push(Entry::item(0, format!("{keys} is in use by another app")).disabled());
         }
-        item(MF_SEPARATOR, 0, "");
-        for seconds in DELAYS {
-            let text = match seconds {
-                0 => "No delay".to_owned(),
-                n => format!("{n} second delay"),
-            };
-            item(MF_STRING, MENU_DELAY + seconds as usize, &text);
-        }
-        let _ = CheckMenuRadioItem(
-            menu,
-            MENU_DELAY as u32,
-            (MENU_DELAY + 5) as u32,
-            MENU_DELAY as u32 + delay,
-            MF_BYCOMMAND.0,
-        );
-        item(MF_SEPARATOR, 0, "");
-        item(MF_STRING, MENU_OPEN_WHIR, "Open whir");
-        item(MF_STRING, MENU_TIMESHEET, "Timesheet…");
-        item(MF_STRING, MENU_OPEN_FOLDER, "Open screenshots folder");
-        item(MF_SEPARATOR, 0, "");
-        item(MF_STRING, MENU_HIDE, "Hide dock");
-
-        let at = cursor();
-        // So that a click elsewhere dismisses the menu.
-        let _ = SetForegroundWindow(hwnd);
-        let picked = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            at.0,
-            at.1,
-            None,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        picked.0 as usize
-    };
+        None => entries.push(capture),
+    }
+    entries.push(Entry::Rule);
+    for seconds in DELAYS {
+        let text = match seconds {
+            0 => "No delay".to_owned(),
+            n => format!("{n} second delay"),
+        };
+        entries.push(Entry::item(MENU_DELAY + seconds as usize, text).ticked(seconds == delay));
+    }
+    entries.extend([
+        Entry::Rule,
+        Entry::item(MENU_OPEN_WHIR, "Open whir"),
+        Entry::item(MENU_TIMESHEET, "Timesheet…").icon(Icon::Stopwatch),
+        Entry::item(MENU_OPEN_FOLDER, "Open screenshots folder").icon(Icon::Folder),
+        Entry::Rule,
+        Entry::item(MENU_HIDE, "Hide dock"),
+    ]);
+    let picked = crate::menu::show(entries, &theme);
     let mut d = dock.borrow_mut();
     d.menu_open = false;
     d.linger(d.linger_ms());
     match picked {
-        MENU_CAPTURE => d.capture_pressed(),
-        MENU_OPEN_WHIR => open_whir(),
-        MENU_TIMESHEET => open_settings("timesheet"),
-        MENU_OPEN_FOLDER => open_folder(),
-        MENU_HIDE => d.set_hidden(true),
-        id if DELAYS.iter().any(|&s| MENU_DELAY + s as usize == id) => {
+        Some(MENU_CAPTURE) => d.capture_pressed(),
+        Some(MENU_OPEN_WHIR) => open_whir(),
+        Some(MENU_TIMESHEET) => open_settings("timesheet"),
+        Some(MENU_OPEN_FOLDER) => open_folder(),
+        Some(MENU_HIDE) => d.set_hidden(true),
+        Some(id) if DELAYS.iter().any(|&s| MENU_DELAY + s as usize == id) => {
             d.set_delay((id - MENU_DELAY) as u32);
         }
         _ => {}
@@ -1212,73 +1248,56 @@ fn menu(dock: &RefCell<Dock>, hwnd: HWND) {
 
 /// The tray icon's menu: the dock's way back when hidden, and whir's way out.
 fn tray_menu(dock: &RefCell<Dock>, hwnd: HWND) {
-    let (hidden, hotkey, registered) = {
+    let (hidden, hotkey, registered, theme) = {
         let mut d = dock.borrow_mut();
         d.register_hotkey();
         d.menu_open = true;
-        (d.config.hidden, d.config.hotkey, d.hotkey_registered)
+        (
+            d.config.hidden,
+            d.config.hotkey,
+            d.hotkey_registered,
+            d.theme.clone(),
+        )
     };
     let autostart = shell::autostart().is_some();
-    let picked = unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            dock.borrow_mut().menu_open = false;
-            return;
-        };
-        let item = |flags, id: usize, text: &str| {
-            let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
-        };
+    let capture = Entry::item(MENU_CAPTURE, "Capture").icon(Icon::Camera);
+    let entries = vec![
         match hotkey.map(format_hotkey) {
-            Some(keys) if registered => item(MF_STRING, MENU_CAPTURE, &format!("Capture\t{keys}")),
-            _ => item(MF_STRING, MENU_CAPTURE, "Capture"),
-        }
-        item(MF_STRING, MENU_OPEN_WHIR, "Open whir");
-        item(MF_STRING, MENU_TIMESHEET, "Timesheet…");
-        item(MF_SEPARATOR, 0, "");
+            Some(keys) if registered => capture.shortcut(keys),
+            _ => capture,
+        },
+        Entry::item(MENU_OPEN_WHIR, "Open whir"),
+        Entry::item(MENU_TIMESHEET, "Timesheet…").icon(Icon::Stopwatch),
+        Entry::Rule,
         if hidden {
-            item(MF_STRING, MENU_SHOW, "Show dock");
+            Entry::item(MENU_SHOW, "Show dock")
         } else {
-            item(MF_STRING, MENU_HIDE, "Hide dock");
-        }
-        let checked = if autostart { MF_CHECKED } else { MF_STRING };
-        item(MF_STRING | checked, MENU_AUTOSTART, "Start with Windows");
-        item(MF_SEPARATOR, 0, "");
-        item(MF_STRING, MENU_QUIT, "Quit whir");
-
-        let at = cursor();
-        // So that a click elsewhere dismisses the menu.
-        let _ = SetForegroundWindow(hwnd);
-        let picked = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            at.0,
-            at.1,
-            None,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        picked.0 as usize
-    };
+            Entry::item(MENU_HIDE, "Hide dock")
+        },
+        Entry::item(MENU_AUTOSTART, "Start with Windows").ticked(autostart),
+        Entry::Rule,
+        Entry::item(MENU_QUIT, "Quit whir"),
+    ];
+    let picked = crate::menu::show(entries, &theme);
     let mut d = dock.borrow_mut();
     d.menu_open = false;
     match picked {
-        MENU_CAPTURE => d.capture_pressed(),
-        MENU_OPEN_WHIR => open_whir(),
-        MENU_TIMESHEET => open_settings("timesheet"),
-        MENU_SHOW => {
+        Some(MENU_CAPTURE) => d.capture_pressed(),
+        Some(MENU_OPEN_WHIR) => open_whir(),
+        Some(MENU_TIMESHEET) => open_settings("timesheet"),
+        Some(MENU_SHOW) => {
             d.set_hidden(false);
             d.set_open(true);
             d.linger(REVEAL_MS);
         }
-        MENU_HIDE => d.set_hidden(true),
-        MENU_AUTOSTART => {
+        Some(MENU_HIDE) => d.set_hidden(true),
+        Some(MENU_AUTOSTART) => {
             if let Err(e) = shell::set_autostart(!autostart) {
                 drop(d);
                 crate::report(&e);
             }
         }
-        MENU_QUIT => {
+        Some(MENU_QUIT) => {
             drop(d);
             quit(hwnd);
         }
@@ -1363,7 +1382,7 @@ fn open_folder() {
     }
 }
 
-fn point(lparam: LPARAM) -> Point {
+pub fn client_point(lparam: LPARAM) -> Point {
     (
         (lparam.0 & 0xFFFF) as i16 as i32,
         ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
@@ -1384,7 +1403,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             WM_RBUTTONUP => {
-                menu(dock, hwnd);
+                menu(dock);
                 return LRESULT(0);
             }
             tray::WM_TRAY => {
@@ -1407,7 +1426,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         match msg {
-            WM_MOUSEMOVE => d.mouse_move(point(lparam)),
+            WM_MOUSEMOVE => d.mouse_move(client_point(lparam)),
             WM_MOUSEHOVER => {
                 // Resting on the grip opens it; passing by with a button held doesn't.
                 if wparam.0 & 0x1f == 0 {
@@ -1416,19 +1435,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_MOUSELEAVE => {
                 d.tracking = false;
-                if d.hover.take().is_some() {
-                    d.redraw();
-                }
+                d.stage.pointer_gone();
+                d.redraw();
                 let ms = d.linger_ms();
                 d.linger(ms);
             }
             WM_LBUTTONDOWN => {
-                d.pressed = Some((cursor(), d.slot_at(point(lparam))));
+                d.pressed_at(client_point(lparam));
                 drop(d);
                 SetCapture(hwnd);
             }
             WM_LBUTTONUP => {
-                d.released(point(lparam));
+                d.released(client_point(lparam));
+                // Holding the mouse may have cost us word of it leaving.
+                d.tracking = Dock::track(hwnd, true);
                 drop(d);
                 let _ = ReleaseCapture();
             }
@@ -1442,6 +1462,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 TIMER_KEEP_ON_TOP => d.raise(),
                 TIMER_TICK => d.tick(),
+                TIMER_BAR_FRAME => {
+                    let _ = KillTimer(Some(hwnd), TIMER_BAR_FRAME);
+                    d.redraw();
+                }
+                TIMER_PANEL_FRAME => {
+                    let _ = KillTimer(Some(hwnd), TIMER_PANEL_FRAME);
+                    d.draw_panel(false);
+                }
+                TIMER_PANEL_FADE => d.fade_panel(),
                 _ => {}
             },
             WM_HOTKEY => {
@@ -1488,6 +1517,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let _ = UnregisterHotKey(Some(hwnd), HOTKEY);
                 }
                 let _ = DestroyWindow(d.panel.hwnd);
+                let _ = DestroyWindow(d.panel.shade.hwnd);
+                let _ = DestroyWindow(d.shade.hwnd);
                 PostQuitMessage(0);
             }
             _ if msg == ipc::changed_message() => d.shared_changed(Changed::from_code(wparam.0)),
@@ -1516,8 +1547,7 @@ unsafe extern "system" fn panel_wndproc(
         };
         match msg {
             WM_RBUTTONUP => {
-                let strip = dock.borrow().hwnd;
-                menu(dock, strip);
+                menu(dock);
                 return LRESULT(0);
             }
             WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE),
@@ -1531,16 +1561,18 @@ unsafe extern "system" fn panel_wndproc(
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         match msg {
-            WM_MOUSEMOVE => d.panel_mouse_move(point(lparam)),
+            WM_MOUSEMOVE => d.panel_mouse_move(client_point(lparam)),
             WM_MOUSELEAVE => d.panel_left(),
             WM_MOUSEWHEEL => d.panel_scrolled((wparam.0 >> 16) as u16 as i16 as i32),
             WM_LBUTTONDOWN => {
-                d.panel.pressed = panel::hit_at(&d.panel.items, point(lparam), d.panel.scroll);
+                d.panel_pressed(client_point(lparam));
                 drop(d);
                 SetCapture(hwnd);
             }
             WM_LBUTTONUP => {
-                d.panel_released(point(lparam));
+                d.panel_released(client_point(lparam));
+                // Holding the mouse may have cost us word of it leaving.
+                d.panel.tracking = Dock::track(hwnd, false);
                 drop(d);
                 let _ = ReleaseCapture();
             }
@@ -1551,6 +1583,16 @@ unsafe extern "system" fn panel_wndproc(
         }
         LRESULT(0)
     }
+}
+
+/// A shadow does nothing but be there.
+unsafe extern "system" fn shade_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 /// Another program's window became the active one: it may be above us now.
@@ -1596,6 +1638,8 @@ pub fn run(cmd: Command) -> i32 {
                 wndproc as unsafe extern "system" fn(_, _, _, _) -> _,
             ),
             (PANEL_CLASS, panel_wndproc),
+            (SHADE_CLASS, shade_wndproc),
+            (crate::menu::CLASS, crate::menu::wndproc),
         ] {
             RegisterClassExW(&WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1625,14 +1669,33 @@ pub fn run(cmd: Command) -> i32 {
                 None,
             )
         };
-        let (Ok(hwnd), Ok(panel)) = (
+        // Clicks go straight through a shadow.
+        let shade = || {
+            CreateWindowExW(
+                style | WS_EX_TRANSPARENT,
+                SHADE_CLASS,
+                w!("whir dock shadow"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+        };
+        let (Ok(hwnd), Ok(panel), Ok(shade_bar), Ok(shade_panel)) = (
             window(instance::CLASS, w!("whir capture dock")),
             window(PANEL_CLASS, w!("whir dock panel")),
+            shade(),
+            shade(),
         ) else {
             crate::report("The capture dock couldn't be started.");
             return 1;
         };
-        let dock = RefCell::new(Dock::new(hwnd, panel));
+        let dock = RefCell::new(Dock::new(hwnd, panel, [shade_bar, shade_panel]));
         for h in [hwnd, panel] {
             SetWindowLongPtrW(h, GWLP_USERDATA, &dock as *const RefCell<Dock> as isize);
         }
@@ -1673,89 +1736,5 @@ pub fn run(cmd: Command) -> i32 {
             let _ = UnhookWinEvent(hook);
         }
         msg.wParam.0 as i32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn strip(playing: bool) -> Strip {
-        Strip {
-            project: Some(("Aardvark Oil".into(), "Customer Meetings".into())),
-            playing,
-            time: "1:12:40".into(),
-            hint: "Choose a project",
-        }
-    }
-
-    fn bar(edge: Edge, dpi: u32, strip: Strip) -> Bar {
-        Bar {
-            edge,
-            layout: place::layout(dpi),
-            strip,
-            hover: None,
-            countdown: None,
-            delay: 0,
-            today: false,
-            below: edge != Edge::Bottom,
-        }
-    }
-
-    #[test]
-    fn the_bar_draws_on_every_edge() {
-        for edge in Edge::ALL {
-            let b = bar(edge, 96, strip(true));
-            let mut surface = draw_bar(&b, &Theme::light()).unwrap();
-            let (w, h) = b.layout.size(edge);
-            assert_eq!((surface.width, surface.height), (w, h));
-            // Opaque in the middle of the bar; text drawn on it (darker than
-            // the light background somewhere in the project's slot).
-            let px = surface.pixels().to_vec();
-            let at = |x: i32, y: i32| px[(y * w + x) as usize];
-            let bar_rect = b.layout.bar_rect(edge);
-            let mid = (
-                (bar_rect.left + bar_rect.right) / 2,
-                (bar_rect.top + bar_rect.bottom) / 2,
-            );
-            assert_eq!(at(mid.0, mid.1) >> 24, 0xff, "{edge:?}");
-            let p = b.layout.slot_rect(edge, Slot::Project);
-            let inked =
-                (p.top..p.bottom).any(|y| (p.left..p.right).any(|x| (at(x, y) >> 8) & 0xff < 0x80));
-            assert!(inked, "{edge:?}: no project name");
-        }
-    }
-
-    /// `cargo test -p whir-capture -- --ignored preview` writes the bar, in
-    /// both themes, to PNGs in `WHIR_PREVIEW_DIR` (to look at).
-    #[test]
-    #[ignore = "writes pictures to look at"]
-    fn preview_bar() {
-        let Some(dir) = std::env::var_os("WHIR_PREVIEW_DIR") else {
-            return;
-        };
-        let none = Strip {
-            project: None,
-            playing: false,
-            time: String::new(),
-            hint: "Choose a project",
-        };
-        for (name, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for dpi in [96, 144] {
-                for (what, edge, strip) in [
-                    ("running", Edge::Top, strip(true)),
-                    ("paused", Edge::Top, strip(false)),
-                    ("none", Edge::Top, none.clone()),
-                    ("left", Edge::Left, strip(true)),
-                ] {
-                    let mut b = bar(edge, dpi, strip);
-                    b.hover = (what == "paused").then_some(Slot::Project);
-                    let mut surface = draw_bar(&b, &theme).unwrap();
-                    let path =
-                        std::path::Path::new(&dir).join(format!("bar-{what}-{name}-{dpi}.png"));
-                    surface.save_png(&path);
-                }
-            }
-        }
     }
 }

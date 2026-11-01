@@ -61,11 +61,6 @@ impl Slot {
         Slot::Project,
         Slot::More,
     ];
-
-    /// Clicking it does something.
-    pub fn clickable(self) -> bool {
-        self != Slot::Time
-    }
 }
 
 /// The dock's measurements in pixels, at one display scale. The bar is laid
@@ -79,14 +74,19 @@ pub struct Layout {
     pub grip: i32,
     /// A square button's side.
     pub button: i32,
+    /// Around the row of buttons.
     pub pad: i32,
+    /// Between one thing and the next.
+    pub space: i32,
     /// Between the capture buttons and the stopwatch (a hairline in it).
     pub gap: i32,
     pub time: i32,
     pub project: i32,
     pub more: i32,
-    /// The panel's width: the bar's, so it sits flush with it.
+    /// The panel's width: the bar's, so they line up.
     pub panel: i32,
+    /// Between the strip and the panel.
+    pub panel_gap: i32,
 }
 
 pub fn layout(dpi: u32) -> Layout {
@@ -94,13 +94,15 @@ pub fn layout(dpi: u32) -> Layout {
     let mut l = Layout {
         bar: (0, 0),
         grip: px(8),
-        button: px(34),
-        pad: px(4),
+        button: px(28),
+        pad: px(6),
+        space: px(2),
         gap: px(9),
-        time: px(70),
-        project: px(150),
+        time: px(66),
+        project: px(172),
         more: px(24),
         panel: 0,
+        panel_gap: px(6),
     };
     let (x, w) = l.slot_at(Slot::More);
     l.bar = (x + w + l.pad, l.button + 2 * l.pad);
@@ -122,7 +124,12 @@ impl Layout {
             if s == slot {
                 break;
             }
-            x += extent(s) + if s == Slot::Delay { self.gap } else { self.pad };
+            x += extent(s)
+                + if s == Slot::Delay {
+                    self.gap
+                } else {
+                    self.space
+                };
         }
         (x, extent(slot))
     }
@@ -191,10 +198,17 @@ impl Layout {
 /// panel of `size` (width, height). Below the strip, or above it on the
 /// bottom edge or when there is more room above; flush with the screen edge
 /// on the sides, lined up with the strip on the top and bottom. It is cut to
-/// the room there is. Also says whether it is below.
-pub fn panel_rect(work: Rect, edge: Edge, anchor: Rect, size: (i32, i32)) -> (Rect, bool) {
+/// the room there is, `gap` away from the strip. Also says whether it is below.
+pub fn panel_rect(
+    work: Rect,
+    edge: Edge,
+    anchor: Rect,
+    size: (i32, i32),
+    gap: i32,
+) -> (Rect, bool) {
     let (w, h) = size;
-    let (below_room, above_room) = (work.bottom - anchor.bottom, anchor.top - work.top);
+    let below_room = work.bottom - anchor.bottom - gap;
+    let above_room = anchor.top - work.top - gap;
     let below = match edge {
         Edge::Top => true,
         Edge::Bottom => false,
@@ -206,8 +220,69 @@ pub fn panel_rect(work: Rect, edge: Edge, anchor: Rect, size: (i32, i32)) -> (Re
         Edge::Right => work.right - w,
         Edge::Top | Edge::Bottom => anchor.left.min(work.right - w).max(work.left),
     };
-    let y = if below { anchor.bottom } else { anchor.top - h };
+    let y = if below {
+        anchor.bottom + gap
+    } else {
+        anchor.top - gap - h
+    };
     (Rect::new(x, y, x + w, y + h), below)
+}
+
+/// Where a menu's window goes for the pointer at `at`: `size` with a `margin` of
+/// shadow all round, the menu's corner at the pointer, opening away from
+/// whichever sides of `work` it would otherwise run past, as Windows' do.
+pub fn menu_rect(at: Point, size: (i32, i32), margin: i32, work: Rect) -> Rect {
+    let (w, h) = size;
+    let (menu_w, menu_h) = (w - 2 * margin, h - 2 * margin);
+    let left = if at.0 + menu_w > work.right {
+        at.0 - menu_w
+    } else {
+        at.0
+    };
+    let top = if at.1 + menu_h > work.bottom {
+        at.1 - menu_h
+    } else {
+        at.1
+    };
+    let left = left.min(work.right - menu_w).max(work.left);
+    let top = top.min(work.bottom - menu_h).max(work.top);
+    Rect::new(
+        left - margin,
+        top - margin,
+        left - margin + w,
+        top - margin + h,
+    )
+}
+
+/// What a shadow of `reach` covers around `shape`: all round, but for the side
+/// that lies against the screen's `edge`.
+pub fn shadow_rect(shape: Rect, reach: i32, edge: Option<Edge>) -> Rect {
+    let side = |e: Edge| if edge == Some(e) { 0 } else { reach };
+    Rect::new(
+        shape.left - side(Edge::Left),
+        shape.top - side(Edge::Top),
+        shape.right + side(Edge::Right),
+        shape.bottom + side(Edge::Bottom),
+    )
+}
+
+/// The strip's shadow, `hidden` pixels of the strip still behind the screen's
+/// edge: its window on screen, and which corner of the picture goes at its
+/// top-left. It slides out with the strip.
+pub fn shadow_viewport(edge: Edge, full: Rect, hidden: i32) -> (Rect, Point) {
+    let f = full;
+    match edge {
+        Edge::Left => (
+            Rect::new(f.left, f.top, f.right - hidden, f.bottom),
+            (hidden, 0),
+        ),
+        Edge::Right => (Rect::new(f.left + hidden, f.top, f.right, f.bottom), (0, 0)),
+        Edge::Top => (
+            Rect::new(f.left, f.top, f.right, f.bottom - hidden),
+            (0, hidden),
+        ),
+        Edge::Bottom => (Rect::new(f.left, f.top + hidden, f.right, f.bottom), (0, 0)),
+    }
 }
 
 /// Where the open panel is on screen: against `edge` of `work`, `offset`
@@ -356,12 +431,12 @@ mod tests {
     #[test]
     fn the_layout_scales_and_slots_fit_beside_the_grip() {
         let l = layout(96);
-        assert_eq!(l.bar, (379, 42));
-        assert_eq!((l.depth(Edge::Top), l.length(Edge::Top)), (50, 379));
-        assert_eq!((l.depth(Edge::Left), l.length(Edge::Left)), (387, 42));
+        assert_eq!(l.bar, (375, 40));
+        assert_eq!((l.depth(Edge::Top), l.length(Edge::Top)), (48, 375));
+        assert_eq!((l.depth(Edge::Left), l.length(Edge::Left)), (383, 40));
         let big = layout(192);
-        assert_eq!(big.bar, (758, 84));
-        assert_eq!(big.depth(Edge::Top), 100);
+        assert_eq!(big.bar, (750, 80));
+        assert_eq!(big.depth(Edge::Top), 96);
         for edge in Edge::ALL {
             let (w, h) = l.size(edge);
             let whole = Rect::new(0, 0, w, h);
@@ -374,7 +449,7 @@ mod tests {
             for slot in Slot::ALL {
                 let r = l.slot_rect(edge, slot);
                 assert_eq!(r.intersect(bar), r, "{edge:?} {slot:?}");
-                assert!(r.left >= left + l.pad, "{edge:?} {slot:?}");
+                assert!(r.left >= left + l.space, "{edge:?} {slot:?}");
                 assert_eq!(r.height(), l.button);
                 left = r.right;
             }
@@ -383,7 +458,6 @@ mod tests {
             assert!(d.left >= l.slot_rect(edge, Slot::Delay).right);
             assert!(d.right <= l.slot_rect(edge, Slot::Play).left);
         }
-        assert!(!Slot::Time.clickable() && Slot::Project.clickable());
     }
 
     #[test]
@@ -444,7 +518,7 @@ mod tests {
         for edge in Edge::ALL {
             for offset in [0, 500, 1000] {
                 let a = anchor(work, edge, offset, &l);
-                let (p, below) = panel_rect(work, edge, a, size);
+                let (p, below) = panel_rect(work, edge, a, size, 0);
                 assert_eq!(p.intersect(work), p, "{edge:?} {offset}");
                 assert!(p.intersect(a).is_empty(), "{edge:?} {offset} overlaps");
                 // Touching the strip.
@@ -464,14 +538,75 @@ mod tests {
         }
         // Low on a side edge: above the strip.
         let a = anchor(work, Edge::Left, 1000, &l);
-        assert!(!panel_rect(work, Edge::Left, a, size).1);
+        assert!(!panel_rect(work, Edge::Left, a, size, 0).1);
         // Too tall for the room: cut to it.
         let a = anchor(work, Edge::Top, 500, &l);
-        let (p, _) = panel_rect(work, Edge::Top, a, (l.panel, 5000));
+        let (p, _) = panel_rect(work, Edge::Top, a, (l.panel, 5000), 0);
         assert_eq!(p.bottom, work.bottom);
         // At the right end of the top edge: pulled in to stay on screen.
         let a = anchor(work, Edge::Top, 1000, &l);
-        assert_eq!(panel_rect(work, Edge::Top, a, size).0.right, work.right);
+        assert_eq!(panel_rect(work, Edge::Top, a, size, 0).0.right, work.right);
+    }
+
+    #[test]
+    fn the_gap_keeps_the_panel_off_the_strip_and_inside_the_work_area() {
+        let work = Rect::new(0, 0, 1920, 1040);
+        let l = layout(96);
+        let size = (l.panel, 5000);
+        let a = anchor(work, Edge::Top, 500, &l);
+        let (p, below) = panel_rect(work, Edge::Top, a, (l.panel, 300), 6);
+        assert!(below);
+        assert_eq!(p.top, a.bottom + 6);
+        // Cut to the room there is, the gap counted.
+        let (p, _) = panel_rect(work, Edge::Top, a, size, 6);
+        assert_eq!(p.bottom, work.bottom);
+        let a = anchor(work, Edge::Bottom, 500, &l);
+        let (p, below) = panel_rect(work, Edge::Bottom, a, (l.panel, 300), 6);
+        assert!(!below);
+        assert_eq!(p.bottom, a.top - 6);
+    }
+
+    #[test]
+    fn a_shadow_stays_off_the_screens_edge_and_slides_with_the_strip() {
+        let shape = Rect::new(100, 0, 475, 48);
+        let full = shadow_rect(shape, 22, Some(Edge::Top));
+        assert_eq!(full, Rect::new(78, 0, 497, 70));
+        assert_eq!(
+            shadow_rect(shape, 22, None),
+            Rect::new(78, -22, 497, 70),
+            "a panel floats"
+        );
+        // Out: the whole of it. On the way: what's past the edge is cut off,
+        // from the picture's side that's nearest the edge.
+        assert_eq!(shadow_viewport(Edge::Top, full, 0), (full, (0, 0)));
+        let (rect, from) = shadow_viewport(Edge::Top, full, 30);
+        assert_eq!((rect.top, rect.bottom), (0, 40));
+        assert_eq!(from, (0, 30));
+        let (rect, from) = shadow_viewport(Edge::Bottom, full, 30);
+        assert_eq!((rect.top, rect.bottom), (30, 70));
+        assert_eq!(from, (0, 0));
+        let (rect, from) = shadow_viewport(Edge::Left, full, 30);
+        assert_eq!((rect.left, rect.right), (78, 467));
+        assert_eq!(from, (30, 0));
+        let (rect, from) = shadow_viewport(Edge::Right, full, 30);
+        assert_eq!((rect.left, rect.right), (108, 497));
+        assert_eq!(from, (0, 0));
+    }
+
+    #[test]
+    fn a_menu_opens_at_the_pointer_and_away_from_the_screens_edges() {
+        let work = Rect::new(0, 0, 1920, 1040);
+        let (size, margin) = ((248, 348), 24);
+        // Its own corner at the pointer: the window starts a shadow's width before.
+        let r = menu_rect((500, 300), size, margin, work);
+        assert_eq!((r.left, r.top), (476, 276));
+        assert_eq!((r.width(), r.height()), size);
+        // By the tray: up and to the left.
+        let r = menu_rect((1900, 1030), size, margin, work);
+        assert_eq!((r.right - margin, r.bottom - margin), (1900, 1030));
+        // Too big to fit either way: it stays on the screen.
+        let r = menu_rect((100, 100), (248, 1500), margin, work);
+        assert_eq!(r.top + margin, 0);
     }
 
     #[test]

@@ -3,10 +3,12 @@
 //! whir.
 //!
 //! This runs as its own process (`whir.exe --dock` and friends), separate
-//! from the main window: plain Win32 and GDI, no renderer, so it can sit on
-//! the desktop all day for a few megabytes.
+//! from the main window: Win32 windows, and egui drawn on the CPU (`stage`) with
+//! whir's theme and controls, so it can look as the window does and still sit on
+//! the desktop all day for a few megabytes, with nothing of the GPU's loaded.
 
 mod away;
+mod bar;
 mod clock;
 mod config;
 mod dock;
@@ -14,14 +16,15 @@ mod geom;
 mod grab;
 mod handoff;
 mod instance;
+mod menu;
 mod monitors;
 mod overlay;
 mod paint;
 mod panel;
 mod place;
+mod stage;
 mod store;
 mod targets;
-mod text;
 mod tray;
 mod veil;
 

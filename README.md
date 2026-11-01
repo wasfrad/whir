@@ -60,7 +60,7 @@ Design:
 | 20 MB / 300k-row CSV | ~90 ms | ~150 ms | ~67 MB |
 | 66-page PDF | ~90 ms | ~150 ms | ~107 MB |
 | same CSV, `--warp` | — | ~72 ms | ~34 MB |
-| the capture dock (`--dock`), idle | — | — | ~4.5 MB (a frozen screen's worth more while selecting) |
+| the capture dock (`--dock`), idle | — | — | ~4 MB (a frozen screen's worth more while selecting) |
 
 On this machine the critical path is the GPU driver (`D3D11CreateDevice` ≈ 135 ms),
 which runs in parallel with everything else. If the device isn't ready ~40 ms after the
@@ -77,8 +77,8 @@ into cells: an 870 MB file takes about 0.3 s.
 crates/
   whir/           exe: startup ordering, single instance, tabs + title bar, menu bar, shortcuts,
                   save/close prompts, the bottom drawer, Settings, the Find in all tabs panel, --register
-  whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer
-                  (its text through DirectWrite, in software); the tray icon, the stopwatch,
+  whir-capture/   the capture dock (`--dock`): its own process, Win32 windows and egui with its
+                  triangles filled on the CPU, no renderer; the tray icon, the stopwatch,
                   the project picker and today's times, noticing time away;
                   screen grab, the selection overlay, PNG into the screenshots folder
   whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
@@ -133,5 +133,14 @@ images keep Segoe UI whatever the interface uses, because their boxes are saved 
 CJK and emoji fallbacks load on first use. `crates/whir-core/src/icons.rs` is the one table
 of icons, for the window and the dock; `kit.rs` has the controls egui doesn't draw the way a
 Windows tool should.
+
+The dock looks the same way because it draws the same way: the same theme, controls and icons
+in egui. It is always running, though, and a Direct3D device would put 50 MB of graphics driver
+in it, so `crates/whir-capture/src/stage.rs` fills egui's triangles on the CPU instead, with
+the sums of the window's shader (within 1/255 of the GPU on every pixel), into the bitmap of a
+layered window. It draws only when something happens, and skips a frame that would come out the
+same. Its shadows have windows of their own that clicks pass through: a layered window catches
+the mouse wherever it isn't fully clear, so a shadow on the dock's own would be a dead strip
+around it.
 
 What's not there yet is listed at the end of the guide.

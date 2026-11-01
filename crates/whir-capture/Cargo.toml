@@ -7,11 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# No egui and no whir-gfx here: the dock runs as its own small process
-# (`whir.exe --dock`) and must never load the renderer.
+# egui, but no whir-gfx: the dock runs as its own small process (`whir.exe --dock`)
+# and must never load the renderer. It fills egui's triangles itself (`stage.rs`).
 [dependencies]
+egui.workspace = true
 whir-core.workspace = true
 whir-image.workspace = true
 whir-platform.workspace = true
 windows.workspace = true
-windows-numerics.workspace = true

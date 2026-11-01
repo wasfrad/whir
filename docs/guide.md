@@ -156,6 +156,7 @@ whir is done from that icon.
 - **Drag the dock**: move it to any edge of any monitor (remembered)
 - **Right-click the dock**: capture · delay · open whir · open the screenshots folder · hide the dock
 - **Click the tray icon · right-click it**: open whir · capture, show/hide the dock, start with Windows on/off, **Quit whir**
+- **In these menus**: the arrow keys and Enter pick, Esc or a click elsewhere closes
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots`, immediately added to the
 drawer's **Images** tab, and opens in whir with the highlighter in hand. You don't need

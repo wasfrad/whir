@@ -1,21 +1,19 @@
 //! The dock's panel, under its bar: the todo card, the "were you away?"
 //! question, "switch projects?", and either today's times (the ⌄) or the
-//! project picker (the project on the bar). Rows of fixed heights, so the
-//! layout is plain arithmetic and the same for drawing and for clicks; drawn
-//! in software like the bar.
+//! project picker (the project on the bar). Rows of fixed heights in points, so
+//! the panel's size is known before anything is drawn, and its window placed
+//! to fit; egui draws them, with the window's buttons and fades.
 
-use whir_core::theme::{Color32, Theme};
+use egui::{
+    Align2, Button, Color32, CornerRadius, FontId, Id, Rect as Area, ScrollArea, Sense, Stroke,
+    StrokeKind, Ui, UiBuilder, pos2, vec2,
+};
+use whir_core::icons::{self, Icon};
+use whir_core::theme::Theme;
+use whir_core::{kit, toolbar};
 
-use whir_core::icons::Icon;
-
-use crate::geom::{Point, Rect};
-use crate::paint::{Canvas, Surface};
-use crate::text::{self, Align, Font, Text};
-
-const FLAG: char = Icon::Flag.glyph();
-const CHECK: char = Icon::Check.glyph();
-const ADD: char = Icon::Plus.glyph();
-const CLOCK: char = Icon::Stopwatch.glyph();
+use crate::bar::{self, regular, semibold};
+use crate::geom::Rect;
 
 /// What a click on part of the panel does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +117,6 @@ enum Tone {
     Dim,
     Accent,
     Flag,
-    Project,
 }
 
 /// A line: a dot or an icon, text, and more text on the right.
@@ -128,7 +125,7 @@ struct Line {
     /// A place for a dot (keeping names in line under a heading), and
     /// whether there is one in it.
     dot: Option<bool>,
-    icon: Option<(char, Tone)>,
+    icon: Option<(Icon, Tone)>,
     text: String,
     tone: Tone,
     bold: bool,
@@ -151,7 +148,7 @@ enum Look {
         label: String,
         primary: bool,
     },
-    Icon(char, Tone),
+    Tick,
     Rule,
 }
 
@@ -162,15 +159,12 @@ pub struct Item {
     look: Look,
 }
 
-/// Sizes at a display scale (1.0 = 96 dpi).
-#[derive(Clone, Copy)]
-struct Px(f32);
-
-impl Px {
-    fn of(self, v: f32) -> i32 {
-        (v * self.0).round() as i32
-    }
-}
+/// Rows and what's around them, in points.
+const PAD: i32 = 8;
+const LINE: i32 = 30;
+const SMALL: i32 = 24;
+const HEADING: i32 = 24;
+const RULE: i32 = 9;
 
 fn row(text: impl Into<String>, tone: Tone) -> Line {
     Line {
@@ -184,11 +178,9 @@ fn row(text: impl Into<String>, tone: Tone) -> Line {
     }
 }
 
-/// The panel's rows for `model`, `width` pixels wide, at scale `s`.
-pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
-    let p = Px(s);
-    let (pad, line, small, heading, rule) =
-        (p.of(8.0), p.of(30.0), p.of(24.0), p.of(24.0), p.of(9.0));
+/// The panel's rows for `model`, `width` points wide.
+pub fn layout(model: &Model, width: i32) -> Vec<Item> {
+    let (pad, line, small, heading, rule) = (PAD, LINE, SMALL, HEADING, RULE);
     let (left, right) = (pad, width - pad);
     let mut items: Vec<Item> = Vec::new();
     let mut y = pad;
@@ -212,17 +204,13 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
         push(full(y, heading), Look::Heading("Todo".into()), None);
         y += heading;
         for (i, title) in model.todos.iter().enumerate() {
-            let text = Rect::new(left, y, right - line - p.of(2.0), y + line);
+            let text = Rect::new(left, y, right - line - 2, y + line);
             let look = Look::Row(Line {
-                icon: Some((FLAG, Tone::Flag)),
+                icon: Some((Icon::Flag, Tone::Flag)),
                 ..row(title.clone(), Tone::Normal)
             });
             push(text, look, Some(Hit::Todo(i)));
-            push(
-                square(y, line),
-                Look::Icon(CHECK, Tone::Dim),
-                Some(Hit::TodoDone(i)),
-            );
+            push(square(y, line), Look::Tick, Some(Hit::TodoDone(i)));
             y += line;
         }
         if model.more_todos > 0 {
@@ -236,7 +224,7 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
     let pair = |push: &mut dyn FnMut(Rect, Look, Option<Hit>), y: i32, a, b| {
         let (a, ha, primary): (&str, Hit, bool) = a;
         let (b, hb): (&str, Hit) = b;
-        let gap = p.of(6.0);
+        let gap = 6;
         let half = (right - left - gap) / 2;
         push(
             Rect::new(left, y, left + half, y + line),
@@ -259,11 +247,11 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
     if let Some(away) = &model.away {
         section(&mut push, &mut y);
         let look = Look::Row(Line {
-            icon: Some((CLOCK, Tone::Accent)),
+            icon: Some((Icon::Stopwatch, Tone::Accent)),
             ..row(away.clone(), Tone::Normal)
         });
         push(full(y, line), look, None);
-        y += line + p.of(2.0);
+        y += line + 2;
         pair(
             &mut push,
             y,
@@ -287,7 +275,7 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
             ..row(format!("{} is running", c.from_label), Tone::Dim)
         });
         push(full(y, small), look, None);
-        y += small + p.of(4.0);
+        y += small + 4;
         pair(
             &mut push,
             y,
@@ -369,7 +357,7 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
                     "Customers & projects…"
                 };
                 let look = Look::Row(Line {
-                    icon: Some((ADD, Tone::Accent)),
+                    icon: Some((Icon::Plus, Tone::Accent)),
                     ..row(label, Tone::Normal)
                 });
                 push(full(y, line), look, Some(Hit::Projects));
@@ -384,139 +372,110 @@ pub fn layout(model: &Model, width: i32, s: f32) -> Vec<Item> {
 
 const UNAVAILABLE: &str = "The Documents folder isn't available.";
 
-/// How tall the panel is with these rows.
-pub fn height(items: &[Item], s: f32) -> i32 {
+/// How tall the panel is with these rows, in points.
+pub fn height(items: &[Item]) -> i32 {
     items
         .iter()
         .map(|i| i.rect.bottom)
         .max()
-        .map_or(0, |b| b + Px(s).of(8.0))
+        .map_or(0, |b| b + PAD)
 }
 
-/// The row under `p` (panel pixels, scrolled by `scroll`) that does something.
-pub fn hit_at(items: &[Item], p: Point, scroll: i32) -> Option<usize> {
-    let p = (p.0, p.1 + scroll);
-    items
-        .iter()
-        .position(|i| i.hit.is_some() && i.rect.contains(p))
-}
-
-pub fn rgb(c: Color32) -> [u8; 3] {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
-    [r, g, b]
-}
-
-fn alpha(c: Color32) -> f32 {
-    c.to_srgba_unmultiplied()[3] as f32 / 255.0
-}
-
-/// Draw the panel: `size` pixels, its content scrolled up by `scroll`,
-/// rounded at the corners in `radii` (TL, TR, BR, BL).
-pub fn draw(
-    items: &[Item],
-    size: (i32, i32),
-    scroll: i32,
-    hover: Option<usize>,
-    radii: [f32; 4],
-    theme: &Theme,
-    s: f32,
-) -> Option<Surface> {
-    let mut surface = Surface::new(size.0, size.1)?;
-    let (w, h) = size;
-    let clip = Rect::new(1, 1, w - 1, h - 1);
-    let mut texts = Vec::new();
-    {
-        let mut c = surface.canvas();
-        c.round_rect(Rect::new(0, 0, w, h), radii, rgb(theme.drawer_border), 1.0);
-        c.round_rect(
-            clip,
-            radii.map(|r| (r - 1.0).max(0.0)),
-            rgb(theme.drawer_bg),
-            1.0,
-        );
-        for (i, item) in items.iter().enumerate() {
-            let rect = item.rect.translate(0, -scroll);
-            if rect.intersect(clip).is_empty() {
-                continue;
-            }
-            let hovered = hover == Some(i);
-            draw_item(&mut c, &mut texts, item, rect, hovered, theme, s, clip);
-        }
-    }
-    surface.draw_text(&texts, Some(clip));
-    Some(surface)
-}
-
-fn tone(theme: &Theme, t: Tone) -> [u8; 3] {
-    rgb(match t {
+fn tone(theme: &Theme, t: Tone) -> Color32 {
+    match t {
         Tone::Normal => theme.text,
         Tone::Dim => theme.text_dim,
         Tone::Accent => theme.accent,
         Tone::Flag => theme.note_glyph,
-        Tone::Project => theme.project,
-    })
+    }
 }
 
-/// Puts a line of text between two x positions: the text, its font, colour
-/// and alignment.
-type PutLine<'a> = dyn FnMut(i32, i32, &str, Font, [u8; 3], Align) + 'a;
-
-#[allow(clippy::too_many_arguments)]
-fn draw_item(
-    c: &mut Canvas,
-    texts: &mut Vec<Text>,
-    item: &Item,
-    r: Rect,
-    hovered: bool,
-    theme: &Theme,
-    s: f32,
-    clip: Rect,
-) {
-    let p = Px(s);
-    let (body, small) = (13.5 * s, 12.5 * s);
-    let middle = (r.top + r.bottom) as f32 / 2.0;
-    let radius = 5.0 * s;
-    if hovered && !matches!(item.look, Look::Button { .. }) {
-        c.round_rect(
-            r.intersect(clip),
-            [radius; 4],
-            rgb(theme.drawer_item_hover),
-            1.0,
-        );
+/// Text from `x`, in the middle of `row`, cut short at `end`.
+fn words(ui: &Ui, row: Area, x: f32, end: f32, text: &str, font: FontId, color: Color32) {
+    if end > x && !text.is_empty() {
+        let galley = kit::one_line(ui.painter(), text, font, end - x);
+        let y = row.center().y - galley.size().y / 2.0;
+        ui.painter().galley(pos2(x, y), galley, color);
     }
-    // A line of text between `x0` and `x1`.
-    let mut line = |x0: i32, x1: i32, s: &str, font: Font, color, align| {
-        if x1 > x0 && !s.is_empty() {
-            texts.push(Text::new(s, font, color, Rect::new(x0, r.top, x1, r.bottom)).align(align));
+}
+
+/// The running one's dot, in the place kept for it either way so that names
+/// line up.
+fn dot(ui: &Ui, row: Area, x: f32, theme: &Theme) {
+    let at = pos2(x + 3.5, row.center().y);
+    ui.painter().circle_filled(at, 3.5, theme.accent);
+}
+
+/// Draw the panel. Returns what was clicked. `from_top`: start at its top again.
+pub fn show(
+    ui: &mut Ui,
+    items: &[Item],
+    corners: CornerRadius,
+    from_top: bool,
+    theme: &Theme,
+) -> Option<Hit> {
+    let whole = ui.max_rect();
+    let (fill, line) = bar::sheet(theme);
+    ui.painter()
+        .rect(whole, corners, fill, line, StrokeKind::Inside);
+    let inside = whole.shrink(1.0);
+    let tall = height(items) as f32;
+    let mut clicked = None;
+    ui.scope_builder(UiBuilder::new().max_rect(inside), |ui| {
+        let mut scroll = ScrollArea::vertical().auto_shrink(false);
+        if from_top {
+            scroll = scroll.vertical_scroll_offset(0.0);
         }
-    };
-    let icon =
-        |c: &mut Canvas, line: &mut PutLine, x: i32, glyph: char, px: f32, color: [u8; 3]| {
-            let size = p.of(24.0);
-            if text::has_icons() {
-                line(
-                    x,
-                    x + size,
-                    &glyph.to_string(),
-                    Font::icons(px),
-                    color,
-                    Align::Center,
-                );
-            } else {
-                c.dot(((x + size / 2) as f32, middle), 3.0 * s, color);
+        scroll.show(ui, |ui| {
+            // Or the space after the rows counts as more to scroll to.
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let size = vec2(inside.width(), tall - 2.0);
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let origin = rect.min - vec2(1.0, 1.0);
+            for (i, item) in items.iter().enumerate() {
+                let r = bar::area(item.rect, 1.0).translate(origin.to_vec2());
+                if ui.is_rect_visible(r) && draw_item(ui, i, item, r, theme) {
+                    clicked = item.hit;
+                }
             }
-        };
+        });
+    });
+    clicked
+}
+
+/// A row that can be clicked, with the toolbar's fade behind it.
+fn clickable(ui: &mut Ui, i: usize, r: Area, theme: &Theme) -> egui::Response {
+    let response = ui.interact(r, Id::new(("whir.dock.panel", i)), Sense::CLICK);
+    if let Some(fill) = toolbar::fill_of(ui, &response, false, theme) {
+        let radius = theme.metrics.control_radius;
+        ui.painter().rect_filled(r, radius, fill);
+    }
+    response
+}
+
+/// Draw a row. True if it was clicked.
+fn draw_item(ui: &mut Ui, i: usize, item: &Item, r: Area, theme: &Theme) -> bool {
+    let m = theme.metrics;
+    let body = m.body_text_size;
+    if let Look::Button { label, primary } = &item.look {
+        return ui
+            .scope(|ui| {
+                if *primary {
+                    kit::as_primary(ui, theme);
+                }
+                ui.put(r, Button::new(label.as_str())).clicked()
+            })
+            .inner;
+    }
+    let response = item.hit.map(|_| clickable(ui, i, r, theme));
     match &item.look {
-        Look::Heading(name) => line(
-            r.left + p.of(6.0),
-            r.right - p.of(6.0),
-            name,
-            Font::ui(12.0 * s).semibold(),
-            tone(theme, Tone::Dim),
-            Align::Left,
-        ),
+        Look::Heading(name) => {
+            let font = semibold(m.small_text_size);
+            let (x, end) = (r.left() + 6.0, r.right() - 6.0);
+            words(ui, r, x, end, name, font, theme.text_dim);
+        }
         Look::Row(Line {
-            dot,
+            dot: place,
             icon: glyph,
             text: label,
             tone: t,
@@ -524,135 +483,85 @@ fn draw_item(
             right,
             right_tone,
         }) => {
-            let mut x = r.left + p.of(8.0);
-            if let Some(on) = dot {
+            let mut x = r.left() + 8.0;
+            if let Some(on) = place {
                 if *on {
-                    c.dot(
-                        (x as f32 + 3.5 * s, middle),
-                        3.5 * s,
-                        tone(theme, Tone::Accent),
-                    );
+                    dot(ui, r, x, theme);
                 }
-                x += p.of(14.0);
+                x += 14.0;
             }
             if let Some((g, gt)) = glyph {
-                icon(c, &mut line, x - p.of(4.0), *g, 15.0 * s, tone(theme, *gt));
-                x += p.of(22.0);
+                let at = pos2(x + 7.0, r.center().y);
+                icons::paint(ui.painter(), at, *g, m.icon_size, tone(theme, *gt));
+                x += 24.0;
             }
-            let end = r.right - p.of(8.0);
-            let px = if *t == Tone::Dim && !*bold {
-                small
+            let end = r.right() - 8.0;
+            let font = if *bold { semibold(body) } else { regular(body) };
+            let at = pos2(end, r.center().y);
+            let color = tone(theme, *right_tone);
+            let taken = if right.is_empty() {
+                0.0
             } else {
-                body
+                let align = Align2::RIGHT_CENTER;
+                let place = kit::tabular(ui.painter(), at, align, right, &font, color);
+                place.width() + 10.0
             };
-            let mut font = Font::ui(px);
-            if *bold {
-                font = font.semibold();
-            }
-            let right_w = match text::measure(right, font.tabular()) {
-                Some((w, _)) if !right.is_empty() => {
-                    line(
-                        end - w - 2,
-                        end,
-                        right,
-                        font.tabular(),
-                        tone(theme, *right_tone),
-                        Align::Right,
-                    );
-                    w + p.of(10.0)
-                }
-                _ => 0,
-            };
-            line(x, end - right_w, label, font, tone(theme, *t), Align::Left);
+            words(ui, r, x, end - taken, label, font, tone(theme, *t));
         }
         Look::Day {
-            dot,
+            dot: running,
             customer,
             project,
             time,
         } => {
-            let x = r.left + p.of(8.0);
-            if *dot {
-                c.dot(
-                    (x as f32 + 3.5 * s, middle),
-                    3.5 * s,
-                    tone(theme, Tone::Accent),
-                );
+            let x = r.left() + 8.0;
+            if *running {
+                dot(ui, r, x, theme);
             }
-            // The dot's place is kept either way: the names line up.
-            let x = x + p.of(14.0);
-            let end = r.right - p.of(8.0);
-            let clock = Font::ui(body).semibold().tabular();
-            let time_w = text::measure("00:00:00", clock).map_or(p.of(60.0), |(w, _)| w);
-            line(
-                end - time_w,
-                end,
-                time,
-                clock,
-                tone(theme, Tone::Accent),
-                Align::Right,
-            );
-            let names = end - time_w - p.of(10.0) - x;
-            let split = x + names * 2 / 5;
-            line(
-                x,
-                split - p.of(6.0),
-                customer,
-                Font::ui(body).semibold(),
-                tone(theme, Tone::Normal),
-                Align::Left,
-            );
-            line(
+            let x = x + 14.0;
+            let end = r.right() - 8.0;
+            let clock = semibold(body);
+            let at = pos2(end, r.center().y);
+            let width = kit::tabular_width(ui.painter(), "00:00:00", &clock);
+            let align = Align2::RIGHT_CENTER;
+            kit::tabular(ui.painter(), at, align, time, &clock, theme.accent);
+            let names = end - width - 10.0 - x;
+            let split = x + names * 0.4;
+            words(ui, r, x, split - 6.0, customer, clock, theme.text);
+            words(
+                ui,
+                r,
                 split,
                 x + names,
                 project,
-                Font::ui(body),
-                tone(theme, Tone::Project),
-                Align::Left,
+                regular(body),
+                theme.project,
             );
         }
-        Look::Button { label, primary } => {
-            let (fill, opacity, color) = if *primary {
-                let o = if hovered { 0.85 } else { 1.0 };
-                (theme.accent, o, [255, 255, 255])
+        Look::Tick => {
+            let color = if response.as_ref().is_some_and(|h| h.hovered()) {
+                theme.text
             } else {
-                let f = if hovered {
-                    theme.drawer_item_active
-                } else {
-                    theme.drawer_item_hover
-                };
-                (f, alpha(f).max(0.6), tone(theme, Tone::Normal))
+                theme.text_dim
             };
-            c.round_rect(r.intersect(clip), [radius; 4], rgb(fill), opacity);
-            line(
-                r.left + p.of(4.0),
-                r.right - p.of(4.0),
-                label,
-                Font::ui(small).semibold(),
-                color,
-                Align::Center,
-            );
-        }
-        Look::Icon(glyph, t) => {
-            let color = if hovered { Tone::Normal } else { *t };
-            let x = (r.left + r.right) / 2 - p.of(12.0);
-            icon(c, &mut line, x, *glyph, 14.0 * s, tone(theme, color));
+            icons::paint(ui.painter(), r.center(), Icon::Check, 14.0, color);
         }
         Look::Rule => {
-            let y = middle as i32;
-            c.round_rect(
-                Rect::new(r.left + p.of(4.0), y, r.right - p.of(4.0), y + 1),
-                [0.0; 4],
-                rgb(theme.drawer_border),
-                1.0,
-            );
+            let y = ui.painter().round_to_pixel_center(r.center().y);
+            let ends = [pos2(r.left() + 4.0, y), pos2(r.right() - 4.0, y)];
+            ui.painter()
+                .line_segment(ends, Stroke::new(1.0, theme.separator));
         }
+        Look::Button { .. } => {}
     }
+    response.is_some_and(|h| h.clicked())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::stage::Stage;
 
     fn model() -> Model {
         Model {
@@ -719,7 +628,7 @@ mod tests {
     #[test]
     fn every_action_has_a_place_and_rows_dont_overlap() {
         let mut m = model();
-        let items = layout(&m, 380, 1.0);
+        let items = layout(&m, 380);
         let hits: Vec<Hit> = items.iter().filter_map(|i| i.hit).collect();
         for h in [
             Hit::Todo(0),
@@ -736,18 +645,12 @@ mod tests {
             assert!(hits.contains(&h), "{h:?} missing");
         }
         assert_tidy(&items, 380);
-        // Clicks find them, scrolled or not.
         let pick = items.iter().find(|i| i.hit == Some(Hit::Pick(9))).unwrap();
-        let p = (pick.rect.left + 5, pick.rect.top + 5);
-        let at = hit_at(&items, p, 0).unwrap();
-        assert_eq!(items[at].hit, Some(Hit::Pick(9)));
-        let at = hit_at(&items, (p.0, p.1 - 40), 40).unwrap();
-        assert_eq!(items[at].hit, Some(Hit::Pick(9)));
-        assert!(height(&items, 1.0) > pick.rect.bottom);
+        assert!(height(&items) > pick.rect.bottom);
 
         // Today: the times (only to read) and the day's total (the timesheet).
         m.view = Some(View::Today);
-        let items = layout(&m, 380, 1.0);
+        let items = layout(&m, 380);
         assert_eq!(
             items
                 .iter()
@@ -764,29 +667,83 @@ mod tests {
     fn closed_it_shows_only_what_must_be_seen() {
         let mut m = model();
         m.view = None;
-        let items = layout(&m, 380, 1.0);
+        let items = layout(&m, 380);
         assert!(!items.iter().any(|i| matches!(i.hit, Some(Hit::Pick(_)))));
         assert!(items.iter().any(|i| i.hit == Some(Hit::Keep)));
         m.todos.clear();
         m.away = None;
         m.confirm = None;
         assert!(m.is_empty());
-        assert!(layout(&m, 380, 1.0).is_empty());
+        assert!(layout(&m, 380).is_empty());
         // Nothing to pick from yet: the way to set some up.
         let empty = Model {
             view: Some(View::Picker),
             available: true,
             ..Model::default()
         };
-        let items = layout(&empty, 380, 1.0);
+        let items = layout(&empty, 380);
         assert!(items.iter().any(|i| i.hit == Some(Hit::Projects)));
     }
 
+    fn frame(stage: &mut Stage, items: &[Item], size: (i32, i32), theme: &Theme) -> Option<Hit> {
+        let corners = CornerRadius::same(8);
+        let mut clicked = None;
+        stage.run(size, |ui| {
+            clicked = show(ui, items, corners, false, theme).or(clicked);
+        });
+        clicked
+    }
+
     #[test]
-    fn it_scales_with_the_display() {
-        let small = height(&layout(&model(), 380, 1.0), 1.0);
-        let big = height(&layout(&model(), 760, 2.0), 2.0);
-        assert!((big - 2 * small).abs() <= 8, "{small} {big}");
+    fn every_row_that_does_something_answers_a_click_at_every_scale() {
+        let theme = Theme::dark();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let items = layout(&model(), 380);
+            let size = (
+                (380.0 * scale) as i32,
+                (height(&items) as f32 * scale).ceil() as i32,
+            );
+            let mut stage = Stage::new(&theme, scale);
+            frame(&mut stage, &items, size, &theme);
+            for item in items.iter().filter(|i| i.hit.is_some()) {
+                let at = (
+                    ((item.rect.left + item.rect.right) as f32 / 2.0 * scale) as i32,
+                    ((item.rect.top + item.rect.bottom) as f32 / 2.0 * scale) as i32,
+                );
+                stage.pointer_moved(at);
+                frame(&mut stage, &items, size, &theme);
+                stage.button(at, true);
+                assert_eq!(frame(&mut stage, &items, size, &theme), None);
+                stage.button(at, false);
+                let clicked = frame(&mut stage, &items, size, &theme);
+                assert_eq!(clicked, item.hit, "at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn too_tall_for_the_room_it_scrolls() {
+        let theme = Theme::dark();
+        let items = layout(&model(), 380);
+        let size = (380, 120);
+        let mut stage = Stage::new(&theme, 1.0);
+        frame(&mut stage, &items, size, &theme);
+        let last = items.iter().rfind(|i| i.hit.is_some()).unwrap();
+        assert!(last.rect.top > size.1, "it starts out of sight");
+        stage.pointer_moved((190, 60));
+        frame(&mut stage, &items, size, &theme);
+        for _ in 0..80 {
+            stage.wheel(-10.0);
+            frame(&mut stage, &items, size, &theme);
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+        let at = (190, size.1 - 18);
+        stage.pointer_moved(at);
+        frame(&mut stage, &items, size, &theme);
+        stage.button(at, true);
+        frame(&mut stage, &items, size, &theme);
+        stage.button(at, false);
+        assert_eq!(frame(&mut stage, &items, size, &theme), last.hit);
     }
 
     /// `cargo test -p whir-capture -- --ignored preview` writes the panel, in
@@ -808,23 +765,26 @@ mod tests {
                         m
                     }),
                 ] {
-                    let width = (380.0 * s) as i32;
-                    let items = layout(&m, width, s);
-                    let h = height(&items, s);
-                    let hover = items.iter().position(|i| i.hit == Some(Hit::Pick(9)));
-                    let mut surface = draw(
-                        &items,
-                        (width, h),
-                        0,
-                        hover,
-                        [0.0, 0.0, 9.0, 9.0],
-                        &theme,
-                        s,
-                    )
-                    .unwrap();
+                    let items = layout(&m, 380);
+                    let size = (
+                        (380.0 * s) as i32,
+                        (height(&items) as f32 * s).ceil() as i32,
+                    );
+                    let mut stage = Stage::new(&theme, s);
+                    frame(&mut stage, &items, size, &theme);
+                    if let Some(pick) = items.iter().find(|i| i.hit == Some(Hit::Pick(9))) {
+                        stage.pointer_moved((
+                            ((pick.rect.left + 40) as f32 * s) as i32,
+                            ((pick.rect.top + 10) as f32 * s) as i32,
+                        ));
+                        frame(&mut stage, &items, size, &theme);
+                        std::thread::sleep(std::time::Duration::from_millis(120));
+                        frame(&mut stage, &items, size, &theme);
+                        frame(&mut stage, &items, size, &theme);
+                    }
                     let path =
                         std::path::Path::new(&dir).join(format!("panel-{view}-{name}-{s}.png"));
-                    surface.save_png(&path);
+                    stage.save_png(&path);
                 }
             }
         }
@@ -832,21 +792,15 @@ mod tests {
 
     #[test]
     fn it_draws() {
-        let items = layout(&model(), 380, 1.0);
-        let h = height(&items, 1.0);
-        let mut surface = draw(
-            &items,
-            (380, h),
-            0,
-            Some(3),
-            [0.0, 0.0, 9.0, 9.0],
-            &Theme::dark(),
-            1.0,
-        )
-        .unwrap();
-        let px = surface.pixels();
+        let theme = Theme::dark();
+        let items = layout(&model(), 380);
+        let h = height(&items);
+        let mut stage = Stage::new(&theme, 1.0);
+        frame(&mut stage, &items, (380, h), &theme);
+        let surface = stage.surface().unwrap();
         // Opaque inside, and some text drawn in the text colour's brightness.
-        assert_eq!(px[(h as usize / 2) * 380 + 190] >> 24, 0xff);
-        assert!(px.iter().any(|&p| (p >> 16) & 0xff > 0xc0));
+        assert_eq!(surface.pixel(190, h / 2) >> 24, 0xff);
+        let lit = (0..h).any(|y| (0..380).any(|x| (surface.pixel(x, y) >> 16) & 0xff > 0xc0));
+        assert!(lit);
     }
 }

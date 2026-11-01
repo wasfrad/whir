@@ -115,7 +115,12 @@ pub fn tool_button(
 }
 
 /// What's behind a tool: tinted while on, a quick fade in and out on hover.
-fn fill_of(ui: &egui::Ui, response: &egui::Response, on: bool, theme: &Theme) -> Option<Color32> {
+pub fn fill_of(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    on: bool,
+    theme: &Theme,
+) -> Option<Color32> {
     let id = response.id.with("hover");
     let hover = ui
         .ctx()

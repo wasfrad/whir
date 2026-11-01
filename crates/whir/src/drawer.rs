@@ -576,7 +576,7 @@ impl Drawer {
         if !status.is_empty() {
             // The document's line, right up against the buttons.
             let width = spare.width() - 16.0;
-            let galley = elide(
+            let galley = kit::one_line(
                 painter,
                 status,
                 FontId::proportional(theme.metrics.small_text_size),
@@ -864,7 +864,7 @@ fn note_row(
     );
     let left = rect.left() + 30.0;
     whir_core::theme::note_text(&e.title);
-    let title = elide(
+    let title = kit::one_line(
         painter,
         &e.title,
         FontId::proportional(theme.metrics.body_text_size),
@@ -967,7 +967,7 @@ fn shot_card(
         label
     };
     let small = FontId::proportional(theme.metrics.small_text_size);
-    let text = elide(painter, &label, small, card.width());
+    let text = kit::one_line(painter, &label, small, card.width());
     painter.galley(
         pos2(card.left(), frame.bottom() + 4.0),
         text,
@@ -1044,26 +1044,6 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, name: &str, theme: &Theme) -> egui
     }
     icons::paint(painter, rect.center(), icon, 15.0, theme.text_dim);
     resp
-}
-
-fn elide(
-    painter: &egui::Painter,
-    text: &str,
-    font: FontId,
-    max_width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    use egui::text::{LayoutJob, TextFormat, TextWrapping};
-    let mut job = LayoutJob::single_section(
-        text.replace(['\n', '\r', '\t'], " "),
-        TextFormat::simple(font, egui::Color32::PLACEHOLDER),
-    );
-    job.wrap = TextWrapping {
-        max_width: max_width.max(10.0),
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    painter.layout_job(job)
 }
 
 #[cfg(test)]

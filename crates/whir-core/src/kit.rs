@@ -2,12 +2,16 @@
 //! tool should, so every surface draws them the same way. Stock buttons,
 //! fields and menus need nothing here: [`Theme::apply`] styles them.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use egui::{
-    Align, Align2, Atom, AtomExt as _, Button, Context, FontId, Frame, Id, LayerId, Layout, Modal,
-    ModalResponse, Order, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle,
-    TextWrapMode, Ui, Vec2, WidgetText, pos2, style::WidgetVisuals, vec2,
+    Align, Align2, Atom, AtomExt as _, Button, Color32, Context, FontId, Frame, Galley, Id,
+    LayerId, Layout, Modal, ModalResponse, Order, Painter, Pos2, Rect, Response, RichText, Sense,
+    Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, Vec2, WidgetText, pos2,
+    style::WidgetVisuals,
+    text::{LayoutJob, TextFormat, TextWrapping},
+    vec2,
 };
 
 use crate::icons::{self, Icon};
@@ -20,25 +24,85 @@ const ACTION_WIDTH: f32 = 76.0;
 /// A button that is the one thing to do here.
 pub fn primary(ui: &mut Ui, text: &str, theme: &Theme) -> Response {
     ui.scope(|ui| {
-        let w = &mut ui.visuals_mut().widgets;
-        for (state, fill) in [
-            (&mut w.inactive, theme.accent_fill),
-            (&mut w.hovered, theme.accent_fill_hover),
-            (&mut w.active, theme.accent_fill),
-        ] {
-            state.weak_bg_fill = fill;
-            state.bg_stroke = Stroke::NONE;
-            state.fg_stroke.color = theme.on_accent;
-        }
+        as_primary(ui, theme);
         action(ui, text, theme)
     })
     .inner
+}
+
+/// Buttons added to `ui` from here on are [`primary`] ones, for when they have
+/// a place to fill rather than a size of their own.
+pub fn as_primary(ui: &mut Ui, theme: &Theme) {
+    let w = &mut ui.visuals_mut().widgets;
+    for (state, fill) in [
+        (&mut w.inactive, theme.accent_fill),
+        (&mut w.hovered, theme.accent_fill_hover),
+        (&mut w.active, theme.accent_fill),
+    ] {
+        state.weak_bg_fill = fill;
+        state.bg_stroke = Stroke::NONE;
+        state.fg_stroke.color = theme.on_accent;
+    }
 }
 
 /// A button among choices (a dialog's, a banner's).
 pub fn action(ui: &mut Ui, text: &str, theme: &Theme) -> Response {
     let size = vec2(ACTION_WIDTH, theme.metrics.control_height);
     ui.add(Button::new(text).min_size(size))
+}
+
+/// A line of text cut short with "…" past `max_width`, its colour left to
+/// whoever paints it.
+pub fn one_line(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::single_section(
+        text.replace(['\n', '\r', '\t'], " "),
+        TextFormat::simple(font, Color32::PLACEHOLDER),
+    );
+    job.wrap = TextWrapping {
+        max_width: max_width.max(10.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    painter.layout_job(job)
+}
+
+/// How wide `text` comes out in [`tabular`].
+pub fn tabular_width(painter: &Painter, text: &str, font: &FontId) -> f32 {
+    let width = |c: char| {
+        let galley = painter.layout_no_wrap(c.to_string(), font.clone(), Color32::PLACEHOLDER);
+        galley.size().x
+    };
+    let digit = ('0'..='9').map(width).fold(0.0, f32::max);
+    text.chars()
+        .map(|c| if c.is_ascii_digit() { digit } else { width(c) })
+        .sum()
+}
+
+/// Figures that keep still as they change: each digit in a cell as wide as the
+/// widest, for a ticking clock (egui has no tabular figures to ask a font for).
+/// `at` is where `align` puts the text. Returns where it went.
+pub fn tabular(
+    painter: &Painter,
+    at: Pos2,
+    align: Align2,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+) -> Rect {
+    let glyph = |c: char| painter.layout_no_wrap(c.to_string(), font.clone(), color);
+    let digit = ('0'..='9').map(|c| glyph(c).size().x).fold(0.0, f32::max);
+    let size = vec2(tabular_width(painter, text, font), glyph('0').size().y);
+    let rect = align.anchor_size(at, size);
+    let mut x = rect.left();
+    for c in text.chars() {
+        let galley = glyph(c);
+        let width = galley.size().x;
+        let cell = if c.is_ascii_digit() { digit } else { width };
+        painter.galley(pos2(x + (cell - width) / 2.0, rect.top()), galley, color);
+        x += cell;
+    }
+    rect
 }
 
 /// A check box: filled with the accent colour when on, as Windows' are.
