@@ -6,7 +6,9 @@ use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 
 static OWNER: AtomicIsize = AtomicIsize::new(0);
@@ -40,11 +42,10 @@ pub fn get_text() -> Option<String> {
             if ptr.is_null() {
                 return None;
             }
-            let mut len = 0;
-            while *ptr.add(len) != 0 {
-                len += 1;
-            }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            // Whoever put this here may not have ended it with a NUL.
+            let units = std::slice::from_raw_parts(ptr, GlobalSize(hg) / 2);
+            let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+            let s = String::from_utf16_lossy(&units[..len]);
             let _ = GlobalUnlock(hg);
             Some(s.replace("\r\n", "\n"))
         })()

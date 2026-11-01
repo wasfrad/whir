@@ -764,7 +764,7 @@ impl State {
                     self.queue(|p| p.saves.push((token, path)));
                 }
                 WindowCommand::Recycle(path) => {
-                    let result = crate::shell::recycle(hwnd, &path);
+                    let result = whir_core::file::recycle(Some(hwnd), &path);
                     self.queue(|p| p.recycled.push((path, result)));
                 }
                 WindowCommand::Reveal(path) => crate::shell::reveal(&path),

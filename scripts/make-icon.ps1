@@ -1,46 +1,63 @@
-# Generates crates/whir/whir.ico (PNG-compressed entries, 16-256 px).
-# Run once; the .ico is committed. Requires Windows PowerShell / .NET System.Drawing.
+# Generates crates/whir/whir.ico (PNG-compressed entries, 16-256 px) from the art beside it:
+# whir.svg down to 32 px, and whir-small.svg, drawn for it, at 24 px and under. Run it after
+# changing either; the .ico is committed. Edge draws the SVGs, which every Windows PC has.
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path $PSScriptRoot -Parent
-$out = Join-Path $root "crates\whir\whir.ico"
+$art = Join-Path $root "crates\whir"
+$out = Join-Path $art "whir.ico"
 $sizes = @(16, 20, 24, 32, 40, 48, 64, 128, 256)
 
-function New-IconPng([int]$s) {
-    $bmp = New-Object System.Drawing.Bitmap $s, $s, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $pad = [math]::Max(1, [math]::Round($s * 0.04))
-    $r = [math]::Round($s * 0.22)
-    $rect = New-Object System.Drawing.RectangleF $pad, $pad, ($s - 2 * $pad), ($s - 2 * $pad)
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $d = 2 * $r
-    $path.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
-    $path.AddArc($rect.Right - $d, $rect.Y, $d, $d, 270, 90)
-    $path.AddArc($rect.Right - $d, $rect.Bottom - $d, $d, $d, 0, 90)
-    $path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
-    $path.CloseFigure()
-    $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rect, ([System.Drawing.Color]::FromArgb(255, 88, 150, 255)), ([System.Drawing.Color]::FromArgb(255, 37, 99, 235)), 60
-    $g.FillPath($brush, $path)
-    # Three stacked "pages" — images, PDFs, tables — as a stylized glyph.
-    $w = $s * 0.46; $h = $s * 0.08; $x = ($s - $w) / 2
-    $white = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 255, 255, 255))
-    $soft = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(200, 255, 255, 255))
-    $ys = @(0.30, 0.46, 0.62)
-    for ($i = 0; $i -lt 3; $i++) {
-        $bw = $w * @(1.0, 0.82, 0.64)[$i]
-        $g.FillRectangle(($(if ($i -eq 0) { $white } else { $soft })), [float]$x, [float]($s * $ys[$i]), [float]$bw, [float][math]::Max(1, $h))
+$edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $edge) { throw "Microsoft Edge not found: it draws the SVGs" }
+
+$uri = {
+    param($name)
+    $bytes = [System.IO.File]::ReadAllBytes((Join-Path $art $name))
+    "data:image/svg+xml;base64," + [Convert]::ToBase64String($bytes)
+}
+$large = & $uri "whir.svg"
+$small = & $uri "whir-small.svg"
+
+# Every size on one transparent strip, drawn at its exact pixel size, then cut apart.
+$gap = 8
+$x = 0
+$places = @{}
+$imgs = foreach ($s in $sizes) {
+    $places[$s] = $x
+    $src = if ($s -le 24) { $small } else { $large }
+    "<img src='$src' style='position:absolute;left:${x}px;top:0;width:${s}px;height:${s}px'>"
+    $x += $s + $gap
+}
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("whir-icon-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Force $tmp | Out-Null
+try {
+    $html = Join-Path $tmp "strip.html"
+    $png = Join-Path $tmp "strip.png"
+    Set-Content -Path $html -Encoding utf8 -Value "<!doctype html><style>html,body{margin:0;background:transparent}</style>$($imgs -join '')"
+    $flags = @("--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
+        "--default-background-color=00000000", "--user-data-dir=`"$tmp\profile`"",
+        "--window-size=$($x + $gap),320", "--screenshot=`"$png`"", "`"file:///$($html -replace '\\', '/')`"")
+    Start-Process -FilePath $edge -ArgumentList $flags -Wait -WindowStyle Hidden
+    if (-not (Test-Path $png)) { throw "Edge didn't draw the icon" }
+
+    $strip = [System.Drawing.Bitmap]::FromFile($png)
+    if ($strip.GetPixel($places[256] + 255, 255).A -ne 0) { throw "The strip isn't transparent" }
+    $pngs = foreach ($s in $sizes) {
+        $rect = New-Object System.Drawing.Rectangle $places[$s], 0, $s, $s
+        $bmp = $strip.Clone($rect, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $ms = New-Object System.IO.MemoryStream
+        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        , $ms.ToArray()
     }
-    $g.Dispose()
-    $ms = New-Object System.IO.MemoryStream
-    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    $bmp.Dispose()
-    return , $ms.ToArray()
+    $strip.Dispose()
+} finally {
+    Start-Sleep -Milliseconds 300
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$pngs = @(); foreach ($s in $sizes) { $pngs += , (New-IconPng $s) }
 $fs = [System.IO.File]::Create($out)
 $bw = New-Object System.IO.BinaryWriter $fs
 $bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]$sizes.Count)

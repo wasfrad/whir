@@ -12,22 +12,31 @@ and opens each one ready to highlight and label.
 
 ## Using it
 
+Download the zip from [Releases](../../releases), unzip it anywhere you can write, and run
+`whir.exe`. To have double-clicked files open in it, run `whir.exe --register` once, then
+**Open with → Choose another app → whir → Always** for each file type.
+
+Two things to know before you run it:
+- whir isn't code-signed, so Windows SmartScreen may stop it the first time: **More info →
+  Run anyway**.
+- The capture dock keeps running after the window closes. It has a tray icon, and **Quit
+  whir** there closes it. whir only starts with Windows if you turn that on.
+
 **[docs/guide.md](docs/guide.md)** is the user guide: setting it up on a work PC, every
 key and mouse action, the capture dock and time tracking, where things are kept, and the
 command line. `scripts\dist.ps1` copies it into the portable folder as `README.md`, so it
 travels with the app (once registered, it opens in whir itself).
 
-In short: copy `dist\whir\` anywhere you can write, run `whir.exe --register` once, then
-**Open with → Choose another app → whir → Always** for each file type.
-
 ## Building
 
-Requirements: Rust (MSVC toolchain), Visual Studio Build Tools with the Windows SDK.
+Requirements: Rust 1.95 or newer (MSVC toolchain), Visual Studio Build Tools with the
+Windows SDK.
 
 ```powershell
 scripts\fetch-pdfium.ps1   # pinned, SHA-256 verified PDFium build -> vendor\pdfium
 cargo test --workspace
 scripts\dist.ps1           # release build -> dist\whir\{whir.exe, pdfium.dll, README.md, licenses}
+                           #                 and the zip for a release, dist\whir-<version>-win-x64.zip
 ```
 
 `cargo run -p whir -- <files>` works for development. Debug builds find `pdfium.dll` in `vendor\`.
@@ -35,6 +44,8 @@ scripts\dist.ps1           # release build -> dist\whir\{whir.exe, pdfium.dll, R
 Diagnostics:
 - `WHIR_TRACE=1` appends a startup timeline (ms since process creation) to
   `%LOCALAPPDATA%\whir\trace.log`.
+- A panic is written to `%LOCALAPPDATA%\whir\crash.log`: a release build has no console and
+  aborts, so that's all it leaves.
 - `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
 - `WHIR_NOTES_DIR=<folder>` keeps notes somewhere other than `Documents\whir` (testing).
 - `WHIR_CAPTURES_DIR=<folder>` does the same for screenshots.
@@ -155,3 +166,8 @@ whatever the menus have, the open document's entries among them, and a document 
 do to be in it. Running one is the same pass again with that entry answering as though clicked.
 
 What's not there yet is listed at the end of the guide.
+
+## License
+
+[MIT](LICENSE). PDFium and the Rust crates in a release have licenses of their own, in the
+zip's `licenses` folder.

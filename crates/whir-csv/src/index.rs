@@ -143,7 +143,7 @@ fn run(
         };
         scanner.feed(&buf[..n], offset, |row_start| {
             if row_start < total {
-                if rows % BLOCK_ROWS == 0 {
+                if rows.is_multiple_of(BLOCK_ROWS) {
                     new_checkpoints.push(row_start);
                 }
                 rows += 1;

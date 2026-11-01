@@ -184,11 +184,11 @@ impl Utf16Decoder {
             u16::from_le_bytes(b)
         };
         if let Some(h) = self.high.take() {
-            if (0xDC00..0xE000).contains(&u) {
-                if let Some(Ok(c)) = char::decode_utf16([h, u]).next() {
-                    out.push(c);
-                    return;
-                }
+            if (0xDC00..0xE000).contains(&u)
+                && let Some(Ok(c)) = char::decode_utf16([h, u]).next()
+            {
+                out.push(c);
+                return;
             }
             out.push(char::REPLACEMENT_CHARACTER);
         }

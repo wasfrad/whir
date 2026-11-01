@@ -23,8 +23,9 @@ pub enum Target {
     Path(PathBuf),
     /// A copy elsewhere (Save As of a library note); nothing is tracked.
     Export(PathBuf),
-    /// The note was emptied: delete its file if it's still blank on disk.
-    DeleteIfEmpty(PathBuf),
+    /// The note was emptied: its file goes to the Recycle Bin, unless someone
+    /// else has changed it.
+    Emptied(PathBuf),
 }
 
 pub struct Job {
@@ -154,6 +155,18 @@ fn io(e: WriteError, path: &Path) -> SaveErr {
     }
 }
 
+/// An emptied note's file goes to the Recycle Bin, so that clearing a note is
+/// never the one keystroke with no way back. (Tests would fill the real bin.)
+fn discard(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        Ok(())
+    } else if cfg!(test) {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    } else {
+        file::recycle(None, path)
+    }
+}
+
 fn run(job: Job) -> Reply {
     let hash = job.hash;
     let fail = |path: Option<PathBuf>, e: SaveErr| Reply {
@@ -266,26 +279,23 @@ fn run(job: Job) -> Reply {
                 )
             }
         },
-        Target::DeleteIfEmpty(path) => {
-            let blank = std::fs::read(&path)
-                .map(|b| library::decode_text(&b).trim().is_empty())
-                .unwrap_or(false);
-            if blank {
-                let _ = std::fs::remove_file(&path);
+        Target::Emptied(path) => {
+            if changed_on_disk(&path) {
+                return fail(Some(path), SaveErr::Conflict);
             }
-            let path_now = (!blank).then(|| path.clone());
-            (
-                Reply {
-                    hash,
-                    identity: path_now
-                        .as_deref()
-                        .and_then(|p| file::FileIdentity::of_path(p).ok()),
-                    path: path_now,
-                    result: Ok(()),
-                    export: false,
-                },
-                vec![path],
-            )
+            match discard(&path) {
+                Ok(()) => (
+                    Reply {
+                        hash,
+                        path: None,
+                        identity: None,
+                        result: Ok(()),
+                        export: false,
+                    },
+                    vec![path],
+                ),
+                Err(e) => (fail(Some(path.clone()), SaveErr::Io(e)), vec![path]),
+            }
         }
     };
     job.library.refresh(touched);
@@ -374,13 +384,20 @@ mod tests {
             b"# Roadmap\n\ntheirs, longer\n"
         );
 
-        // Only blank files are deleted.
-        let (j, _) = job(Target::DeleteIfEmpty(path2.clone()), b"", &lib);
-        assert!(run_now(j).path.is_some());
-        std::fs::write(&path2, b"  \n").unwrap();
-        let (j, _) = job(Target::DeleteIfEmpty(path2.clone()), b"", &lib);
-        assert!(run_now(j).path.is_none());
+        // An emptied note leaves no file, unless someone else changed it since.
+        let (mut j, _) = job(Target::Emptied(path2.clone()), b"", &lib);
+        j.expect = Some(id);
+        assert!(matches!(run_now(j).result, Err(SaveErr::Conflict)));
+        assert!(path2.exists());
+        let (mut j, _) = job(Target::Emptied(path2.clone()), b"", &lib);
+        j.expect = FileIdentity::of_path(&path2).ok();
+        let r = run_now(j);
+        assert!(r.result.is_ok(), "{r:?}");
+        assert!(r.path.is_none());
         assert!(!path2.exists());
+        // Already gone is as good.
+        let (j, _) = job(Target::Emptied(path2.clone()), b"", &lib);
+        assert!(run_now(j).result.is_ok());
 
         // Cancelled jobs write nothing.
         let (j, _) = job(

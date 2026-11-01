@@ -1,4 +1,5 @@
-# Release build + portable folder: dist\whir\{whir.exe, pdfium.dll, README.md, licenses}.
+# Release build + portable folder: dist\whir\{whir.exe, pdfium.dll, README.md, licenses},
+# and the same folder zipped for a release: dist\whir-<version>-win-x64.zip.
 # Copy that folder anywhere (no installer, no admin), then run:
 #   whir.exe --register     (per-user "Open with" entries)
 $ErrorActionPreference = "Stop"
@@ -31,9 +32,17 @@ try {
     Copy-Item (Join-Path $root "vendor\pdfium\licenses\*") (Join-Path $out "licenses")
     # The theme follows rerun's re_ui.
     Copy-Item (Join-Path $root "docs\rerun-LICENSE.txt") (Join-Path $out "licenses")
+    Copy-Item (Join-Path $root "LICENSE") (Join-Path $out "licenses\whir-LICENSE.txt")
+    & (Join-Path $PSScriptRoot "third-party.ps1") (Join-Path $out "licenses\THIRD-PARTY.txt")
 
     Get-ChildItem $out -File | ForEach-Object { "{0,-12} {1,8:N0} KB" -f $_.Name, ($_.Length / 1KB) }
     "Portable build ready: $out"
+
+    $version = (Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+    $zip = Join-Path $root "dist\whir-$version-win-x64.zip"
+    Compress-Archive -Path $out -DestinationPath $zip -Force
+    "Release zip: $zip ({0:N1} MB)" -f ((Get-Item $zip).Length / 1MB)
+    "SHA-256: $((Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant())"
 } finally {
     Pop-Location
 }

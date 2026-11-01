@@ -125,6 +125,7 @@ fn message_box(text: &str, error: bool) {
 }
 
 fn main() {
+    whir_core::crash::install();
     trace::init();
     trace::mark("main");
     let args = parse_args();

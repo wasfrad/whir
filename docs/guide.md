@@ -21,8 +21,8 @@ opened) and `licenses`. No installer, no admin rights.
    required once per type.)
 
 **Moving the folder:** quit whir from its tray icon, move the folder, then run
-`whir.exe --register` again from the new place so double-clicked files find it. The
-start-with-Windows entry follows by itself the next time the dock runs. Notes,
+`whir.exe --register` again from the new place so double-clicked files find it. If whir
+starts with Windows, that entry follows by itself the next time the dock runs. Notes,
 screenshots, the timesheet and settings are kept outside this folder (see **Where
 things are kept**), so they come along untouched.
 
@@ -30,8 +30,9 @@ things are kept**), so they come along untouched.
 with Windows. Then quit whir from its tray icon (the dock is `whir.exe` too, and keeps
 running when the window is closed) and delete the folder.
 
-If your PC blocks unsigned programs (AppLocker/WDAC), try running `whir.exe` from the
-folder first. If it's blocked there, it will be blocked everywhere.
+whir isn't code-signed, so Windows SmartScreen may stop it the first time: **More info →
+Run anyway**. If your PC blocks unsigned programs outright (AppLocker/WDAC), try running
+`whir.exe` from the folder first. If it's blocked there, it will be blocked everywhere.
 
 ## Everywhere
 
@@ -81,7 +82,8 @@ how notes are shown here, not the files.
 
 Notes are plain Markdown files in `Documents\whir`, saved about a second after you stop
 typing (and whenever you switch away). Other `.md` / `.txt` files — this one included —
-open in the same editor and are saved with Ctrl+S.
+open in the same editor and are saved with Ctrl+S. Clear a note completely and its file
+goes to the Recycle Bin; Ctrl+Z, while the tab is still open, brings the note back.
 
 A note flagged as a todo comes first in the notes drawer (⚑), the most recently flagged
 first, and stays in sight on the capture dock: while any todo is open the dock stays out
@@ -150,9 +152,9 @@ copy: the clipboard, or Save a copy.
 The capture dock is a slim grip on a screen edge that slides out when the pointer rests
 on it. It stays on top of every other window, full-screen ones included (only the Start
 menu and Windows' notifications go over it). It is a small process of its own and is the
-part of whir that is always running: it starts with Windows and with whir's window,
-stays when the window is closed, and has an icon in the notification area. Quitting
-whir is done from that icon.
+part of whir that keeps running: it starts with whir's window (and with Windows, if you
+turn that on), stays when the window is closed, and has an icon in the notification
+area. Quitting whir is done from that icon.
 
 - **Camera · Ctrl+PrtSc from anywhere**: capture: the screen freezes and dims
 - **…then drag · click a window · click the desktop**: take that region · that window · that monitor
@@ -168,9 +170,9 @@ drawer's **Images** tab, and opens in whir with the highlighter in hand. You don
 to switch documents to refresh the thumbnail grid. Their highlights and text are kept
 beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
 
-whir starts with Windows (a per-user entry under
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, set the first time the dock runs;
-switch it off in the tray menu). **Settings › Capture & dock** changes the shortcut (press
+Starting with Windows is off until you turn it on, in the tray menu or **Settings ›
+Startup & window** (it's a per-user entry under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). **Settings › Capture & dock** changes the shortcut (press
 the new one, with Ctrl or Alt), the delay, and whether the dock shows; the ⋯ beside the
 shortcut has the Print Screen ones and **Turn off**. If another app already has that
 shortcut, the page says so.
@@ -317,6 +319,7 @@ without losing anything.
 - `%LOCALAPPDATA%\whir\settings.ini`: whir's settings, the theme and the minimap's on/off among them
 - `%LOCALAPPDATA%\whir\dock.ini`: the dock's place, delay and hotkey (change the last two in **Settings › Capture & dock**)
 - `%LOCALAPPDATA%\whir\views.txt`: where each PDF was left (the last 500)
+- `%LOCALAPPDATA%\whir\crash.log`: if whir ever crashes, what went wrong (worth attaching to a bug report)
 
 ## Command line
 

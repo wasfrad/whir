@@ -219,7 +219,7 @@ pub fn for_each(
         let has_cells = !cells.is_empty();
         let mut r = 0u64;
         while reader.next_row(&mut fields)?.is_some() {
-            if r % CANCEL_EVERY == 0 && cancel.load(Ordering::Relaxed) {
+            if r.is_multiple_of(CANCEL_EVERY) && cancel.load(Ordering::Relaxed) {
                 return Ok(false);
             }
             if r >= MAX_EDIT_ROWS {
@@ -268,7 +268,7 @@ pub fn for_each(
                     next_file_row = first;
                 }
                 for i in 0..len {
-                    if emitted % CANCEL_EVERY == 0 && cancel.load(Ordering::Relaxed) {
+                    if emitted.is_multiple_of(CANCEL_EVERY) && cancel.load(Ordering::Relaxed) {
                         return Ok(false);
                     }
                     if reader.next_row(&mut fields)?.is_none() {
@@ -291,7 +291,7 @@ pub fn for_each(
             }
             Piece::New { first, len } => {
                 for i in 0..len {
-                    if emitted % CANCEL_EVERY == 0 && cancel.load(Ordering::Relaxed) {
+                    if emitted.is_multiple_of(CANCEL_EVERY) && cancel.load(Ordering::Relaxed) {
                         return Ok(false);
                     }
                     let key = RowKey::added(first + i);

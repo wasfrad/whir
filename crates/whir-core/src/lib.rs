@@ -4,6 +4,7 @@
 //! touch D3D or Win32 windowing directly, which keeps document code pure egui.
 
 pub mod captures;
+pub mod crash;
 pub mod document;
 pub mod file;
 pub mod find_bar;

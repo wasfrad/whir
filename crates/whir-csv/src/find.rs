@@ -369,7 +369,7 @@ fn run_slow(
     let mut n = 0u64;
     stream::for_each(input, cancel, |row, pos| {
         n += 1;
-        if n % PROGRESS_EVERY == 0 {
+        if n.is_multiple_of(PROGRESS_EVERY) {
             progress.store(pos, Ordering::Relaxed);
         }
         if row.key.is_header() {

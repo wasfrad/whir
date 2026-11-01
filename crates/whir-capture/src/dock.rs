@@ -1359,27 +1359,18 @@ fn quit(hwnd: HWND) {
     }
 }
 
-/// The first time the dock runs, whir starts with Windows from then on; after
-/// that, the Run entry is the user's to switch off. whir is a folder that can
-/// be moved, so an entry pointing at another copy is pointed at this one.
-fn autostart_once(config: &mut DockConfig) {
+/// Starting with Windows is the user's to switch on. Once it's on, the entry
+/// follows the folder: whir can be moved, so an entry pointing at another copy
+/// is pointed at this one.
+fn autostart_follows() {
     // A development build never claims the user's sign-in.
     if cfg!(debug_assertions) {
         return;
     }
-    let wanted = shell::autostart_command();
-    match shell::autostart() {
-        None if !config.autostart_set => {
-            let _ = shell::set_autostart(true);
-        }
-        Some(now) if wanted.is_some_and(|w| !w.eq_ignore_ascii_case(&now)) => {
-            let _ = shell::set_autostart(true);
-        }
-        _ => {}
-    }
-    if !config.autostart_set {
-        config.autostart_set = true;
-        config.save();
+    if let (Some(now), Some(wanted)) = (shell::autostart(), shell::autostart_command())
+        && !wanted.eq_ignore_ascii_case(&now)
+    {
+        let _ = shell::set_autostart(true);
     }
 }
 
@@ -1755,7 +1746,7 @@ pub fn run(cmd: Command) -> i32 {
         SetTimer(Some(hwnd), TIMER_KEEP_ON_TOP, KEEP_ON_TOP_MS, None);
         {
             let mut d = dock.borrow_mut();
-            autostart_once(&mut d.config);
+            autostart_follows();
             d.register_hotkey();
             d.present();
             d.show();

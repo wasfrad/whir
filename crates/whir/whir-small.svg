@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- whir.svg for 24 px and under: the same sails, filled flat and a little larger, without
+       the outlines and highlights that would only smear at this size. -->
+  <defs>
+    <path id="back" d="M 0,0 C -6,-42 -4,-80 10,-106 Q 16,-116 28,-110 C 62,-92 90,-65 105,-36 C 70,-34 35,-20 0,0 Z"/>
+    <path id="sail" d="M 16,-111 Q 22,-114 28,-110 C 62,-92 90,-65 105,-36 C 82,-4 43,10 0,0 C 20,-35 26,-76 16,-111 Z"/>
+  </defs>
+  <g transform="translate(128 128) scale(1.1)">
+    <use href="#back" transform="rotate(-12)" fill="#B91C1C"/>
+    <use href="#back" transform="rotate(78)" fill="#B45309"/>
+    <use href="#back" transform="rotate(168)" fill="#047857"/>
+    <use href="#back" transform="rotate(258)" fill="#1E3A8A"/>
+    <use href="#sail" transform="rotate(-12)" fill="#F94C3B"/>
+    <use href="#sail" transform="rotate(78)" fill="#FBBF24"/>
+    <use href="#sail" transform="rotate(168)" fill="#10B981"/>
+    <use href="#sail" transform="rotate(258)" fill="#3B82F6"/>
+    <circle r="20" fill="#FFFFFF"/>
+  </g>
+</svg>

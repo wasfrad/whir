@@ -79,7 +79,7 @@ impl<W: Write> RowWriter<W> {
             self.sink.ascii(self.fmt.line_ending)?;
         }
         let start = self.sink.position();
-        if self.rows % BLOCK_ROWS == 0 {
+        if self.rows.is_multiple_of(BLOCK_ROWS) {
             self.checkpoints.push(start);
         }
         self.rows += 1;

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileAttributesW, GetFileInformationByHandle,
@@ -23,7 +23,11 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
     SetFileAttributesW,
 };
-use windows::core::HSTRING;
+use windows::Win32::UI::Shell::{
+    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+    SHFILEOPSTRUCTW, SHFileOperationW,
+};
+use windows::core::{HSTRING, PCWSTR};
 
 /// Opens `path` for reading without denying anyone else read/write/delete access.
 pub fn open_shared(path: &Path) -> io::Result<File> {
@@ -437,6 +441,40 @@ pub fn write_atomic(
     Ok(FileIdentity::of_path(dest)?)
 }
 
+/// Move `path` to the Recycle Bin. If the bin can't be used (e.g. a
+/// network-redirected Documents folder) Windows asks from `owner` before
+/// deleting for good; with no window to ask from, it deletes without asking.
+pub fn recycle(owner: Option<HWND>, path: &Path) -> Result<(), String> {
+    // Double-NUL terminated list of one path.
+    let from: Vec<u16> = path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain([0, 0])
+        .collect();
+    let quiet = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+    let flags = if owner.is_some() {
+        quiet | FOF_WANTNUKEWARNING
+    } else {
+        quiet | FOF_NOERRORUI
+    };
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: owner.unwrap_or_default(),
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: flags.0 as u16,
+        ..Default::default()
+    };
+    let r = unsafe { SHFileOperationW(&mut op) };
+    if r != 0 {
+        return Err(format!("Couldn't delete the file (error {r})."));
+    }
+    if op.fAnyOperationsAborted.as_bool() {
+        return Err("Delete was cancelled.".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +484,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The notes saver's case: a background thread with no window. Ignored
+    /// because it puts a real file in the real Recycle Bin.
+    #[test]
+    #[ignore]
+    fn recycle_from_a_thread_with_no_window() {
+        let dir = test_dir("recycle");
+        let path = dir.join("emptied note.md");
+        std::fs::write(&path, b"old").unwrap();
+        let on_thread = path.clone();
+        let result = std::thread::spawn(move || recycle(None, &on_thread))
+            .join()
+            .unwrap();
+        assert_eq!(result, Ok(()));
+        assert!(!path.exists());
     }
 
     #[test]

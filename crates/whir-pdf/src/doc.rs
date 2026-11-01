@@ -1140,7 +1140,12 @@ mod tests {
             fonts
                 .font_data
                 .insert("ui".into(), Arc::new(egui::FontData::from_owned(data)));
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            use whir_core::theme::{NAMED_FAMILIES, family};
+            let named = NAMED_FAMILIES.iter().map(|&(n, _)| family(n));
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace]
+                .into_iter()
+                .chain(named)
+            {
                 fonts.families.insert(family, vec!["ui".into()]);
             }
             ctx.set_fonts(fonts);

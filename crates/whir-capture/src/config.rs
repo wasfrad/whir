@@ -137,9 +137,6 @@ pub struct DockConfig {
     pub hotkey_ok: bool,
     /// Hidden (from its own menu or the tray's): only the tray icon shows.
     pub hidden: bool,
-    /// Starting with Windows was set up once (after that it is the user's
-    /// choice, and the Run entry itself says what it is).
-    pub autostart_set: bool,
 }
 
 /// Where the dock was last put.
@@ -189,7 +186,6 @@ impl DockConfig {
             hotkey,
             hotkey_ok: ini.get("hotkey-ok") != Some("no"),
             hidden: yes("hidden"),
-            autostart_set: yes("autostart-set"),
         }
     }
 
@@ -205,7 +201,6 @@ impl DockConfig {
         let yes_no = |b| if b { "yes" } else { "no" };
         ini.set("hotkey-ok", yes_no(self.hotkey_ok));
         ini.set("hidden", yes_no(self.hidden));
-        ini.set("autostart-set", yes_no(self.autostart_set));
     }
 }
 
@@ -301,7 +296,6 @@ mod tests {
                 hotkey: Some(Hotkey::DEFAULT),
                 hotkey_ok: true,
                 hidden: false,
-                autostart_set: false,
             }
         );
     }
@@ -318,7 +312,6 @@ mod tests {
             hotkey: parse_hotkey("ctrl+alt+f9"),
             hotkey_ok: false,
             hidden: true,
-            autostart_set: true,
         };
         let mut file = ini("# kept\nfuture = thing\n");
         c.write(&mut file);

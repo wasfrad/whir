@@ -115,8 +115,9 @@ pub struct NoteDoc {
     edited_at: Option<Instant>,
     first_unsaved: Option<Instant>,
     inflight: Option<Inflight>,
-    /// Ctrl+S arrived during a write: save again right after it.
-    resave: bool,
+    /// A save was asked for during a write: save again right after it
+    /// (`true`: the user asked, so say when it's done).
+    resave: Option<bool>,
     error: Option<String>,
     retry_at: Option<Instant>,
     retries: usize,
@@ -245,7 +246,7 @@ impl NoteDoc {
             edited_at: None,
             first_unsaved: None,
             inflight: None,
-            resave: false,
+            resave: None,
             error: None,
             retry_at: None,
             retries: 0,
@@ -381,9 +382,7 @@ impl NoteDoc {
         let (target, bytes, header) = if blank {
             // An emptied library note leaves no empty file behind.
             match (self.mode, &self.path) {
-                (Mode::Library, Some(p)) => {
-                    (Target::DeleteIfEmpty(p.clone()), Vec::new(), Header::NEW)
-                }
+                (Mode::Library, Some(p)) => (Target::Emptied(p.clone()), Vec::new(), Header::NEW),
                 (Mode::Library, None) => {
                     self.saved_hash = hash;
                     self.first_unsaved = None;
@@ -459,7 +458,9 @@ impl NoteDoc {
 
     fn submit(&mut self, user: bool) -> bool {
         if self.inflight.is_some() {
-            self.resave |= user;
+            // Writes what's here now once the save in flight is done. Anything
+            // less and a tab closed mid-save would lose what was typed since.
+            self.resave = Some(user || self.resave == Some(true));
             return true;
         }
         if self.conflict {
@@ -552,8 +553,10 @@ impl NoteDoc {
         {
             let inf = self.inflight.take().expect("checked");
             self.handle_reply(reply, inf.header, inf.user);
-            if std::mem::take(&mut self.resave) && self.is_dirty() {
-                self.submit(true);
+            if let Some(user) = self.resave.take()
+                && self.is_dirty()
+            {
+                self.submit(user);
             }
         }
     }
@@ -1542,6 +1545,10 @@ impl Document for NoteDoc {
             }
             return SaveResult::Started;
         }
+        // A save still running belongs to the old file: it finishes there,
+        // unheard, or its reply would point this document back at that file.
+        self.inflight = None;
+        self.resave = None;
         // Rebind: from now on this document is that file.
         self.mode = if self.library.contains(&path) && is_markdown(&path) {
             Mode::Library
@@ -1641,3 +1648,6 @@ impl Drop for NoteDoc {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
