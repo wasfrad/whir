@@ -34,8 +34,6 @@ try {
     Copy-Item (Join-Path $root "docs\guide.md") (Join-Path $out "README.md")
     Copy-Item (Join-Path $root "vendor\pdfium\LICENSE") (Join-Path $out "licenses\pdfium-LICENSE.txt")
     Copy-Item (Join-Path $root "vendor\pdfium\licenses\*") (Join-Path $out "licenses")
-    # The theme follows rerun's re_ui.
-    Copy-Item (Join-Path $root "docs\rerun-LICENSE.txt") (Join-Path $out "licenses")
     Copy-Item (Join-Path $root "LICENSE") (Join-Path $out "licenses\whir-LICENSE.txt")
     & (Join-Path $PSScriptRoot "third-party.ps1") (Join-Path $out "licenses\THIRD-PARTY.txt")
 
