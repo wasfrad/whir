@@ -1,14 +1,21 @@
 # whir
 
-A fast, lean, native Windows app for the files that matter at work: **images, PDFs,
-CSVs and notes**. Double-click a file and it's on screen; open another and it becomes a
-tab in the same window. Start whir on its own and you get a blank note to type into —
-it saves itself, no questions asked. A small capture dock takes screenshots, keeps them,
-and opens each one ready to highlight and label.
+A fast, lean, native Windows app for everyday work. Double-click a file and it's on
+screen, and each new file becomes a tab in the same window. It does five things well:
 
-- Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~6 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
-- No installer, no admin rights, no VC++ redistributable
+- **Fast PDF viewer:** a 66-page PDF is on screen in about 150 ms, with text selection,
+  search and a page minimap.
+- **Fast screenshot tool:** press Ctrl+PrtSc anywhere, drag a region or click a window, and
+  it opens ready to highlight and label.
+- **Fast CSV tool:** open, sort, edit and save huge files. A 300k-row CSV opens in about
+  150 ms, and Find gets through an 870 MB file in about 0.3 s.
+- **Simple, minimal notes and todos:** start typing and the note saves itself as plain
+  Markdown. Flag one as a todo to keep it in sight.
+- **Timesheets:** time your work against projects and milestones from a small dock, fill in
+  the week on a grid, and close it out to CSV.
+
+It opens images too. There's no installer and no web runtime: it's one portable folder of
+about 14 MB, built with Rust, raw Win32 and Direct3D 11.
 
 ## Using it
 
@@ -22,46 +29,12 @@ Two things to know before you run it:
 - The capture dock keeps running after the window closes. It has a tray icon, and **Quit
   whir** there closes it. whir only starts with Windows if you turn that on.
 
-**[docs/guide.md](docs/guide.md)** is the user guide: setting it up on a work PC, every
-key and mouse action, the capture dock and time tracking, where things are kept, and the
-command line. `scripts\dist.ps1` copies it into the portable folder as `README.md`, so it
-travels with the app (once registered, it opens in whir itself).
+**[docs/guide.md](docs/guide.md)** covers every key and mouse action, where things are kept,
+the command line, and what's not there yet. It's also in the zip as `README.md`.
 
-## Building
+## Measured
 
-Requirements: Rust 1.95 or newer (MSVC toolchain), Visual Studio Build Tools with the
-Windows SDK.
-
-```powershell
-scripts\fetch-pdfium.ps1   # pinned, SHA-256 verified PDFium build -> vendor\pdfium
-cargo test --workspace
-scripts\dist.ps1           # release build -> dist\whir\{whir.exe, pdfium.dll, README.md, licenses}
-                           #                 and the zip for a release, dist\whir-<version>-win-x64.zip
-```
-
-`cargo run -p whir -- <files>` works for development. Debug builds find `pdfium.dll` in `vendor\`.
-
-Diagnostics:
-- `WHIR_TRACE=1` appends a startup timeline (ms since process creation) to
-  `%LOCALAPPDATA%\whir\trace.log`.
-- A panic is written to `%LOCALAPPDATA%\whir\crash.log`: a release build has no console and
-  aborts, so that's all it leaves.
-- `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
-- `WHIR_NOTES_DIR=<folder>` keeps notes somewhere other than `Documents\whir` (testing).
-- `WHIR_CAPTURES_DIR=<folder>` does the same for screenshots.
-- `WHIR_NO_DOCK=1` doesn't start the capture dock with the window (a dock started from a
-  test or a bench run would point the start-with-Windows entry at that build).
-
-Design:
-- `cargo test -p whir -- --ignored gallery` draws the whole app on made-up files, offscreen,
-  every screen in both themes at 100% and 150%, to PNGs in `WHIR_PREVIEW_DIR`
-  (`WHIR_PREVIEW_ONLY=pdf,csv` and `WHIR_PREVIEW_MODES=dark-100` narrow it down).
-  `--ignored icon_sheet` does the same for every icon.
-- `scripts\bench-start.ps1 -Against <another build>` alternates launches of two builds and
-  compares the time after the GPU device is ready: the driver alone moves a launch by 15 ms
-  from one run to the next, which hides anything the UI does.
-
-## Measured (release build, desktop with NVIDIA GPU, files in the OS cache)
+Release build on a desktop with an NVIDIA GPU, with files in the OS cache.
 
 | | window on screen | content on screen | private memory |
 |---|---|---|---|
@@ -73,45 +46,8 @@ Design:
 | same CSV, `--warp` | — | ~72 ms | ~34 MB |
 | the capture dock (`--dock`), idle | — | — | ~4 MB (a frozen screen's worth more while selecting) |
 
-On this machine the critical path is the GPU driver (`D3D11CreateDevice` ≈ 135 ms),
-which runs in parallel with everything else. If the device isn't ready ~40 ms after the
-window exists, whir shows the window immediately with a placeholder, and content follows.
-Much of the baseline memory is the GPU driver itself. On weak or remote machines, compare
-`--warp`.
+## Principles
 
-Find in a CSV skims the raw file for the text and only splits the rows it turns up in
-into cells: an 870 MB file takes about 0.3 s.
-
-## How it's built
-
-```
-crates/
-  whir/           exe: startup ordering, single instance, tabs + title bar, menu bar, shortcuts,
-                  save/close prompts, the bottom drawer, Settings, the Find in all tabs panel, --register
-  whir-capture/   the capture dock (`--dock`): its own process, Win32 windows and egui with its
-                  triangles filled on the CPU, no renderer; the tray icon, the stopwatch,
-                  the project picker and today's times, noticing time away;
-                  screen grab, the selection overlay, PNG into the screenshots folder
-  whir-platform/  Win32 window: custom frame (tabs in the caption, Win11 snap layouts), event loop,
-                  input → egui, Open/Save dialogs, Recycle Bin, session end, where the window opens
-  whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
-  whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
-                  replace, the notes library, the screenshots store, marks, the icons and
-                  whir's own controls, toolbar widgets, find bar, f64 scrolling, theme tokens,
-                  tracing, the timesheet and the todos
-                  (shared with the dock), settings.ini, where each file was left (views.txt)
-  whir-notes/     Markdown notes styled as you type; autosave on a background writer
-  whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
-                  marks (highlights multiply-blended, text in egui's own glyphs, baked the same way
-                  into copies), PNG encoding, thumbnails
-  whir-pdf/       PDFium on one dedicated thread; pages rendered as tiles at exact device resolution;
-                  fit page / fit width, opening at the zoom used last or where the file was left
-  whir-csv/       quote-aware sparse row index (1 offset per 64 rows), virtualized grid, background
-                  sort and a find that parses only rows containing the query,
-                  an edit overlay (row piece table + cell overrides) and a streaming save
-```
-
-Principles:
 - **Critical path first.** Decoding starts before the window exists, and the GPU initializes in
   parallel. PDFium loads only when a PDF is opened.
 - **Event-driven.** No frame is drawn unless something changed, so idle CPU is 0%.
@@ -129,43 +65,25 @@ Principles:
   the todos: each change is made under a named mutex from a fresh read of the files, written
   atomically, and announced to the other process with a registered window message.
 
-### Theming
+## Building
 
-All colours, sizes, the type scale and the font list are in
-`crates/whir-core/src/theme.rs`, and `Theme::apply` styles every stock egui widget from
-them, following the recipe of rerun's `re_ui` (egui is pinned to `=0.36.2`, the version
-`re_ui` 0.38 and 0.39 use; `re_ui` itself would bring in eframe and wgpu, so it isn't a
-dependency). Nothing is parsed at startup: the tokens are plain Rust.
+Requirements: Rust 1.95 or newer (MSVC toolchain), Visual Studio Build Tools with the
+Windows SDK.
 
-The text is Segoe UI Variable and the icons Segoe Fluent Icons, both loaded from
-`%WINDIR%\Fonts` (memory-mapped), so no font is in the exe; on Windows 10 they give way to
-Segoe UI and Segoe MDL2 Assets, and a test holds every icon to being in both. Text marks on
-images keep Segoe UI whatever the interface uses, because their boxes are saved measured.
-CJK and emoji fallbacks load on first use. `crates/whir-core/src/icons.rs` is the one table
-of icons, for the window and the dock; `kit.rs` has the controls egui doesn't draw the way a
-Windows tool should.
+```powershell
+scripts\fetch-pdfium.ps1   # pinned, SHA-256 verified PDFium build -> vendor\pdfium
+cargo test --workspace
+scripts\dist.ps1           # release build -> dist\whir\ and dist\whir-<version>-win-x64.zip
+```
 
-The dock looks the same way because it draws the same way: the same theme, controls and icons
-in egui. It is always running, though, and a Direct3D device would put 50 MB of graphics driver
-in it, so `crates/whir-capture/src/stage.rs` fills egui's triangles on the CPU instead, with
-the sums of the window's shader (within 1/255 of the GPU on every pixel), into the bitmap of a
-layered window. It draws only when something happens, and skips a frame that would come out the
-same. Its shadows have windows of their own that clicks pass through: a layered window catches
-the mouse wherever it isn't fully clear, so a shadow on the dock's own would be a dead strip
-around it.
+`cargo run -p whir -- <files>` works for development. Debug builds find `pdfium.dll` in `vendor\`.
 
-The theme picked in Settings is in `settings.ini`, which only the window writes, so the dock is
-told once the write has landed (`Changed::Theme`) and reads the file for itself. What's the
-dock's goes the other way: Settings reads `dock.ini` and asks the dock to change it.
-
-### The command palette
-
-`crates/whir/src/palette.rs` keeps no list of commands. `kit::read_menu` runs the menus with
-nothing drawn, each `kit::entry` noting down what it would have shown, so the palette has
-whatever the menus have, the open document's entries among them, and a document has nothing to
-do to be in it. Running one is the same pass again with that entry answering as though clicked.
-
-What's not there yet is listed at the end of the guide.
+Diagnostics:
+- A panic is written to `%LOCALAPPDATA%\whir\crash.log`.
+- `WHIR_TRACE=1` appends a startup timeline to `%LOCALAPPDATA%\whir\trace.log`.
+- `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
+- `WHIR_NOTES_DIR`, `WHIR_CAPTURES_DIR` and `WHIR_TIME_DIR` keep whir's files somewhere else,
+  and `WHIR_NO_DOCK=1` doesn't start the capture dock with the window (for testing).
 
 ## License
 
