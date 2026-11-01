@@ -2,7 +2,13 @@
 # own startup trace (WHIR_TRACE). Files are in the OS cache, as in the README's table: this
 # compares builds, it doesn't measure a first launch after a reboot.
 #
-#   scripts\bench-start.ps1 [-Runs 20] [-Against other\whir.exe]
+#   scripts\bench-start.ps1 [-Runs 20] [-Against other\whir.exe] [-Visible]
+#
+# Nothing appears while it runs: each launch does all of its startup work in a window that
+# stays invisible, off the taskbar and out of the focus (WHIR_HIDDEN), so it can run while
+# you work. Left out is only the last step, Windows putting the window on screen, which
+# whir doesn't control. -Visible puts that back, at the cost of dozens of windows opening
+# and taking the focus. A build too old to know WHIR_HIDDEN shows its windows anyway.
 #
 # The GPU driver alone moves a launch by 15 ms from one run to the next, far more than the
 # UI costs, and nothing whir does changes it. So "after GPU" (from the device being ready to
@@ -12,14 +18,16 @@
 # It works on copies of the builds in a temp folder, with %LOCALAPPDATA%, the notes, the
 # screenshots and the timesheet all pointed there, and no capture dock. A build must know
 # WHIR_NO_DOCK: one that doesn't would start a dock from the temp folder, which points the
-# start-with-Windows entry there. It won't run while a whir window is open: the launches
-# would become tabs in that window.
+# start-with-Windows entry there. Hidden launches leave a whir you have open alone, but with
+# -Visible or -Against it won't run while one is open: launches that aren't hidden would
+# become tabs in that window.
 param(
     [int]$Runs = 20,
     [string]$Exe = "",
     [string]$Against = "",
     [string]$Jpeg = "",
-    [string]$Pdf = ""
+    [string]$Pdf = "",
+    [switch]$Visible
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -29,7 +37,9 @@ if ($Against -and -not (Test-Path $Against)) { throw "No build at $Against" }
 
 $open = Get-CimInstance Win32_Process -Filter "Name = 'whir.exe'" |
     Where-Object { $_.CommandLine -notmatch '--dock' }
-if ($open) { throw "A whir window is open (pid $($open.ProcessId -join ', ')). Close it first." }
+if ($open -and ($Visible -or $Against)) {
+    throw "A whir window is open (pid $($open.ProcessId -join ', ')). Close it first."
+}
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "whir-bench"
 if (Test-Path $work) { Remove-Item $work -Recurse -Force }
@@ -106,6 +116,7 @@ $saved = @{}
 $environment = @{
     WHIR_TRACE = "1"; WHIR_NO_DOCK = "1"; LOCALAPPDATA = $data
     WHIR_NOTES_DIR = "$work\notes"; WHIR_CAPTURES_DIR = "$work\shots"; WHIR_TIME_DIR = "$work\time"
+    WHIR_HIDDEN = $(if ($Visible) { $null } else { "1" })
 }
 foreach ($k in $environment.Keys) {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)

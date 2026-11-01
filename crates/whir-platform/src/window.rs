@@ -44,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR};
 
 use crate::input::InputCollector;
-use crate::ipc::{COPYDATA_OPEN, COPYDATA_SHOW, Changed, WINDOW_CLASS, decode_paths};
+use crate::ipc::{COPYDATA_OPEN, COPYDATA_SHOW, Changed, HIDDEN_CLASS, WINDOW_CLASS, decode_paths};
 use crate::placement::{self, Placement};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
@@ -208,6 +208,9 @@ pub struct WindowOptions {
     pub placement: Option<Placement>,
     /// Back exactly there, even with the mouse on another monitor.
     pub exact: bool,
+    /// Never seen: stays cloaked, off the taskbar, and doesn't take the focus.
+    /// Everything else runs as usual, which is what the startup benchmark times.
+    pub hidden: bool,
 }
 
 /// Wake target that exists *before* the window, so documents can start loading
@@ -261,6 +264,8 @@ struct State {
     tracking_nc_leave: Cell<bool>,
     destroyed: Cell<bool>,
     wake: WakeSlot,
+    /// See [`WindowOptions::hidden`].
+    hidden: bool,
 }
 
 pub struct Window {
@@ -290,11 +295,16 @@ impl Window {
             tracking_nc_leave: Cell::new(false),
             destroyed: Cell::new(false),
             wake,
+            hidden: opts.hidden,
         });
 
         unsafe {
             let instance: HINSTANCE = GetModuleHandleW(PCWSTR::null())?.into();
-            let class_name = HSTRING::from(WINDOW_CLASS);
+            let class_name = HSTRING::from(if opts.hidden {
+                HIDDEN_CLASS
+            } else {
+                WINDOW_CLASS
+            });
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 // No CS_DBLCLKS: egui detects double clicks itself. No background
@@ -325,8 +335,13 @@ impl Window {
                 }
             };
             let raw = Rc::into_raw(state.clone());
+            let ex_style = if opts.hidden {
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            } else {
+                WINDOW_EX_STYLE(0)
+            };
             let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                ex_style,
                 &class_name,
                 &HSTRING::from(opts.title.as_str()),
                 WS_OVERLAPPEDWINDOW,
@@ -373,7 +388,9 @@ impl Window {
             // Shown while cloaked: DXGI can present to it and it can take the
             // foreground, but nothing is visible until WindowCommand::Show.
             // Maximized, it is on the monitor its normal rect is on.
-            let show = if maximized {
+            let show = if opts.hidden {
+                SW_SHOWNOACTIVATE
+            } else if maximized {
                 SW_SHOWMAXIMIZED
             } else {
                 SW_SHOWNORMAL
@@ -436,7 +453,7 @@ impl Window {
             }
             ReleaseDC(Some(hwnd), hdc);
         }
-        set_bool_attribute(hwnd, DWMWA_CLOAK, false);
+        self.state.uncloak();
     }
 
     /// Run the event loop until the window closes. Returns the exit code.
@@ -547,6 +564,13 @@ fn initial_placement() -> (i32, i32, i32, i32) {
 }
 
 impl State {
+    /// Put the window on screen, unless it's never to be seen.
+    fn uncloak(&self) {
+        if !self.hidden {
+            set_bool_attribute(self.hwnd(), DWMWA_CLOAK, false);
+        }
+    }
+
     fn hwnd(&self) -> HWND {
         self.hwnd.get()
     }
@@ -708,9 +732,7 @@ impl State {
         let hwnd = self.hwnd();
         unsafe {
             match cmd {
-                WindowCommand::Show => {
-                    set_bool_attribute(hwnd, DWMWA_CLOAK, false);
-                }
+                WindowCommand::Show => self.uncloak(),
                 WindowCommand::SetTitle(title) => {
                     let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
                 }

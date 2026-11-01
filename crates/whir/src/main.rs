@@ -169,7 +169,9 @@ fn main() {
         .iter()
         .map(|p| whir_platform::ipc::canonicalize(p))
         .collect();
-    let instance = match single_instance::acquire(&paths, args.settings.as_deref()) {
+    // The startup benchmark: see `WindowOptions::hidden`.
+    let hidden = std::env::var_os("WHIR_HIDDEN").is_some();
+    let instance = match single_instance::acquire(&paths, args.settings.as_deref(), hidden) {
         single_instance::Instance::Forwarded => {
             trace::mark("forwarded to running instance");
             trace::flush();
@@ -228,6 +230,7 @@ fn main() {
             dark,
             placement,
             exact,
+            hidden,
         },
         wake,
     ) {

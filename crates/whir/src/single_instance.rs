@@ -34,8 +34,11 @@ impl Drop for PrimaryGuard {
 }
 
 /// `show`: a Settings page to open (`--settings`), as well as (or instead
-/// of) `paths`.
-pub fn acquire(paths: &[PathBuf], show: Option<&str>) -> Instance {
+/// of) `paths`. A `hidden` whir has nothing to do with any other.
+pub fn acquire(paths: &[PathBuf], show: Option<&str>, hidden: bool) -> Instance {
+    if hidden {
+        return Instance::Primary(PrimaryGuard(HANDLE::default()));
+    }
     let mutex = match unsafe { CreateMutexW(None, true, w!("Local\\whir.instance.v1")) } {
         Ok(h) => h,
         // Can't coordinate: just run standalone.

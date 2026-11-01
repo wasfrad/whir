@@ -16,6 +16,9 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 /// Window class of the main window; also how a second instance finds us.
 pub const WINDOW_CLASS: &str = "whir.main.v1";
+/// A hidden window's class: nothing goes looking for it, so a file opened
+/// while one runs can't land where nobody can see it.
+pub const HIDDEN_CLASS: &str = "whir.main.hidden.v1";
 
 /// Window class of the capture dock (`whir.exe --dock`).
 pub const DOCK_CLASS: &str = "whir.dock.v1";
