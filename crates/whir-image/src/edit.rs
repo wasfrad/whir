@@ -165,6 +165,14 @@ impl Editor {
         }
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     /// Returns whether there was anything to undo.
     pub fn undo(&mut self) -> bool {
         let Some(op) = self.undo.pop() else {

@@ -3,7 +3,7 @@
 //! egui's own glyphs for text), so what leaves whir is what was on screen.
 
 use egui::epaint::{Fonts, Galley, TextOptions};
-use egui::{Color32, ColorImage, FontDefinitions, FontId, Vec2};
+use egui::{Color32, ColorImage, FontDefinitions, Vec2};
 use whir_core::marks::{Kind, Mark, Text};
 
 use crate::decode::Decoded;
@@ -87,7 +87,7 @@ fn typeset(t: &Text, w: u32, h: u32, fonts: &mut Fonts) -> Decoded {
     let size = t.size.clamp(Text::MIN_SIZE, Text::MAX_SIZE) as f32;
     let galley = fonts.with_pixels_per_point(1.0).layout_no_wrap(
         t.body.clone(),
-        FontId::proportional(size),
+        whir_core::marks::font(size),
         Color32::WHITE,
     );
     let atlas = fonts.texture_atlas().image();
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn text_is_set_inside_its_box_in_the_pen_with_its_halo() {
-        let fonts = FontDefinitions::default();
+        let fonts = whir_core::theme::test_fonts();
         let mut d = grey(200, 100);
         bake(&mut d, &[text(20, 10, 120, 60, "Hi", 0)], Some(&fonts));
         assert_eq!(inked(&d), (true, true), "letters and halo");
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn text_typed_on_a_turned_image_runs_the_other_way_on_the_image() {
-        let fonts = FontDefinitions::default();
+        let fonts = whir_core::theme::test_fonts();
         // Upright: wider than tall.
         let mut upright = grey(200, 200);
         bake(
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn text_off_the_edge_is_clipped() {
-        let fonts = FontDefinitions::default();
+        let fonts = whir_core::theme::test_fonts();
         let mut d = grey(50, 30);
         bake(&mut d, &[text(30, 0, 150, 60, "Hello", 0)], Some(&fonts));
         assert!(inked(&d).0);

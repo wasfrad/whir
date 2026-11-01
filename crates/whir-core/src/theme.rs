@@ -4,6 +4,9 @@
 //! vendored design system only has to replace this module.
 
 pub use egui::Color32;
+use egui::Stroke;
+use egui::epaint::Shadow;
+use egui::style::WidgetVisuals;
 
 #[derive(Clone, Debug)]
 pub struct Theme {
@@ -17,7 +20,23 @@ pub struct Theme {
     pub tab_text: Color32,
     pub tab_text_inactive: Color32,
     pub separator: Color32,
+    /// An outline that has to be seen: popups, fields, cards.
+    pub border_strong: Color32,
+    /// Lines, icons and text in the accent colour.
     pub accent: Color32,
+    /// Filled with the accent colour (the one thing to do), and what's written on it.
+    pub accent_fill: Color32,
+    pub accent_fill_hover: Color32,
+    pub on_accent: Color32,
+
+    /// Menus, tooltips and other popups.
+    pub surface_raised: Color32,
+    /// Buttons at rest, hovered, pressed.
+    pub control: Color32,
+    pub control_hover: Color32,
+    pub control_pressed: Color32,
+    /// The well of a text field.
+    pub field_bg: Color32,
 
     pub caption_hover: Color32,
     pub caption_pressed: Color32,
@@ -26,7 +45,11 @@ pub struct Theme {
 
     pub text: Color32,
     pub text_dim: Color32,
+    /// Hints and things switched off: fine to go unread.
+    pub text_faint: Color32,
     pub error: Color32,
+    pub warning: Color32,
+    pub success: Color32,
     pub selection_bg: Color32,
     pub selection_stroke: Color32,
     pub highlight_bg: Color32,
@@ -81,8 +104,11 @@ pub struct Theme {
 
     pub modal_backdrop: Color32,
     pub danger: Color32,
-    /// Tab / drawer glyph for notes.
+    /// Tab / drawer glyph for each kind of document.
     pub note_glyph: Color32,
+    pub image_glyph: Color32,
+    pub pdf_glyph: Color32,
+    pub csv_glyph: Color32,
     /// A project's name beside its customer's (the capture dock's time).
     pub project: Color32,
 
@@ -101,9 +127,20 @@ pub struct Metrics {
     pub caption_button_width: f32,
     /// Empty strip area always kept draggable to the left of the caption buttons.
     pub drag_area_min_width: f32,
-    pub body_text_size: f32,
+    /// The type scale: everything outside a note's text is one of these.
     pub small_text_size: f32,
+    pub body_text_size: f32,
+    pub title_text_size: f32,
+    pub display_text_size: f32,
+    /// Tabs, popups, cards.
     pub corner_radius: f32,
+    /// Buttons, fields, rows.
+    pub control_radius: f32,
+    /// Height of buttons and fields.
+    pub control_height: f32,
+    /// The square a toolbar button takes up.
+    pub tool_size: f32,
+    pub icon_size: f32,
 
     /// Notes: widest text column, side/top padding, type sizes.
     pub note_column_max: f32,
@@ -125,15 +162,21 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             tab_strip_height: 36.0,
-            toolbar_height: 32.0,
-            tab_min_width: 72.0,
+            toolbar_height: 36.0,
+            tab_min_width: 112.0,
             tab_max_width: 232.0,
             tab_gap: 2.0,
             caption_button_width: 46.0,
             drag_area_min_width: 48.0,
+            small_text_size: 11.0,
             body_text_size: 13.0,
-            small_text_size: 11.5,
-            corner_radius: 6.0,
+            title_text_size: 16.0,
+            display_text_size: 20.0,
+            corner_radius: 8.0,
+            control_radius: 4.0,
+            control_height: 24.0,
+            tool_size: 28.0,
+            icon_size: 16.0,
             note_column_max: 720.0,
             note_side_pad: 32.0,
             note_top_pad: 44.0,
@@ -149,154 +192,230 @@ impl Default for Metrics {
 
 impl Theme {
     pub fn dark() -> Self {
+        let rgb = Color32::from_rgb;
+        let accent = rgb(0x5b, 0x9b, 0xff);
+        let tint = |alpha| Color32::from_rgba_unmultiplied(0x5b, 0x9b, 0xff, alpha);
         Self {
             dark: true,
-            content_bg: Color32::from_rgb(0x24, 0x24, 0x28),
-            strip_bg: Color32::from_rgb(0x1a, 0x1a, 0x1d),
-            tab_hover_bg: Color32::from_rgb(0x2b, 0x2b, 0x30),
-            tab_text: Color32::from_rgb(0xec, 0xec, 0xee),
-            tab_text_inactive: Color32::from_rgb(0x9c, 0x9c, 0xa4),
-            separator: Color32::from_rgb(0x38, 0x38, 0x3e),
-            accent: Color32::from_rgb(0x4c, 0x8d, 0xff),
-            caption_hover: Color32::from_rgb(0x2e, 0x2e, 0x33),
-            caption_pressed: Color32::from_rgb(0x38, 0x38, 0x3e),
-            close_hover: Color32::from_rgb(0xc4, 0x2b, 0x1c),
-            close_pressed: Color32::from_rgb(0xa8, 0x26, 0x1a),
-            text: Color32::from_rgb(0xe6, 0xe6, 0xe8),
-            text_dim: Color32::from_rgb(0x9a, 0x9a, 0xa2),
-            error: Color32::from_rgb(0xff, 0x6b, 0x6b),
+            content_bg: rgb(0x26, 0x26, 0x28),
+            strip_bg: rgb(0x1b, 0x1b, 0x1d),
+            tab_hover_bg: rgb(0x2a, 0x2a, 0x2d),
+            tab_text: rgb(0xeb, 0xeb, 0xec),
+            tab_text_inactive: rgb(0xa2, 0xa2, 0xa6),
+            separator: rgb(0x39, 0x39, 0x3c),
+            border_strong: rgb(0x4c, 0x4c, 0x51),
+            accent,
+            accent_fill: rgb(0x2f, 0x6f, 0xed),
+            accent_fill_hover: rgb(0x3f, 0x7d, 0xf5),
+            on_accent: Color32::WHITE,
+            surface_raised: rgb(0x2f, 0x2f, 0x32),
+            control: rgb(0x33, 0x33, 0x36),
+            control_hover: rgb(0x3b, 0x3b, 0x3f),
+            control_pressed: rgb(0x2c, 0x2c, 0x2f),
+            field_bg: rgb(0x1e, 0x1e, 0x20),
+            caption_hover: rgb(0x2e, 0x2e, 0x31),
+            caption_pressed: rgb(0x38, 0x38, 0x3b),
+            close_hover: rgb(0xc4, 0x2b, 0x1c),
+            close_pressed: rgb(0xa8, 0x26, 0x1a),
+            text: rgb(0xeb, 0xeb, 0xec),
+            text_dim: rgb(0xa8, 0xa8, 0xac),
+            text_faint: rgb(0x7c, 0x7c, 0x81),
+            error: rgb(0xff, 0x6b, 0x6b),
+            warning: rgb(0xf2, 0xb1, 0x3d),
+            success: rgb(0x4c, 0xc3, 0x84),
             selection_bg: Color32::from_rgba_premultiplied(0x1d, 0x3a, 0x6e, 0xc0),
-            selection_stroke: Color32::from_rgb(0x4c, 0x8d, 0xff),
+            selection_stroke: accent,
             highlight_bg: Color32::from_rgba_premultiplied(0x6e, 0x5a, 0x10, 0xc0),
-            checker_a: Color32::from_rgb(0x3a, 0x3a, 0x3e),
-            checker_b: Color32::from_rgb(0x2e, 0x2e, 0x32),
-            canvas_bg: Color32::from_rgb(0x1c, 0x1c, 0x1f),
-            grid_line: Color32::from_rgb(0x33, 0x33, 0x39),
-            header_bg: Color32::from_rgb(0x2c, 0x2c, 0x31),
-            gutter_bg: Color32::from_rgb(0x20, 0x20, 0x24),
-            overlay_bg: Color32::from_rgba_premultiplied(0x10, 0x10, 0x12, 0xd8),
+            checker_a: rgb(0x3a, 0x3a, 0x3e),
+            checker_b: rgb(0x2e, 0x2e, 0x32),
+            canvas_bg: rgb(0x18, 0x18, 0x1a),
+            grid_line: rgb(0x34, 0x34, 0x37),
+            header_bg: rgb(0x2d, 0x2d, 0x30),
+            gutter_bg: rgb(0x21, 0x21, 0x23),
+            overlay_bg: Color32::from_rgba_premultiplied(0x2b, 0x2b, 0x2e, 0xf4),
             page_selection: Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 0x5c),
             page_match: Color32::from_rgba_unmultiplied(0xff, 0xd4, 0x00, 0x66),
             page_match_current: Color32::from_rgba_unmultiplied(0xff, 0x8a, 0x00, 0x8c),
-            page_match_outline: Color32::from_rgb(0xd9, 0x6c, 0x00),
-            edited_bg: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x22),
-            edited_mark: Color32::from_rgb(0x4c, 0x8d, 0xff),
-            md_syntax: Color32::from_rgb(0x6c, 0x6c, 0x76),
-            md_list_marker: Color32::from_rgb(0x7f, 0xa6, 0xf0),
-            md_code_bg: Color32::from_rgb(0x30, 0x30, 0x36),
-            md_code_block_bg: Color32::from_rgb(0x1e, 0x1e, 0x22),
-            md_quote_bar: Color32::from_rgb(0x4a, 0x4a, 0x52),
-            md_quote_text: Color32::from_rgb(0xb4, 0xb4, 0xbc),
-            md_link: Color32::from_rgb(0x6f, 0xa3, 0xff),
-            md_task_done: Color32::from_rgb(0x80, 0x80, 0x88),
-            md_rule: Color32::from_rgb(0x3e, 0x3e, 0x46),
-            drawer_bg: Color32::from_rgb(0x1f, 0x1f, 0x23),
-            drawer_border: Color32::from_rgb(0x38, 0x38, 0x3e),
+            page_match_outline: rgb(0xd9, 0x6c, 0x00),
+            edited_bg: tint(0x22),
+            edited_mark: accent,
+            md_syntax: rgb(0x6c, 0x6c, 0x72),
+            md_list_marker: rgb(0x7f, 0xa6, 0xf0),
+            md_code_bg: rgb(0x32, 0x32, 0x36),
+            md_code_block_bg: rgb(0x1f, 0x1f, 0x21),
+            md_quote_bar: rgb(0x4c, 0x4c, 0x51),
+            md_quote_text: rgb(0xb6, 0xb6, 0xbb),
+            md_link: rgb(0x72, 0xa8, 0xff),
+            md_task_done: rgb(0x80, 0x80, 0x86),
+            md_rule: rgb(0x3e, 0x3e, 0x43),
+            drawer_bg: rgb(0x20, 0x20, 0x22),
+            drawer_border: rgb(0x39, 0x39, 0x3c),
             drawer_shadow: Color32::from_black_alpha(0x70),
-            drawer_item_hover: Color32::from_rgb(0x2a, 0x2a, 0x30),
-            drawer_item_active: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x2e),
-            drawer_grip: Color32::from_rgb(0x70, 0x70, 0x7a),
-            minimap_bg: Color32::from_rgb(0x21, 0x21, 0x25),
-            minimap_slider: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x2c),
-            minimap_slider_active: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0x48),
-            minimap_slider_stroke: Color32::from_rgba_unmultiplied(0x4c, 0x8d, 0xff, 0xb0),
+            drawer_item_hover: rgb(0x2b, 0x2b, 0x2e),
+            drawer_item_active: tint(0x2c),
+            drawer_grip: rgb(0x70, 0x70, 0x76),
+            minimap_bg: rgb(0x21, 0x21, 0x23),
+            minimap_slider: tint(0x2c),
+            minimap_slider_active: tint(0x48),
+            minimap_slider_stroke: tint(0xb0),
             modal_backdrop: Color32::from_black_alpha(0x80),
-            danger: Color32::from_rgb(0xff, 0x6b, 0x6b),
-            note_glyph: Color32::from_rgb(0xe8, 0xa3, 0x3d),
-            project: Color32::from_rgb(0xe8, 0xa3, 0x3d),
+            danger: rgb(0xff, 0x6b, 0x6b),
+            note_glyph: rgb(0xe8, 0xa3, 0x3d),
+            image_glyph: rgb(0x5b, 0xa4, 0xf5),
+            pdf_glyph: rgb(0xf0, 0x60, 0x55),
+            csv_glyph: rgb(0x4c, 0xc3, 0x84),
+            project: rgb(0xe8, 0xa3, 0x3d),
             metrics: Metrics::default(),
         }
     }
 
     pub fn light() -> Self {
+        let rgb = Color32::from_rgb;
+        let accent = rgb(0x25, 0x63, 0xeb);
+        let tint = |alpha| Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, alpha);
         Self {
             dark: false,
-            content_bg: Color32::from_rgb(0xfb, 0xfb, 0xfc),
-            strip_bg: Color32::from_rgb(0xe8, 0xe8, 0xeb),
-            tab_hover_bg: Color32::from_rgb(0xdb, 0xdb, 0xdf),
-            tab_text: Color32::from_rgb(0x1b, 0x1b, 0x1f),
-            tab_text_inactive: Color32::from_rgb(0x5c, 0x5c, 0x64),
-            separator: Color32::from_rgb(0xcc, 0xcc, 0xd2),
-            accent: Color32::from_rgb(0x25, 0x63, 0xeb),
-            caption_hover: Color32::from_rgb(0xd6, 0xd6, 0xdb),
-            caption_pressed: Color32::from_rgb(0xc8, 0xc8, 0xce),
-            close_hover: Color32::from_rgb(0xc4, 0x2b, 0x1c),
-            close_pressed: Color32::from_rgb(0xa8, 0x26, 0x1a),
-            text: Color32::from_rgb(0x1b, 0x1b, 0x1f),
-            text_dim: Color32::from_rgb(0x5f, 0x5f, 0x66),
-            error: Color32::from_rgb(0xc0, 0x1c, 0x28),
+            content_bg: rgb(0xfc, 0xfc, 0xfd),
+            strip_bg: rgb(0xec, 0xec, 0xee),
+            tab_hover_bg: rgb(0xe0, 0xe0, 0xe3),
+            tab_text: rgb(0x1a, 0x1a, 0x1c),
+            tab_text_inactive: rgb(0x5a, 0x5a, 0x60),
+            separator: rgb(0xde, 0xde, 0xe1),
+            border_strong: rgb(0xc4, 0xc4, 0xc9),
+            accent,
+            accent_fill: accent,
+            accent_fill_hover: rgb(0x1d, 0x4f, 0xd8),
+            on_accent: Color32::WHITE,
+            surface_raised: rgb(0xff, 0xff, 0xff),
+            control: rgb(0xf0, 0xf0, 0xf2),
+            control_hover: rgb(0xe6, 0xe6, 0xe9),
+            control_pressed: rgb(0xdc, 0xdc, 0xe0),
+            field_bg: rgb(0xff, 0xff, 0xff),
+            caption_hover: rgb(0xdc, 0xdc, 0xdf),
+            caption_pressed: rgb(0xcf, 0xcf, 0xd3),
+            close_hover: rgb(0xc4, 0x2b, 0x1c),
+            close_pressed: rgb(0xa8, 0x26, 0x1a),
+            text: rgb(0x1a, 0x1a, 0x1c),
+            text_dim: rgb(0x5e, 0x5e, 0x64),
+            text_faint: rgb(0x8c, 0x8c, 0x92),
+            error: rgb(0xc0, 0x1c, 0x28),
+            warning: rgb(0xa8, 0x5f, 0x00),
+            success: rgb(0x16, 0x7f, 0x4a),
             selection_bg: Color32::from_rgba_premultiplied(0xb4, 0xcc, 0xf4, 0xe0),
-            selection_stroke: Color32::from_rgb(0x25, 0x63, 0xeb),
+            selection_stroke: accent,
             highlight_bg: Color32::from_rgba_premultiplied(0xf0, 0xd8, 0x60, 0xe0),
-            checker_a: Color32::from_rgb(0xff, 0xff, 0xff),
-            checker_b: Color32::from_rgb(0xe4, 0xe4, 0xe8),
-            canvas_bg: Color32::from_rgb(0xe3, 0xe3, 0xe7),
-            grid_line: Color32::from_rgb(0xe2, 0xe2, 0xe6),
-            header_bg: Color32::from_rgb(0xf0, 0xf0, 0xf3),
-            gutter_bg: Color32::from_rgb(0xf4, 0xf4, 0xf6),
-            overlay_bg: Color32::from_rgba_premultiplied(0xf8, 0xf8, 0xfa, 0xf0),
+            checker_a: rgb(0xff, 0xff, 0xff),
+            checker_b: rgb(0xe4, 0xe4, 0xe8),
+            canvas_bg: rgb(0xe4, 0xe4, 0xe7),
+            grid_line: rgb(0xe4, 0xe4, 0xe7),
+            header_bg: rgb(0xf2, 0xf2, 0xf4),
+            gutter_bg: rgb(0xf6, 0xf6, 0xf7),
+            overlay_bg: Color32::from_rgba_premultiplied(0xfb, 0xfb, 0xfc, 0xf6),
             page_selection: Color32::from_rgba_unmultiplied(0x3b, 0x82, 0xf6, 0x5c),
             page_match: Color32::from_rgba_unmultiplied(0xff, 0xd4, 0x00, 0x66),
             page_match_current: Color32::from_rgba_unmultiplied(0xff, 0x8a, 0x00, 0x8c),
-            page_match_outline: Color32::from_rgb(0xd9, 0x6c, 0x00),
-            edited_bg: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x1a),
-            edited_mark: Color32::from_rgb(0x25, 0x63, 0xeb),
-            md_syntax: Color32::from_rgb(0xa2, 0xa2, 0xaa),
-            md_list_marker: Color32::from_rgb(0x3a, 0x6c, 0xd8),
-            md_code_bg: Color32::from_rgb(0xec, 0xec, 0xf0),
-            md_code_block_bg: Color32::from_rgb(0xf2, 0xf2, 0xf5),
-            md_quote_bar: Color32::from_rgb(0xcf, 0xcf, 0xd6),
-            md_quote_text: Color32::from_rgb(0x4a, 0x4a, 0x52),
-            md_link: Color32::from_rgb(0x25, 0x63, 0xeb),
-            md_task_done: Color32::from_rgb(0x8a, 0x8a, 0x92),
-            md_rule: Color32::from_rgb(0xd6, 0xd6, 0xdc),
-            drawer_bg: Color32::from_rgb(0xf5, 0xf5, 0xf7),
-            drawer_border: Color32::from_rgb(0xd4, 0xd4, 0xda),
+            page_match_outline: rgb(0xd9, 0x6c, 0x00),
+            edited_bg: tint(0x1a),
+            edited_mark: accent,
+            md_syntax: rgb(0xa2, 0xa2, 0xa8),
+            md_list_marker: rgb(0x3a, 0x6c, 0xd8),
+            md_code_bg: rgb(0xee, 0xee, 0xf1),
+            md_code_block_bg: rgb(0xf4, 0xf4, 0xf6),
+            md_quote_bar: rgb(0xcf, 0xcf, 0xd5),
+            md_quote_text: rgb(0x4a, 0x4a, 0x50),
+            md_link: accent,
+            md_task_done: rgb(0x8a, 0x8a, 0x90),
+            md_rule: rgb(0xd8, 0xd8, 0xdd),
+            drawer_bg: rgb(0xf5, 0xf5, 0xf6),
+            drawer_border: rgb(0xde, 0xde, 0xe1),
             drawer_shadow: Color32::from_black_alpha(0x2c),
-            drawer_item_hover: Color32::from_rgb(0xe7, 0xe7, 0xeb),
-            drawer_item_active: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x1f),
-            drawer_grip: Color32::from_rgb(0x9a, 0x9a, 0xa2),
-            minimap_bg: Color32::from_rgb(0xec, 0xec, 0xef),
-            minimap_slider: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x22),
-            minimap_slider_active: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0x3a),
-            minimap_slider_stroke: Color32::from_rgba_unmultiplied(0x25, 0x63, 0xeb, 0xa0),
+            drawer_item_hover: rgb(0xe9, 0xe9, 0xec),
+            drawer_item_active: tint(0x1f),
+            drawer_grip: rgb(0x9a, 0x9a, 0xa0),
+            minimap_bg: rgb(0xee, 0xee, 0xf0),
+            minimap_slider: tint(0x22),
+            minimap_slider_active: tint(0x3a),
+            minimap_slider_stroke: tint(0xa0),
             modal_backdrop: Color32::from_black_alpha(0x50),
-            danger: Color32::from_rgb(0xc0, 0x1c, 0x28),
-            note_glyph: Color32::from_rgb(0xd9, 0x8a, 0x1c),
+            danger: rgb(0xc0, 0x1c, 0x28),
+            note_glyph: rgb(0xc9, 0x7c, 0x10),
+            image_glyph: rgb(0x1d, 0x6f, 0xd8),
+            pdf_glyph: rgb(0xd4, 0x38, 0x2c),
+            csv_glyph: rgb(0x16, 0x8f, 0x57),
             // Darker than the glyph: small text on white needs the contrast.
-            project: Color32::from_rgb(0xa8, 0x5f, 0x00),
+            project: rgb(0xa8, 0x5f, 0x00),
             metrics: Metrics::default(),
         }
     }
 
-    /// Apply to egui's own widget styling.
+    /// What's under anything floating over the window.
+    pub fn popup_shadow(&self) -> Shadow {
+        Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark { 110 } else { 45 }),
+        }
+    }
+
+    /// Apply to egui's own widget styling: every stock button, field, menu and
+    /// tooltip gets its look from here. The recipe follows rerun's `re_ui`.
     pub fn apply(&self, ctx: &egui::Context) {
+        let m = self.metrics;
         let mut visuals = if self.dark {
             egui::Visuals::dark()
         } else {
             egui::Visuals::light()
         };
         visuals.panel_fill = self.content_bg;
-        visuals.window_fill = self.content_bg;
+        visuals.window_fill = self.surface_raised;
+        visuals.window_stroke = Stroke::new(1.0, self.border_strong);
+        visuals.window_corner_radius = (m.corner_radius as u8).into();
+        visuals.menu_corner_radius = (m.corner_radius as u8).into();
+        visuals.popup_shadow = self.popup_shadow();
+        visuals.window_shadow = Shadow {
+            offset: [0, 8],
+            blur: 28,
+            ..self.popup_shadow()
+        };
+
         visuals.extreme_bg_color = self.canvas_bg;
+        visuals.text_edit_bg_color = Some(self.field_bg);
+        visuals.faint_bg_color = self.gutter_bg;
+        visuals.code_bg_color = self.md_code_bg;
         visuals.selection.bg_fill = self.selection_bg;
-        visuals.selection.stroke.color = self.selection_stroke;
-        visuals.hyperlink_color = self.accent;
-        visuals.override_text_color = Some(self.text);
-        ctx.set_visuals_of(
-            if self.dark {
-                egui::Theme::Dark
-            } else {
-                egui::Theme::Light
-            },
-            visuals,
-        );
-        ctx.set_theme(if self.dark {
+        visuals.selection.stroke = Stroke::new(1.0, self.selection_stroke);
+        visuals.hyperlink_color = self.md_link;
+        visuals.weak_text_color = Some(self.text_dim);
+        visuals.warn_fg_color = self.warning;
+        visuals.error_fg_color = self.error;
+        visuals.indent_has_left_vline = false;
+        visuals.image_loading_spinners = false;
+        visuals.disabled_alpha = 0.45;
+
+        let corner_radius = (m.control_radius as u8).into();
+        let widget = |fill: Color32, stroke: Color32, text: Color32| WidgetVisuals {
+            bg_fill: fill,
+            weak_bg_fill: fill,
+            bg_stroke: Stroke::new(1.0, stroke),
+            corner_radius,
+            fg_stroke: Stroke::new(1.0, text),
+            expansion: 0.0,
+        };
+        let w = &mut visuals.widgets;
+        w.noninteractive = widget(self.content_bg, self.separator, self.text);
+        w.inactive = widget(self.control, self.separator, self.text);
+        w.hovered = widget(self.control_hover, self.border_strong, self.text);
+        w.active = widget(self.control_pressed, self.border_strong, self.text);
+        w.open = widget(self.control_hover, self.border_strong, self.text);
+
+        let theme = if self.dark {
             egui::Theme::Dark
         } else {
             egui::Theme::Light
-        });
-        let m = self.metrics;
+        };
+        ctx.set_visuals_of(theme, visuals);
+        ctx.set_theme(theme);
         ctx.all_styles_mut(|style| {
             use egui::{FontFamily, FontId, TextStyle};
             style.text_styles = [
@@ -314,7 +433,7 @@ impl Theme {
                 ),
                 (
                     TextStyle::Heading,
-                    FontId::new(18.0, FontFamily::Proportional),
+                    FontId::new(m.title_text_size, family(SEMIBOLD)),
                 ),
                 (
                     TextStyle::Monospace,
@@ -322,7 +441,22 @@ impl Theme {
                 ),
             ]
             .into();
+            let s = &mut style.spacing;
+            s.item_spacing = egui::vec2(8.0, 3.0);
+            s.button_padding = egui::vec2(10.0, 3.0);
+            s.interact_size = egui::vec2(40.0, m.control_height);
+            s.menu_margin = egui::Margin::same(4);
+            s.menu_spacing = 0.0;
+            s.indent = 14.0;
+            s.icon_width = 16.0;
+            s.icon_width_inner = 10.0;
+            s.icon_spacing = 6.0;
+            s.tooltip_width = 360.0;
+            s.scroll.bar_width = 8.0;
+            s.scroll.floating_width = 3.0;
+            s.scroll.bar_outer_margin = 2.0;
             style.interaction.tooltip_delay = 0.35;
+            style.animation_time = 0.09;
         });
     }
 
@@ -358,12 +492,44 @@ pub enum FontRole {
 pub const SEMIBOLD: &str = "whir-semibold";
 pub const BOLD: &str = "whir-bold";
 pub const MONO_BOLD: &str = "whir-mono-bold";
+/// The icon font: see [`crate::icons`].
+pub const ICONS: &str = "whir-icons";
+/// Text marks on images: see [`crate::marks::font`].
+pub const MARKS: &str = "whir-marks";
 
 /// `(family, is_monospace)` for every named family.
-pub const NAMED_FAMILIES: &[(&str, bool)] = &[(SEMIBOLD, false), (BOLD, false), (MONO_BOLD, true)];
+pub const NAMED_FAMILIES: &[(&str, bool)] = &[
+    (SEMIBOLD, false),
+    (BOLD, false),
+    (MONO_BOLD, true),
+    (ICONS, false),
+    (MARKS, false),
+];
 
 pub fn family(name: &'static str) -> egui::FontFamily {
     egui::FontFamily::Name(name.into())
+}
+
+/// egui's own fonts with every named family bound to them, for what doesn't
+/// load whir's (tests): using a named family would otherwise panic.
+pub fn test_fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let body = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for &(name, _) in NAMED_FAMILIES {
+        fonts.families.insert(family(name), body.clone());
+    }
+    fonts
+}
+
+/// A context with [`test_fonts`].
+pub fn test_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(test_fonts());
+    ctx
 }
 
 /// A font the shell loads from `%WINDIR%\Fonts` at startup.
@@ -372,89 +538,103 @@ pub fn family(name: &'static str) -> egui::FontFamily {
 pub struct FontSpec {
     pub name: &'static str,
     pub file: &'static str,
+    /// Used when `file` isn't there (older Windows). Takes no `axes`.
+    pub alternate: Option<&'static str>,
     /// Face index inside a `.ttc` collection.
     pub index: u32,
     pub role: FontRole,
+    /// Where a variable font sits on its axes.
+    pub axes: &'static [(&'static [u8; 4], f32)],
+    /// Grid-fit the outlines. An unhinted font costs nothing to set up.
+    pub hinted: bool,
+    /// Glyphs moved down by this fraction of the font's size.
+    pub drop: f32,
+}
+
+impl FontSpec {
+    const fn new(name: &'static str, file: &'static str, role: FontRole) -> Self {
+        Self {
+            name,
+            file,
+            alternate: None,
+            index: 0,
+            role,
+            axes: &[],
+            hinted: true,
+            drop: 0.0,
+        }
+    }
+
+    const fn or(self, alternate: &'static str) -> Self {
+        Self {
+            alternate: Some(alternate),
+            ..self
+        }
+    }
+
+    const fn at(self, axes: &'static [(&'static [u8; 4], f32)]) -> Self {
+        Self {
+            axes,
+            hinted: false,
+            ..self
+        }
+    }
+
+    const fn unhinted(self) -> Self {
+        Self {
+            hinted: false,
+            ..self
+        }
+    }
+
+    const fn dropped(self, drop: f32) -> Self {
+        Self { drop, ..self }
+    }
 }
 
 /// Loaded in order; the first of each role is the primary face.
-/// Ships no font bytes in the binary: every Windows 10/11 install has these.
+/// Ships no font bytes in the binary: Windows 11 has all of these, and every
+/// Windows 10 install has the alternates.
 pub const FONTS: &[FontSpec] = &[
-    FontSpec {
-        name: "Segoe UI",
-        file: "segoeui.ttf",
-        index: 0,
-        role: FontRole::Proportional,
-    },
-    FontSpec {
-        name: "Consolas",
-        file: "consola.ttf",
-        index: 0,
-        role: FontRole::Monospace,
-    },
-    FontSpec {
-        name: "Segoe UI Semibold",
-        file: "seguisb.ttf",
-        index: 0,
-        role: FontRole::Family(SEMIBOLD),
-    },
+    // Grayscale text reads thin, so the regular face sits a little above 400.
+    FontSpec::new("Segoe UI Variable", "SegUIVar.ttf", FontRole::Proportional)
+        .or("segoeui.ttf")
+        .at(&[(b"wght", 450.0), (b"opsz", 10.5)]),
+    FontSpec::new("Consolas", "consola.ttf", FontRole::Monospace),
+    FontSpec::new(
+        "Segoe UI Variable Semibold",
+        "SegUIVar.ttf",
+        FontRole::Family(SEMIBOLD),
+    )
+    .or("seguisb.ttf")
+    .at(&[(b"wght", 600.0), (b"opsz", 14.0)]),
+    FontSpec::new(
+        "Segoe Fluent Icons",
+        "SegoeIcons.ttf",
+        FontRole::Family(ICONS),
+    )
+    .or("segmdl2.ttf")
+    .unhinted()
+    // Its glyphs sit high in the line, against the text beside them.
+    .dropped(0.08),
 ];
 
-/// Bold faces, loaded the first time a note uses them.
+/// Faces loaded the first time they're used: bold in a note, text on an image.
 pub const LAZY_RICH_FONTS: &[FontSpec] = &[
-    FontSpec {
-        name: "Segoe UI Bold",
-        file: "segoeuib.ttf",
-        index: 0,
-        role: FontRole::Family(BOLD),
-    },
-    FontSpec {
-        name: "Consolas Bold",
-        file: "consolab.ttf",
-        index: 0,
-        role: FontRole::Family(MONO_BOLD),
-    },
+    FontSpec::new("Segoe UI Bold", "segoeuib.ttf", FontRole::Family(BOLD)),
+    FontSpec::new("Consolas Bold", "consolab.ttf", FontRole::Family(MONO_BOLD)),
+    FontSpec::new("Segoe UI", "segoeui.ttf", FontRole::Family(MARKS)),
 ];
 
 /// Loaded on demand the first time text needs glyphs the primary fonts lack
-/// (symbols, CJK, emoji) — see [`request_fallback_fonts`]. Never loaded at startup.
+/// (symbols, CJK, emoji) -- see [`request_fallback_fonts`]. Never loaded at startup.
 pub const LAZY_FALLBACK_FONTS: &[FontSpec] = &[
-    FontSpec {
-        name: "Segoe UI Symbol",
-        file: "seguisym.ttf",
-        index: 0,
-        role: FontRole::Fallback,
-    },
-    FontSpec {
-        name: "Microsoft YaHei",
-        file: "msyh.ttc",
-        index: 0,
-        role: FontRole::Fallback,
-    },
-    FontSpec {
-        name: "Yu Gothic",
-        file: "YuGothM.ttc",
-        index: 0,
-        role: FontRole::Fallback,
-    },
-    FontSpec {
-        name: "Malgun Gothic",
-        file: "malgun.ttf",
-        index: 0,
-        role: FontRole::Fallback,
-    },
-    FontSpec {
-        name: "Nirmala UI",
-        file: "Nirmala.ttc",
-        index: 0,
-        role: FontRole::Fallback,
-    },
-    FontSpec {
-        name: "Segoe UI Emoji",
-        file: "seguiemj.ttf",
-        index: 0,
-        role: FontRole::Fallback,
-    },
+    FontSpec::new("Segoe UI Symbol", "seguisym.ttf", FontRole::Fallback),
+    FontSpec::new("Microsoft YaHei", "msyh.ttc", FontRole::Fallback),
+    FontSpec::new("Yu Gothic", "YuGothM.ttc", FontRole::Fallback),
+    FontSpec::new("Malgun Gothic", "malgun.ttf", FontRole::Fallback),
+    FontSpec::new("Nirmala UI", "Nirmala.ttc", FontRole::Fallback),
+    FontSpec::new("Segoe UI Emoji", "seguiemj.ttf", FontRole::Fallback),
 ];
 
 static FALLBACK_REQUESTED: std::sync::atomic::AtomicBool =

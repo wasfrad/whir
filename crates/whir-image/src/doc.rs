@@ -19,12 +19,14 @@ use egui::{
     Modifiers, PointerButton, Pos2, Rect, Sense, Shape, Stroke, TextBuffer, TextureOptions,
     UiBuilder, Vec2, pos2, vec2,
 };
+use whir_core::icons::Icon;
+use whir_core::kit;
 use whir_core::marks::{self, Ink, Kind, Mark, MarkSet, Pen, Text};
 use whir_core::theme::Theme;
-use whir_core::toolbar::{self, Glyph};
+use whir_core::toolbar;
 use whir_core::{
-    Captures, ClipImage, DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec,
-    SaveResult, TextureRegistry, Waker,
+    Captures, ClipImage, DocCx, DocKind, DocRequest, Document, Menu, OpenCx, Persistence,
+    SaveAsSpec, SaveResult, TextureRegistry, Waker,
 };
 
 use crate::decode::Decoded;
@@ -35,7 +37,9 @@ use crate::prefs::{self, ZoomPref};
 use crate::tiles::{self, Level};
 use crate::view::{self, Mode, View};
 use crate::{bake, decode, folder};
+use commands::Cmd;
 
+mod commands;
 mod tools;
 
 use tools::{Handle, MIN_DRAW, drawn, moved};
@@ -284,6 +288,10 @@ pub struct ImageDoc {
     prefetching: Vec<PathBuf>,
     /// Transient "1920 × 1080 · 50%" pill: text and when it hides.
     toast: Option<(String, f64)>,
+    /// What the toolbar and the menus asked for, for the next frame.
+    pending: Vec<Cmd>,
+    /// The zoom on screen, 100 being actual size.
+    shown_percent: Option<f32>,
     checker: Option<egui::TextureHandle>,
     /// Quarter turns clockwise per image (non-zero only), for as long as the
     /// tab is open. Only the screen turns: files are never changed.
@@ -355,6 +363,8 @@ impl ImageDoc {
             cache: Vec::new(),
             prefetching: Vec::new(),
             toast: None,
+            pending: Vec::new(),
+            shown_percent: None,
             checker: None,
             rotations: Vec::new(),
             tool: None,
@@ -1394,42 +1404,53 @@ impl ImageDoc {
                 turn = Some(true);
             }
         });
+        // The tools ask for what the keys do.
+        for cmd in std::mem::take(&mut self.pending) {
+            match cmd {
+                Cmd::ZoomIn => self.view.zoom_by(1.25, egui::Vec2::ZERO, image, vp, ppp),
+                Cmd::ZoomOut => self.view.zoom_by(0.8, egui::Vec2::ZERO, image, vp, ppp),
+                Cmd::Fit => fit_pick = Some(true),
+                Cmd::ActualSize => fit_pick = Some(false),
+                Cmd::Go(by) => nav = by,
+                Cmd::Turn(clockwise) => turn = Some(clockwise),
+                Cmd::Undo => history = Some(true),
+                Cmd::Redo => history = Some(false),
+                Cmd::Copy => copy = true,
+            }
+        }
+        self.shown_percent = Some(self.view.zoom(image, vp, ppp) * ppp * 100.0);
         let fitted = self.view.mode == Mode::Fit;
         let actual = (self.view.zoom(image, vp, ppp) * ppp - 1.0).abs() < 1e-3;
         resp.context_menu(|ui| {
             ui.set_min_width(190.0);
-            let item = egui::Button::new("Fit to window")
-                .shortcut_text("0")
-                .selected(fitted);
+            let item = kit::menu_entry(Some(Icon::FitPage), "Fit to window", "0").selected(fitted);
             if ui.add(item).clicked() {
                 fit_pick = Some(true);
                 ui.close();
             }
-            let item = egui::Button::new("Actual size")
-                .shortcut_text("1")
-                .selected(actual);
+            let item = kit::menu_entry(None, "Actual size", "1").selected(actual);
             if ui.add(item).clicked() {
                 fit_pick = Some(false);
                 ui.close();
             }
             ui.separator();
-            let item = egui::Button::new("Copy image").shortcut_text("Ctrl+C");
+            let item = kit::menu_entry(Some(Icon::Copy), "Copy image", "Ctrl+C");
             if ui.add(item).clicked() {
                 copy = true;
                 ui.close();
             }
-            let item = egui::Button::new("Save a copy…").shortcut_text("Ctrl+Shift+S");
+            let item = kit::menu_entry(Some(Icon::SaveAs), "Save a copy…", "Ctrl+Shift+S");
             if ui.add(item).clicked() {
                 requests.push(DocRequest::SaveAs);
                 ui.close();
             }
             ui.separator();
-            let right = egui::Button::new("Rotate right").shortcut_text("R");
+            let right = kit::menu_entry(Some(Icon::Rotate), "Rotate right", "R");
             if ui.add(right).clicked() {
                 turn = Some(true);
                 ui.close();
             }
-            let left = egui::Button::new("Rotate left").shortcut_text("Shift+R");
+            let left = kit::menu_entry(None, "Rotate left", "Shift+R");
             if ui.add(left).clicked() {
                 turn = Some(false);
                 ui.close();
@@ -1591,35 +1612,6 @@ impl ImageDoc {
             self.request_full();
         }
     }
-
-    fn paint_toast(&mut self, ui: &egui::Ui, viewport: Rect, theme: &Theme) {
-        let Some((text, until)) = &self.toast else {
-            return;
-        };
-        let now = ui.input(|i| i.time);
-        if now >= *until {
-            self.toast = None;
-            return;
-        }
-        let alpha = ((until - now) / 0.25).clamp(0.0, 1.0) as f32;
-        let painter = ui.painter();
-        let galley = painter.layout_no_wrap(
-            text.clone(),
-            egui::FontId::proportional(12.5),
-            theme.text.gamma_multiply(alpha),
-        );
-        let pad = vec2(12.0, 6.0);
-        let size = galley.size() + pad * 2.0;
-        let rect = Rect::from_center_size(
-            pos2(viewport.center().x, viewport.bottom() - 28.0 - size.y / 2.0),
-            size,
-        );
-        painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
-        painter.galley(rect.min + pad, galley, theme.text);
-        ui.ctx().request_repaint_after(
-            Duration::from_millis(30).min(Duration::from_secs_f64(until - now)),
-        );
-    }
 }
 
 fn file_title(path: &Path) -> String {
@@ -1767,12 +1759,13 @@ impl Document for ImageDoc {
 
     fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
         let theme = Theme::current();
+        self.view_tools(ui, &theme);
 
         // The highlighter, and its inks.
         let ink = edit::current_ink();
         let on = self.tool == Some(Tool::Highlight);
         let pressed =
-            toolbar::tool_button(ui, Glyph::Highlighter, on, Some(ink.color()), true, &theme);
+            toolbar::tool_button(ui, Icon::Highlighter, on, Some(ink.color()), true, &theme);
         if pressed.clicked {
             self.toggle_tool(Tool::Highlight);
         }
@@ -1807,7 +1800,7 @@ impl Document for ImageDoc {
         // Text, and its pens.
         let pen = edit::current_pen();
         let on = self.tool == Some(Tool::Text);
-        let pressed = toolbar::tool_button(ui, Glyph::Text, on, Some(pen.color()), true, &theme);
+        let pressed = toolbar::tool_button(ui, Icon::Text, on, Some(pen.color()), true, &theme);
         if pressed.clicked {
             self.toggle_tool(Tool::Text);
         }
@@ -1840,6 +1833,15 @@ impl Document for ImageDoc {
             });
             true
         });
+        self.history_tools(ui, &theme);
+    }
+
+    fn menu(&mut self, menu: Menu, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        self.entries(menu, ui);
+    }
+
+    fn status(&self) -> String {
+        self.status_line()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>) {
@@ -1902,7 +1904,7 @@ impl Document for ImageDoc {
                 egui::Spinner::new().size(20.0).color(theme.text_dim),
             );
         }
-        self.paint_toast(ui, viewport, &theme);
+        kit::toast(ui, viewport, &mut self.toast, &theme);
     }
 }
 

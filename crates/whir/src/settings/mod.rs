@@ -9,7 +9,9 @@ mod viewing;
 
 use std::path::Path;
 
-use egui::{Align, Color32, Layout, RichText, Sense, vec2};
+use egui::{Align, Layout, RichText, vec2};
+use whir_core::icons::Icon;
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::timesheet::{self as ts, Store};
 use whir_core::{DocCx, DocKind, DocRequest, Document};
@@ -39,6 +41,15 @@ impl Section {
             "viewing" | "pdf" | "pdfs" | "images" | "zoom" => Some(Section::Viewing),
             "startup" | "dock" | "general" | "window" => Some(Section::Startup),
             _ => None,
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Section::Timesheet => Icon::Stopwatch,
+            Section::Timers => Icon::People,
+            Section::Viewing => Icon::Picture,
+            Section::Startup => Icon::Settings,
         }
     }
 
@@ -134,10 +145,10 @@ impl Document for SettingsDoc {
                 .max_rect(nav.shrink2(vec2(10.0, 14.0)))
                 .layout(Layout::top_down(Align::Min)),
         );
-        nav_ui.label(RichText::new("Settings").size(17.0).color(theme.text));
-        nav_ui.add_space(12.0);
+        nav_ui.label(RichText::new("Settings").heading().color(theme.text));
+        nav_ui.add_space(10.0);
         for s in Section::ALL {
-            if nav_item(&mut nav_ui, s.label(), s == self.section, &theme) {
+            if kit::nav_row(&mut nav_ui, s.icon(), s.label(), s == self.section, &theme) {
                 self.section = s;
             }
         }
@@ -184,44 +195,15 @@ impl Document for SettingsDoc {
     }
 }
 
-fn nav_item(ui: &mut egui::Ui, label: &str, on: bool, theme: &Theme) -> bool {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::CLICK);
-    let fill = if on {
-        theme.drawer_item_active
-    } else if response.hovered() {
-        theme.drawer_item_hover
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, 6.0, fill);
-    ui.painter().text(
-        rect.left_center() + vec2(10.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(13.5),
-        if on { theme.text } else { theme.text_dim },
-    );
-    response.clicked()
-}
-
 /// A section heading.
 fn heading(ui: &mut egui::Ui, text: &str, theme: &Theme) {
-    ui.label(RichText::new(text).size(16.0).color(theme.text));
-    ui.add_space(4.0);
+    ui.label(RichText::new(text).heading().color(theme.text));
+    ui.add_space(6.0);
 }
 
 /// A line of explanation under a heading or a control.
 fn note(ui: &mut egui::Ui, text: &str, theme: &Theme) {
     ui.label(RichText::new(text).color(theme.text_dim));
-}
-
-/// A button in the accent colour: the one thing to do here.
-fn primary(ui: &mut egui::Ui, text: &str, theme: &Theme) -> bool {
-    ui.add(
-        egui::Button::new(RichText::new(format!("  {text}  ")).color(Color32::WHITE))
-            .fill(theme.accent),
-    )
-    .clicked()
 }
 
 /// A one-line text field that keeps what's typed to itself until Enter (or
@@ -422,7 +404,7 @@ mod tests {
             })
             .unwrap();
         let mut h = Harness {
-            ctx: egui::Context::default(),
+            ctx: whir_core::theme::test_context(),
             doc: SettingsDoc::with_store(Section::Timesheet, Some(store)),
             requests: Vec::new(),
             time: 0.0,

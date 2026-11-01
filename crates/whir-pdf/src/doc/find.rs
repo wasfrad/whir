@@ -46,6 +46,11 @@ impl PdfDoc {
         }
     }
 
+    pub(super) fn open_find(&mut self) {
+        let prefill = self.prefill();
+        self.find.open_with(prefill);
+    }
+
     /// The selection as a find query, if it's a short run within one line.
     fn prefill(&self) -> Option<String> {
         let s = self

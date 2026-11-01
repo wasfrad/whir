@@ -10,15 +10,15 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Frame, Id, Key, Modifiers, Panel, Rect, Sense, Stroke,
-    pos2, vec2,
+    Align2, Color32, FontId, Frame, Id, Key, Modifiers, Panel, Rect, Sense, Stroke, pos2, vec2,
 };
 use whir_core::captures::{CaptureEntry, CapturesSnapshot};
+use whir_core::icons::{self, Icon};
+use whir_core::kit;
 use whir_core::library::{EntryKind, LibraryEntry, LibrarySnapshot};
 use whir_core::marks::{self, Kind};
 use whir_core::theme::Theme;
 use whir_core::todos::State as Todo;
-use whir_core::toolbar::{paint_check, paint_flag};
 use whir_core::{DocKind, OpenCx, settings};
 use whir_image::{Thumb, Thumbs};
 
@@ -296,6 +296,7 @@ impl Drawer {
     }
 
     /// The drawer along the bottom of `ui`, before the document takes what is left.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -303,6 +304,7 @@ impl Drawer {
         shots: &CapturesSnapshot,
         cx: &OpenCx,
         active: Option<&Path>,
+        status: &str,
         theme: &Theme,
     ) -> Out {
         let mut out = Out::default();
@@ -332,7 +334,7 @@ impl Drawer {
                 .show_separator_line(false)
                 .frame(frame)
                 .show(ui, |ui| {
-                    action = self.header(ui, lib, shots, cx, false, theme, &mut out);
+                    action = self.header(ui, lib, shots, cx, false, status, theme, &mut out);
                 })
                 .response
                 .rect
@@ -349,7 +351,8 @@ impl Drawer {
                     let all = ui.max_rect();
                     let head = Rect::from_min_size(all.min, vec2(all.width(), header_h));
                     let mut head_ui = ui.new_child(egui::UiBuilder::new().max_rect(head));
-                    action = self.header(&mut head_ui, lib, shots, cx, true, theme, &mut out);
+                    action =
+                        self.header(&mut head_ui, lib, shots, cx, true, status, theme, &mut out);
                     let body = Rect::from_min_max(pos2(all.left(), head.bottom()), all.max);
                     let mut body_ui = ui
                         .new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(10.0, 4.0))));
@@ -405,11 +408,12 @@ impl Drawer {
         shots: &CapturesSnapshot,
         cx: &OpenCx,
         open: bool,
+        status: &str,
         theme: &Theme,
         out: &mut Out,
     ) -> Option<HeaderAction> {
         let rect = ui.max_rect();
-        let painter = ui.painter();
+        let painter = &ui.painter().clone();
         painter.line_segment(
             [rect.left_top(), rect.right_top()],
             Stroke::new(1.0, theme.separator),
@@ -422,27 +426,19 @@ impl Drawer {
             } else {
                 "Expand drawer"
             });
-        if fold.hovered() {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        }
         let mut action = fold.clicked().then_some(HeaderAction::Toggle);
-        // ▸ folded, ▾ open.
-        let c = pos2(rect.left() + 14.0, rect.center().y);
-        let s = Stroke::new(1.3, theme.text_dim);
-        let pts = if open {
-            vec![
-                c + vec2(-4.0, -2.0),
-                c + vec2(0.0, 2.5),
-                c + vec2(4.0, -2.0),
-            ]
+        let chevron = if open {
+            Icon::ChevronDown
         } else {
-            vec![
-                c + vec2(-2.0, -4.0),
-                c + vec2(2.5, 0.0),
-                c + vec2(-2.0, 4.0),
-            ]
+            Icon::ChevronRight
         };
-        painter.add(egui::Shape::line(pts, s));
+        icons::paint(
+            painter,
+            pos2(rect.left() + 14.0, rect.center().y),
+            chevron,
+            10.0,
+            theme.text_dim,
+        );
         let mut left = fold_rect.right();
         for (mode, title, count) in [
             (Mode::Notes, "Notes", lib.entries.len()),
@@ -450,7 +446,11 @@ impl Drawer {
         ] {
             let selected = mode == self.mode;
             let color = if selected { theme.text } else { theme.text_dim };
-            let name = painter.layout_no_wrap(title.to_owned(), FontId::proportional(13.5), color);
+            let name = painter.layout_no_wrap(
+                title.to_owned(),
+                FontId::proportional(theme.metrics.body_text_size),
+                color,
+            );
             let count = painter.layout_no_wrap(
                 count.to_string(),
                 FontId::proportional(theme.metrics.small_text_size),
@@ -493,22 +493,35 @@ impl Drawer {
                 count,
                 theme.text_dim,
             );
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            }
             if resp.clicked() {
                 action = Some(HeaderAction::Select(mode));
             }
             left = tab_rect.right() + 4.0;
         }
+        // Capturing is always a click away, whichever library is showing.
+        let capture_rect = Rect::from_min_size(pos2(left, rect.top()), vec2(0.0, rect.height()));
+        let mut capture_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(capture_rect.with_max_x(rect.right()))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let capture = whir_core::toolbar::labelled_button(
+            &mut capture_ui,
+            Icon::Camera,
+            "Capture",
+            false,
+            theme,
+        )
+        .on_hover_text("Take a screenshot (Ctrl+PrtSc)");
+        if capture.clicked() {
+            out.capture = true;
+        }
+        left = capture.rect.right() + 4.0;
         let spare = Rect::from_min_max(
             pos2(left, rect.top()),
             pos2((rect.right() - 74.0).max(left), rect.bottom()),
         );
         let resp = ui.interact(spare, Id::new("whir.drawer.header"), Sense::CLICK);
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        }
         if resp.clicked() {
             action = Some(HeaderAction::Toggle);
         }
@@ -537,13 +550,13 @@ impl Drawer {
         match self.mode {
             Mode::Notes => {
                 if let Some(dir) = cx.library.dir()
-                    && icon_button(&mut buttons, Icon::Folder, theme)
+                    && icon_button(&mut buttons, Icon::Folder, "folder", theme)
                         .on_hover_text("Open the notes folder")
                         .clicked()
                 {
                     out.reveal = Some(dir.to_path_buf());
                 }
-                if icon_button(&mut buttons, Icon::Plus, theme)
+                if icon_button(&mut buttons, Icon::Plus, "new-note", theme)
                     .on_hover_text("New note (Ctrl+N)")
                     .clicked()
                 {
@@ -552,18 +565,29 @@ impl Drawer {
             }
             Mode::Shots => {
                 if let Some(dir) = cx.captures.dir()
-                    && icon_button(&mut buttons, Icon::Folder, theme)
+                    && icon_button(&mut buttons, Icon::Folder, "folder", theme)
                         .on_hover_text("Open the screenshots folder")
                         .clicked()
                 {
                     out.reveal = Some(dir.to_path_buf());
                 }
-                if icon_button(&mut buttons, Icon::Camera, theme)
-                    .on_hover_text("Open the capture dock")
-                    .clicked()
-                {
-                    out.capture = true;
-                }
+            }
+        }
+        if !status.is_empty() {
+            // The document's line, right up against the buttons.
+            let width = spare.width() - 16.0;
+            let galley = elide(
+                painter,
+                status,
+                FontId::proportional(theme.metrics.small_text_size),
+                width.max(0.0),
+            );
+            let at = pos2(
+                spare.right() - 6.0 - galley.size().x,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            if !self.focused {
+                painter.galley(at, galley, theme.text_dim);
             }
         }
         action
@@ -820,8 +844,10 @@ fn note_row(
     };
     let mark = pos2(rect.left() + 14.0, rect.center().y);
     match e.todo {
-        Some(Todo::Open { .. }) => paint_flag(painter, mark, theme.note_glyph, true),
-        Some(Todo::Done { .. }) => paint_check(painter, mark, theme.text_dim),
+        Some(Todo::Open { .. }) => {
+            icons::paint(painter, mark, Icon::FlagFilled, 14.0, theme.note_glyph)
+        }
+        Some(Todo::Done { .. }) => icons::paint(painter, mark, Icon::Check, 13.0, theme.text_dim),
         None => paint_kind_glyph(painter, mark, kind, theme),
     }
     let done = matches!(e.todo, Some(Todo::Done { .. }));
@@ -841,7 +867,7 @@ fn note_row(
     let title = elide(
         painter,
         &e.title,
-        FontId::proportional(13.5),
+        FontId::proportional(theme.metrics.body_text_size),
         rect.right() - 16.0 - age_w - left,
     );
     let color = if done { theme.text_dim } else { theme.text };
@@ -850,12 +876,9 @@ fn note_row(
         title,
         color,
     );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        if !e.preview.is_empty() {
-            let preview = e.preview.clone();
-            resp.clone().on_hover_text_at_pointer(preview);
-        }
+    if resp.hovered() && !e.preview.is_empty() {
+        let preview = e.preview.clone();
+        resp.clone().on_hover_text_at_pointer(preview);
     }
     let clicked = resp.clicked();
     if clicked {
@@ -888,14 +911,7 @@ fn shot_card(
     painter.rect_filled(frame, 5.0, theme.canvas_bg);
     if e.cloud_only {
         // Not downloaded: showing it would download it.
-        whir_core::theme::note_text("☁");
-        painter.text(
-            frame.center(),
-            Align2::CENTER_CENTER,
-            "☁",
-            FontId::proportional(18.0),
-            theme.text_dim,
-        );
+        icons::paint(painter, frame.center(), Icon::Cloud, 20.0, theme.text_dim);
     } else if let Thumb::Ready {
         texture,
         size,
@@ -957,9 +973,6 @@ fn shot_card(
         text,
         if active { theme.text } else { theme.text_dim },
     );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
     let clicked = resp.clicked();
     if clicked {
         out.open = Some(e.path.clone());
@@ -978,7 +991,7 @@ fn row_menu(
     out: &mut Out,
 ) {
     egui::Popup::context_menu(resp).id(id).show(|ui| {
-        if ui.button("Open").clicked() {
+        if ui.add(kit::menu_entry(None, "Open", "")).clicked() {
             out.open = Some(path.to_owned());
             ui.close();
         }
@@ -993,19 +1006,26 @@ fn row_menu(
                 }
             };
             for &(label, flag) in choices {
-                if ui.button(label).clicked() {
+                if ui
+                    .add(kit::menu_entry(Some(Icon::Flag), label, ""))
+                    .clicked()
+                {
                     out.flag = Some((path.to_owned(), flag));
                     ui.close();
                 }
             }
         }
-        if ui.button("Show in Explorer").clicked() {
+        if ui
+            .add(kit::menu_entry(Some(Icon::Folder), "Show in Explorer", ""))
+            .clicked()
+        {
             out.reveal = Some(path.to_owned());
             ui.close();
         }
         ui.separator();
+        let delete = egui::RichText::new("Delete").color(theme.danger);
         if ui
-            .button(egui::RichText::new("Delete").color(theme.danger))
+            .add(kit::menu_entry(Some(Icon::Delete), delete, ""))
             .clicked()
         {
             out.delete = Some(path.to_owned());
@@ -1014,60 +1034,15 @@ fn row_menu(
     });
 }
 
-#[derive(Clone, Copy)]
-enum Icon {
-    Plus,
-    Folder,
-    Camera,
-}
-
-/// A small frameless icon button (drawn with lines: no font needs these glyphs).
-fn icon_button(ui: &mut egui::Ui, icon: Icon, theme: &Theme) -> egui::Response {
-    let name = match icon {
-        Icon::Plus => "new-note",
-        Icon::Folder => "folder",
-        Icon::Camera => "capture",
-    };
+/// A small frameless icon button.
+fn icon_button(ui: &mut egui::Ui, icon: Icon, name: &str, theme: &Theme) -> egui::Response {
     let (_, rect) = ui.allocate_space(vec2(24.0, 24.0));
     let resp = ui.interact(rect, Id::new(("whir.drawer.action", name)), Sense::CLICK);
     let painter = ui.painter();
     if resp.hovered() {
-        painter.rect_filled(rect, 5.0, theme.drawer_item_hover);
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        painter.rect_filled(rect, theme.metrics.control_radius, theme.drawer_item_hover);
     }
-    let c = rect.center();
-    let s = Stroke::new(1.3, theme.text_dim);
-    match icon {
-        Icon::Plus => {
-            painter.line_segment([c - vec2(5.5, 0.0), c + vec2(5.5, 0.0)], s);
-            painter.line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 5.5)], s);
-        }
-        Icon::Folder => {
-            let r = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(13.0, 10.0));
-            let pts = [
-                r.left_bottom(),
-                r.left_top(),
-                pos2(r.left() + 4.5, r.top()),
-                pos2(r.left() + 6.0, r.top() + 1.8),
-                pos2(r.right(), r.top() + 1.8),
-                r.right_bottom(),
-                r.left_bottom(),
-            ];
-            painter.add(egui::Shape::line(pts.to_vec(), s));
-        }
-        Icon::Camera => {
-            let body = Rect::from_center_size(c + vec2(0.0, 1.0), vec2(14.0, 9.5));
-            painter.rect_stroke(body, 2.0, s, egui::StrokeKind::Middle);
-            let hump = [
-                c + vec2(-3.0, -3.75),
-                c + vec2(-1.75, -6.0),
-                c + vec2(1.75, -6.0),
-                c + vec2(3.0, -3.75),
-            ];
-            painter.add(egui::Shape::line(hump.to_vec(), s));
-            painter.circle_stroke(c + vec2(0.0, 1.0), 2.5, s);
-        }
-    }
+    icons::paint(painter, rect.center(), icon, 15.0, theme.text_dim);
     resp
 }
 
@@ -1330,6 +1305,7 @@ mod tests {
                     &self.shots,
                     &self.cx,
                     None,
+                    "",
                     &Theme::light(),
                 );
                 out.open = keys.open.or(out.open.take());

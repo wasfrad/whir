@@ -7,6 +7,8 @@ pub mod captures;
 pub mod document;
 pub mod file;
 pub mod find_bar;
+pub mod icons;
+pub mod kit;
 pub mod library;
 pub mod marks;
 pub mod message_doc;
@@ -24,8 +26,8 @@ pub mod waker;
 
 pub use captures::Captures;
 pub use document::{
-    ClipImage, DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec, SaveResult,
-    SearchHit, SearchState, needs_attention,
+    ClipImage, DocCx, DocKind, DocRequest, Document, Menu, OpenCx, Persistence, SaveAsSpec,
+    SaveResult, SearchHit, SearchState, needs_attention,
 };
 pub use file::FileSource;
 pub use find_bar::FindQuery;

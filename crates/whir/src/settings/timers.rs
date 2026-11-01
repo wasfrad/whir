@@ -5,10 +5,11 @@ use std::collections::HashSet;
 
 use egui::{Id, RichText, vec2};
 use whir_core::DocCx;
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::timesheet::{Rounding, Store, Txn};
 
-use super::{edit_line, heading, note, primary};
+use super::{edit_line, heading, note};
 
 /// A change to make to the timesheet, decided while drawing.
 type Change = Box<dyn FnOnce(&mut Txn)>;
@@ -181,7 +182,7 @@ impl View {
                                 .desired_width(130.0)
                                 .hint_text("Code (optional)"),
                         );
-                        add = primary(ui, "Add", theme) || enter;
+                        add = kit::primary(ui, "Add", theme).clicked() || enter;
                         cancel = ui.button("Cancel").clicked();
                     });
                     if cancel {
@@ -232,6 +233,7 @@ impl View {
         ui.horizontal(|ui| {
             ui.label("Round each project's day to");
             egui::ComboBox::from_id_salt("whir.rounding")
+                .icon(kit::combo_chevron)
                 .selected_text(rounding.label())
                 .show_ui(ui, |ui| {
                     for r in Rounding::ALL {
@@ -252,6 +254,7 @@ impl View {
         ui.horizontal(|ui| {
             ui.label("Ask whether time away counts after");
             egui::ComboBox::from_id_salt("whir.away")
+                .icon(kit::combo_chevron)
                 .selected_text(minutes(away))
                 .show_ui(ui, |ui| {
                     for m in [5, 10, 15, 20, 30, 45, 60, 0] {
@@ -265,7 +268,12 @@ impl View {
             theme,
         );
         ui.add_space(6.0);
-        ui.checkbox(&mut keep_out, "Keep the dock out while a timer runs");
+        kit::checkbox(
+            ui,
+            &mut keep_out,
+            "Keep the dock out while a timer runs",
+            theme,
+        );
         if (rounding, away, keep_out) != (o.rounding, o.away_minutes, o.keep_out) {
             self.change(store, |tx| {
                 tx.state.options.rounding = rounding;

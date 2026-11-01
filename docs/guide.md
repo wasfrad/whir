@@ -35,15 +35,21 @@ folder first. If it's blocked there, it will be blocked everywhere.
 
 ## Everywhere
 
+The menu bar (File, Edit, View, Tools, Help) has everything whir can do, each with its
+shortcut. In a narrow window it folds into one button. Beside it are the tools of the
+open document, and the strip along the bottom says how the document stands.
+
 - **Ctrl+N · the + button**: new note
 - **Ctrl+Shift+N · right-click the + button**: new table (CSV)
 - **Ctrl+O**: open files
 - **Ctrl+S · Ctrl+Shift+S**: save · save as / export a copy
 - **Ctrl+E**: the drawer along the bottom: take it to the keyboard · fold it away
-- **Camera button at the right of the toolbar**: open the capture dock
-- **Ctrl+, · the gear next to it**: Settings: the timesheet, customers & projects, PDFs & images, startup & window
+- **Capture, in the strip along the bottom · Tools › Capture screenshot**: take a screenshot
+- **Tools › Capture dock**: open the capture dock
+- **Ctrl+, · Tools › Settings**: Settings: the timesheet, customers & projects, PDFs & images, startup & window
 - **Ctrl+Shift+F · F4 / Shift+F4**: find in all tabs · next / previous result, in any file
 - **Ctrl+W / Ctrl+F4 / middle-click a tab**: close the tab (closing the last one closes whir)
+- **The arrow after the last tab**: every tab, when there are more than fit
 - **Right-click a tab**: close others · close tabs to the right · close all (leaves a blank note) · copy path · show in Explorer
 - **Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp**: next / previous tab
 - **Ctrl+1 … Ctrl+8, Ctrl+9**: go to tab n / last tab
@@ -63,10 +69,10 @@ left off-screen when monitors change.
 - **Enter in a list / task / quote**: continue it (Enter on an empty item ends it)
 - **Tab / Shift+Tab**: indent / outdent list items or selected lines
 - **Ctrl+Enter · click a box**: toggle a `- [ ]` task
-- **Ctrl+B · Ctrl+I · Ctrl+K**: bold · italic · link
+- **Ctrl+B · Ctrl+I · Ctrl+K**: bold · italic · link (also in the toolbar, with list, task, undo and redo)
 - **Ctrl+click a link**: open it
 - **Ctrl+Z / Ctrl+Y**: undo / redo
-- **Ctrl+Shift+D · the flag in the toolbar**: flag the note as a todo · mark it done
+- **Ctrl+Shift+D · Mark as todo in the toolbar**: flag the note as a todo · mark it done
 
 Notes are plain Markdown files in `Documents\whir`, saved about a second after you stop
 typing (and whenever you switch away). Other `.md` / `.txt` files — this one included —
@@ -96,6 +102,7 @@ leaving the document. This automatic fold doesn't change your fold preference fo
 notes and images.
 
 - **Notes · Images**: select that library and unfold the drawer
+- **Capture**: take a screenshot
 - **Click the chevron or unused header space · drag its top edge**: fold or unfold · make it taller or shorter (more rows of images or notes); height is shared and remembered, while manual folding is remembered for each library
 - **Click · right-click**: open · show in Explorer / delete (to the Recycle Bin)
 - **Wheel over the images**: scroll through the thumbnail rows
@@ -103,6 +110,7 @@ notes and images.
 
 ## Images
 
+- **The toolbar**: previous and next in the folder, zoom, rotate, highlighter, text, undo, redo and copy
 - **Wheel, Ctrl+wheel, pinch**: zoom at the cursor
 - **Drag**: pan
 - **Double-click**: toggle fit / 100%
@@ -164,6 +172,7 @@ protected video is black, and the mouse pointer is never in the picture.
 
 ## PDFs
 
+- **The toolbar**: previous and next page, the page number (click to go to a page), zoom and fits, find, minimap
 - **Wheel · drag on the background or a scanned page · middle-drag**: scroll
 - **Drag on text · double-/triple-click · Shift+click**: select text · word · line · extend
 - **Shift+← → (Ctrl: by word) · Shift+Home End**: extend the selection
@@ -198,6 +207,7 @@ in the minimap.
 
 ## Tables (CSV)
 
+- **The toolbar**: find, undo, redo, add a row or a column; a sorted table says so there, and a click puts it back in file order
 - **Click, Shift+click, drag**: select cells; click row numbers to select rows; the top-left corner selects all
 - **Arrows (+Shift to extend, +Ctrl to jump) · PgUp PgDn · Home End · Ctrl+A**: move / select
 - **Ctrl+C**: copy the selection as TSV (pastes straight into Excel)
@@ -255,7 +265,7 @@ however short.
 
 ### The timesheet
 
-Settings (Ctrl+, or the gear in the toolbar) opens on the week at a glance, and that's
+Settings (Ctrl+, or Tools › Timesheet) opens on the week at a glance, and that's
 where time is put down too: a row per project, grouped by customer with its code, a
 column per day, in hours rounded the way they go on the timecard (to 0.25 h per project
 per day by default; 0.1 h or exact in **Customers & projects**). The running project's

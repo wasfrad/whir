@@ -3,8 +3,10 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use egui::{FontId, Frame, Key, Rect, RichText, Sense, Stroke, UiBuilder, pos2, vec2};
+use egui::{FontId, Key, Rect, RichText, Sense, Stroke, UiBuilder, pos2, vec2};
 use whir_core::find_bar::{FindBar, fmt_int};
+use whir_core::icons::{self, Icon};
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::{DocCx, DocRequest, FindQuery, Waker};
 
@@ -61,7 +63,12 @@ pub fn show_loaded(
         l.measured_rows = target.max(1);
     }
 
-    let footer_h = 24.0;
+    // Only a save in progress, with its Cancel, needs a strip of its own.
+    let footer_h = if l.saving.is_some() || l.pending_save.is_some() {
+        24.0
+    } else {
+        0.0
+    };
     let grid_rect = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - footer_h));
     let footer = Rect::from_min_max(pos2(area.left(), grid_rect.bottom()), area.max);
 
@@ -132,6 +139,9 @@ pub fn show_loaded(
             action => l.apply(action, ui, waker),
         }
     }
+    for action in std::mem::take(&mut l.queued) {
+        l.apply(action, ui, waker);
+    }
     // The editor on top of the grid (a press elsewhere commits it).
     l.show_editor(ui, theme);
 
@@ -155,11 +165,13 @@ pub fn show_loaded(
 
     // Footer.
     let p = ui.painter().clone();
-    p.rect_filled(footer, 0.0, theme.strip_bg);
-    p.line_segment(
-        [footer.left_top(), footer.right_top()],
-        Stroke::new(1.0, theme.separator),
-    );
+    if footer_h > 0.0 {
+        p.rect_filled(footer, 0.0, theme.strip_bg);
+        p.line_segment(
+            [footer.left_top(), footer.right_top()],
+            Stroke::new(1.0, theme.separator),
+        );
+    }
     let small = FontId::proportional(theme.metrics.small_text_size);
     let cols = l.grid.cols();
     let mut left = format!("{} rows × {} columns", fmt_int(rows), cols);
@@ -183,16 +195,19 @@ pub fn show_loaded(
     if l.read_only_reason().is_some() {
         left.push_str("   ·   read-only (too many rows to edit)");
     }
+    let line = left.clone();
     let left_galley = p.layout_no_wrap(left, small.clone(), theme.text_dim);
     let left_end = footer.left() + 10.0 + left_galley.size().x;
-    p.galley(
-        pos2(
-            footer.left() + 10.0,
-            footer.center().y - left_galley.size().y / 2.0,
-        ),
-        left_galley,
-        theme.text_dim,
-    );
+    if footer_h > 0.0 {
+        p.galley(
+            pos2(
+                footer.left() + 10.0,
+                footer.center().y - left_galley.size().y / 2.0,
+            ),
+            left_galley,
+            theme.text_dim,
+        );
+    }
 
     let mut right = format!(
         "{}  ·  {}",
@@ -265,13 +280,16 @@ pub fn show_loaded(
     } else if failure.is_some() {
         right = format!("Not saved   ·   {right}");
     }
-    let right_galley = p.layout_no_wrap(right, small.clone(), theme.text_dim);
-    let rx = (right_x - right_galley.size().x).max(left_end + 16.0);
-    p.with_clip_rect(footer).galley(
-        pos2(rx, footer.center().y - right_galley.size().y / 2.0),
-        right_galley,
-        theme.text_dim,
-    );
+    l.status_line = format!("{line}   \u{b7}   {right}");
+    if footer_h > 0.0 {
+        let right_galley = p.layout_no_wrap(right, small.clone(), theme.text_dim);
+        let rx = (right_x - right_galley.size().x).max(left_end + 16.0);
+        p.with_clip_rect(footer).galley(
+            pos2(rx, footer.center().y - right_galley.size().y / 2.0),
+            right_galley,
+            theme.text_dim,
+        );
+    }
 
     // Banners (on top of the grid).
     let mut request = None;
@@ -300,14 +318,9 @@ fn banner_frame(
         vec2(width, 40.0),
     );
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-        Frame::NONE
-            .fill(theme.overlay_bg)
-            .stroke(Stroke::new(1.0, theme.separator))
-            .corner_radius(8.0)
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(add);
-            });
+        kit::floating(theme).inner_margin(8.0).show(ui, |ui| {
+            ui.horizontal_wrapped(add);
+        });
     });
 }
 
@@ -335,7 +348,11 @@ fn failure_banner(
         if ui.button("Save As…").clicked() {
             cx.requests.push(DocRequest::SaveAs);
         }
-        if ui.button("✕").on_hover_text("Hide").clicked() {
+        if ui
+            .button(icons::text(Icon::Close, 12.0))
+            .on_hover_text("Hide")
+            .clicked()
+        {
             request = Some(Request::DismissFailure);
         }
     });

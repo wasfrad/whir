@@ -3,7 +3,9 @@
 //! Items that can't run right now stay visible but disabled, with the reason
 //! on hover ("Saving…", "Rows can be added once the whole file has been read").
 
-use egui::{Button, Ui};
+use egui::Ui;
+use whir_core::icons::Icon;
+use whir_core::kit;
 
 use crate::grid::{Action, Editable, Gate, Selection};
 use crate::sort::{Direction, SortSpec};
@@ -47,7 +49,27 @@ fn item(
     action: Action,
     out: &mut Vec<Action>,
 ) {
-    let resp = ui.add_enabled(gate.allowed(), Button::new(label).shortcut_text(shortcut));
+    let icon = match action {
+        Action::Cut => Some(Icon::Cut),
+        Action::Copy => Some(Icon::Copy),
+        Action::RequestPaste => Some(Icon::Paste),
+        Action::Clear => Some(Icon::Delete),
+        Action::FindInTabs(_) => Some(Icon::Search),
+        _ => None,
+    };
+    entry(ui, icon, label, shortcut, gate, action, out);
+}
+
+fn entry(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    shortcut: &str,
+    gate: Gate,
+    action: Action,
+    out: &mut Vec<Action>,
+) {
+    let resp = ui.add_enabled(gate.allowed(), kit::menu_entry(icon, label, shortcut));
     let resp = match gate {
         Gate::No(reason) => resp.on_disabled_hover_text(reason),
         Gate::Yes => resp,
@@ -169,32 +191,21 @@ pub fn show(ui: &mut Ui, cx: &MenuCx, out: &mut Vec<Action>) {
             } else {
                 Gate::No("No column here.")
             };
-            let asc = if current == Some(Direction::Ascending) {
-                "✓ Sort ascending"
-            } else {
-                "Sort ascending"
-            };
-            let desc = if current == Some(Direction::Descending) {
-                "✓ Sort descending"
-            } else {
-                "Sort descending"
-            };
-            item(
-                ui,
-                asc,
-                "",
-                sort_gate,
-                Action::Sort(col, Direction::Ascending),
-                out,
-            );
-            item(
-                ui,
-                desc,
-                "",
-                sort_gate,
-                Action::Sort(col, Direction::Descending),
-                out,
-            );
+            for (direction, label) in [
+                (Direction::Ascending, "Sort ascending"),
+                (Direction::Descending, "Sort descending"),
+            ] {
+                let on = (current == Some(direction)).then_some(Icon::Check);
+                entry(
+                    ui,
+                    on,
+                    label,
+                    "",
+                    sort_gate,
+                    Action::Sort(col, direction),
+                    out,
+                );
+            }
             let original = if cx.sorted {
                 Gate::Yes
             } else {

@@ -18,11 +18,13 @@ use egui::{
     Modifiers, Pos2, Rect, RichText, Sense, Shape, Stroke, TextEdit, UiBuilder, pos2, vec2,
 };
 use whir_core::file::FileIdentity;
+use whir_core::icons::Icon;
 use whir_core::library::{self, Library};
 use whir_core::scroll::{ScrollAxis, scrollbar};
 use whir_core::theme::{self, Theme};
 use whir_core::{
-    DocCx, DocKind, DocRequest, Document, OpenCx, Persistence, SaveAsSpec, SaveResult, Waker,
+    DocCx, DocKind, DocRequest, Document, Menu, OpenCx, Persistence, SaveAsSpec, SaveResult, Waker,
+    kit, toolbar,
 };
 
 use crate::editing::{self, Edit};
@@ -73,6 +75,16 @@ struct Inflight {
     user: bool,
 }
 
+/// What the toolbar and the menus can do to the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    Bold,
+    Italic,
+    Link,
+    List,
+    Task,
+}
+
 #[derive(Clone, Copy)]
 enum Focus {
     Title,
@@ -115,6 +127,13 @@ pub struct NoteDoc {
 
     md: MdCache,
     toast: Option<(String, f64)>,
+    /// Asked for by the toolbar, for the next frame.
+    tool: Option<Tool>,
+    /// The caret to put back once the toolbar has had its click (a click
+    /// elsewhere takes the keyboard from the text).
+    restore_sel: Option<std::ops::Range<usize>>,
+    /// Undo (Z) or redo (Y), to hand the text once it has the keyboard back.
+    history_key: Option<Key>,
     queued_toast: Option<String>,
     focus: Option<Focus>,
     pending_scroll: Option<f32>,
@@ -235,6 +254,9 @@ impl NoteDoc {
             cancel: Arc::new(AtomicBool::new(false)),
             md: MdCache::default(),
             toast: None,
+            tool: None,
+            restore_sel: None,
+            history_key: None,
             queued_toast: None,
             focus: Some(Focus::Body(None)),
             pending_scroll: None,
@@ -694,6 +716,52 @@ impl NoteDoc {
         state.store(&ctx, self.body_id);
     }
 
+    /// Do what the toolbar asked to the selection, before the text field
+    /// runs and notices the click was somewhere else.
+    fn run_tool(&mut self, ctx: &egui::Context, tool: Tool) {
+        let Some(state) = TextEdit::load_state(ctx, self.body_id) else {
+            return;
+        };
+        let end = self.body.chars().count();
+        let sel = state.cursor.char_range().map_or(end..end, |r| {
+            let (a, b) = (r.primary.index.0, r.secondary.index.0);
+            a.min(b)..a.max(b)
+        });
+        let edit = match tool {
+            Tool::Bold => Some(editing::wrap(&self.body, sel.clone(), "**")),
+            Tool::Italic => Some(editing::wrap(&self.body, sel.clone(), "*")),
+            Tool::Link => Some(editing::link(&self.body, sel.clone())),
+            Tool::List => Some(editing::toggle_list(&self.body, sel.clone())),
+            Tool::Task => editing::toggle_task(&self.body, sel.end),
+        };
+        if let Some(e) = edit {
+            editing::apply(&mut self.body, &e);
+            self.touched();
+            self.restore_sel = Some(e.select.clone());
+        }
+    }
+
+    /// Undo or redo: the text field's own, so it needs the keyboard first.
+    fn run_history(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(key) = self.history_key else { return };
+        let settled = !ui.input(|i| i.pointer.any_click());
+        if settled && ctx.memory(|m| m.has_focus(self.body_id)) {
+            self.history_key = None;
+            ui.input_mut(|i| {
+                i.events.push(Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::CTRL | Modifiers::COMMAND,
+                });
+            });
+        } else {
+            self.focus = Some(Focus::Body(None));
+            ctx.request_repaint();
+        }
+    }
+
     fn apply_focus(&mut self, ctx: &egui::Context) {
         let Some(f) = self.focus.take() else { return };
         match f {
@@ -732,6 +800,10 @@ impl NoteDoc {
         if cx.just_activated && self.focus.is_none() {
             self.focus = Some(Focus::Body(None));
         }
+        if let Some(tool) = self.tool.take() {
+            self.run_tool(&ctx, tool);
+        }
+        self.run_history(ui, &ctx);
         let m = theme.metrics;
         let area = ui.max_rect();
         let col_w = (area.width() - 2.0 * m.note_side_pad).clamp(120.0, m.note_column_max);
@@ -855,6 +927,16 @@ impl NoteDoc {
             self.touched();
         }
         let Some(out) = body_out else { return };
+        if let Some(sel) = self.restore_sel.take() {
+            if let Some(mut state) = TextEdit::load_state(&ctx, self.body_id) {
+                state.cursor.set_char_range(Some(CCursorRange::two(
+                    CCursor::new(sel.start),
+                    CCursor::new(sel.end),
+                )));
+                state.store(&ctx, self.body_id);
+            }
+            ctx.memory_mut(|m| m.request_focus(self.body_id));
+        }
         if out.response.response.changed() {
             theme::note_text(&self.body);
             self.touched();
@@ -934,7 +1016,7 @@ impl NoteDoc {
         }
 
         self.banners(ui, area, theme, cx);
-        paint_toast(ui, area, &mut self.toast, now, theme);
+        whir_core::kit::toast(ui, area, &mut self.toast, theme);
 
         // Wake up for the next autosave.
         if let Some(due) = self.autosave_due() {
@@ -966,10 +1048,7 @@ impl NoteDoc {
         ui.interact(rect, self.body_id.with("banner"), Sense::CLICK);
         let mut clicked = None;
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-            Frame::NONE
-                .fill(theme.overlay_bg)
-                .stroke(Stroke::new(1.0, theme.separator))
-                .corner_radius(8.0)
+            whir_core::kit::floating(theme)
                 .inner_margin(Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1195,37 +1274,81 @@ fn decorations(
     (shapes, boxes)
 }
 
-fn paint_toast(
-    ui: &egui::Ui,
-    area: Rect,
-    toast: &mut Option<(String, f64)>,
-    now: f64,
-    theme: &Theme,
-) {
-    let Some((text, until)) = toast else { return };
-    if now >= *until {
-        *toast = None;
-        return;
-    }
-    let alpha = ((*until - now) / 0.3).clamp(0.0, 1.0) as f32;
-    let painter = ui.painter();
-    let galley = painter.layout_no_wrap(
-        text.clone(),
-        FontId::proportional(12.0),
-        theme.text_dim.gamma_multiply(alpha),
-    );
-    let pad = vec2(10.0, 5.0);
-    let size = galley.size() + pad * 2.0;
-    let rect = Rect::from_min_size(
-        pos2(area.right() - size.x - 24.0, area.bottom() - size.y - 16.0),
-        size,
-    );
-    painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
-    painter.galley(rect.min + pad, galley, theme.text_dim);
-    ui.ctx().request_repaint_after(Duration::from_millis(40));
-}
+const FORMATS: [(Icon, Tool, &str, &str, &str); 3] = [
+    (Icon::Bold, Tool::Bold, "Bold", "Ctrl+B", "Bold (Ctrl+B)"),
+    (
+        Icon::Italic,
+        Tool::Italic,
+        "Italic",
+        "Ctrl+I",
+        "Italic (Ctrl+I)",
+    ),
+    (Icon::Link, Tool::Link, "Link", "Ctrl+K", "Link (Ctrl+K)"),
+];
 
 impl Document for NoteDoc {
+    fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        if !matches!(self.phase, Phase::Ready) {
+            return;
+        }
+        let theme = Theme::current();
+        for (icon, tool, _, _, tip) in FORMATS {
+            if toolbar::tool(ui, icon, tip, true, &theme) {
+                self.tool = Some(tool);
+            }
+        }
+        if ui.available_width() < 120.0 {
+            return;
+        }
+        kit::bar_separator(ui, &theme);
+        if toolbar::tool(ui, Icon::List, "Bulleted list", true, &theme) {
+            self.tool = Some(Tool::List);
+        }
+        if toolbar::tool(ui, Icon::Checklist, "Task (Ctrl+Enter)", true, &theme) {
+            self.tool = Some(Tool::Task);
+        }
+        if ui.available_width() < 120.0 {
+            return;
+        }
+        kit::bar_separator(ui, &theme);
+        if toolbar::tool(ui, Icon::Undo, "Undo (Ctrl+Z)", true, &theme) {
+            self.history_key = Some(Key::Z);
+        }
+        if toolbar::tool(ui, Icon::Redo, "Redo (Ctrl+Y)", true, &theme) {
+            self.history_key = Some(Key::Y);
+        }
+    }
+
+    fn menu(&mut self, menu: Menu, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        if menu != Menu::Edit || !matches!(self.phase, Phase::Ready) {
+            return;
+        }
+        if kit::entry(ui, Some(Icon::Undo), "Undo", "Ctrl+Z", true) {
+            self.history_key = Some(Key::Z);
+        }
+        if kit::entry(ui, Some(Icon::Redo), "Redo", "Ctrl+Y", true) {
+            self.history_key = Some(Key::Y);
+        }
+        ui.separator();
+        for (icon, tool, label, key, _) in FORMATS {
+            if kit::entry(ui, Some(icon), label, key, true) {
+                self.tool = Some(tool);
+            }
+        }
+        if kit::entry(ui, Some(Icon::Checklist), "Task", "Ctrl+Enter", true) {
+            self.tool = Some(Tool::Task);
+        }
+        ui.separator();
+    }
+
+    fn status(&self) -> String {
+        match self.body.split_whitespace().count() {
+            0 => String::new(),
+            1 => "1 word".to_owned(),
+            n => format!("{n} words"),
+        }
+    }
+
     #[allow(clippy::misnamed_getters)] // the tab label, not the note's title field
     fn title(&self) -> &str {
         &self.tab_title

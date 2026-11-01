@@ -84,6 +84,13 @@ pub enum DocRequest {
     Toast(String),
 }
 
+/// The menus a document adds to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Edit,
+    View,
+}
+
 /// Where a document's search stands, for the Find in all tabs panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchState {
@@ -158,6 +165,16 @@ pub trait Document {
     /// Draw this document's tools into the toolbar strip, left to right. Only
     /// called for the active tab, before `ui`.
     fn toolbar(&mut self, _ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {}
+
+    /// Add this document's entries to `menu`, while it's open, each ending in
+    /// a separator. Only called for the active tab, before `ui`.
+    fn menu(&mut self, _menu: Menu, _ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {}
+
+    /// What's said about this document at the end of the strip along the
+    /// bottom of the window.
+    fn status(&self) -> String {
+        String::new()
+    }
 
     /// Draw into `ui` (the area below the toolbar). Only called for the active tab.
     fn ui(&mut self, ui: &mut egui::Ui, cx: &mut DocCx<'_>);

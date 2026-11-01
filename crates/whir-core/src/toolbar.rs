@@ -3,23 +3,16 @@
 
 use std::time::Duration;
 
-use egui::{Color32, CursorIcon, Id, Key, Modifiers, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2};
+use egui::{Color32, Id, Key, Modifiers, Rect, Sense, Shape, Stroke, pos2, vec2};
 
+use crate::icons::{self, Icon};
 use crate::theme::Theme;
 
 /// Seconds a tool button is held before its menu opens.
 const HOLD: f64 = 0.35;
-const BUTTON: egui::Vec2 = vec2(30.0, 24.0);
 const SWATCH: egui::Vec2 = vec2(24.0, 24.0);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Glyph {
-    Highlighter,
-    Text,
-    Camera,
-    Gear,
-    Flag,
-}
+/// Seconds a tool takes to light up under the pointer.
+const HOVER_FADE: f32 = 0.08;
 
 /// What happened to a [`tool_button`] this frame.
 pub struct Pressed {
@@ -31,17 +24,18 @@ pub struct Pressed {
 }
 
 /// A toolbar button. `on` tints it (a tool that is active); `ink` draws a bar
-/// of that colour under the glyph; `has_menu` marks its corner and reports a
+/// of that colour under the icon; `has_menu` marks its corner and reports a
 /// long press or right-click as [`Pressed::menu`].
 pub fn tool_button(
     ui: &mut egui::Ui,
-    glyph: Glyph,
+    icon: Icon,
     on: bool,
     ink: Option<Color32>,
     has_menu: bool,
     theme: &Theme,
 ) -> Pressed {
-    let (rect, response) = ui.allocate_exact_size(BUTTON, Sense::CLICK);
+    let m = theme.metrics;
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(m.tool_size), Sense::CLICK);
 
     // A long press opens the menu once; the click that ends it is swallowed.
     let fired_id = response.id.with("held");
@@ -76,31 +70,26 @@ pub fn tool_button(
     }
 
     let painter = ui.painter();
-    let fg = if on || response.hovered() {
+    let fg = if on {
+        theme.accent
+    } else if response.hovered() {
         theme.text
     } else {
         theme.text_dim
     };
-    if on {
-        painter.rect_filled(rect, 4.0, theme.accent.gamma_multiply(0.25));
-        painter.rect_stroke(
-            rect,
-            4.0,
-            Stroke::new(1.0, theme.accent),
-            egui::StrokeKind::Inside,
-        );
-    } else if response.is_pointer_button_down_on() {
-        painter.rect_filled(rect, 4.0, theme.caption_pressed);
-    } else if response.hovered() {
-        painter.rect_filled(rect, 4.0, theme.tab_hover_bg);
-    }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    if let Some(fill) = fill_of(ui, &response, on, theme) {
+        painter.rect_filled(rect, m.control_radius, fill);
     }
     let lift = if ink.is_some() { 2.5 } else { 0.0 };
-    paint_glyph(painter, rect.center() - vec2(0.0, lift), glyph, fg);
+    icons::paint(
+        painter,
+        rect.center() - vec2(0.0, lift),
+        icon,
+        m.icon_size,
+        fg,
+    );
     if let Some(ink) = ink {
-        let y = rect.center().y + 7.5;
+        let y = rect.center().y + 8.5;
         painter.line_segment(
             [
                 pos2(rect.center().x - 7.0, y),
@@ -125,83 +114,88 @@ pub fn tool_button(
     }
 }
 
-/// Line icons, like the rest of the chrome (no font has these glyphs).
-fn paint_glyph(painter: &egui::Painter, c: Pos2, glyph: Glyph, color: Color32) {
-    let s = Stroke::new(1.3, color);
-    let at = |x: f32, y: f32| c + vec2(x, y);
-    match glyph {
-        Glyph::Highlighter => {
-            // A marker leaning to the right, its chisel tip at the lower left.
-            painter.add(Shape::closed_line(
-                vec![at(1.0, -7.0), at(6.0, -2.0), at(0.5, 3.5), at(-4.5, -1.5)],
-                s,
-            ));
-            painter.add(Shape::line(
-                vec![at(-4.5, -1.5), at(-6.0, 5.0), at(0.5, 3.5)],
-                s,
-            ));
-        }
-        Glyph::Text => {
-            // A serif capital T.
-            painter.add(Shape::line(
-                vec![at(-5.5, -4.5), at(-5.5, -6.5), at(5.5, -6.5), at(5.5, -4.5)],
-                s,
-            ));
-            painter.line_segment([at(0.0, -6.5), at(0.0, 5.0)], s);
-            painter.line_segment([at(-2.5, 5.0), at(2.5, 5.0)], s);
-        }
-        Glyph::Camera => {
-            let body = Rect::from_center_size(at(0.0, 1.0), vec2(15.0, 10.0));
-            painter.rect_stroke(body, 2.0, s, egui::StrokeKind::Middle);
-            painter.add(Shape::line(
-                vec![at(-3.5, -4.0), at(-2.0, -6.5), at(2.0, -6.5), at(3.5, -4.0)],
-                s,
-            ));
-            painter.circle_stroke(at(0.0, 1.0), 2.8, s);
-        }
-        Glyph::Gear => paint_gear(painter, c, 7.0, color),
-        Glyph::Flag => paint_flag(painter, c, color, false),
-    }
-}
-
-/// A pennant on a pole (a todo), filled when `solid`.
-pub fn paint_flag(painter: &egui::Painter, c: Pos2, color: Color32, solid: bool) {
-    let s = Stroke::new(1.3, color);
-    let at = |x: f32, y: f32| c + vec2(x, y);
-    painter.line_segment([at(-4.5, -6.5), at(-4.5, 7.0)], s);
-    let cloth = vec![at(-4.5, -6.0), at(5.5, -3.0), at(-4.5, 0.5)];
-    if solid {
-        painter.add(Shape::convex_polygon(cloth, color, Stroke::NONE));
+/// What's behind a tool: tinted while on, a quick fade in and out on hover.
+fn fill_of(ui: &egui::Ui, response: &egui::Response, on: bool, theme: &Theme) -> Option<Color32> {
+    let id = response.id.with("hover");
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(id, response.hovered(), HOVER_FADE);
+    if on {
+        Some(theme.drawer_item_active)
+    } else if response.is_pointer_button_down_on() {
+        Some(theme.control_pressed)
+    } else if hover > 0.0 {
+        Some(theme.control_hover.gamma_multiply(hover))
     } else {
-        painter.add(Shape::closed_line(cloth, s));
+        None
     }
 }
 
-/// A tick (done).
-pub fn paint_check(painter: &egui::Painter, c: Pos2, color: Color32) {
-    let s = Stroke::new(1.5, color);
-    let at = |x: f32, y: f32| c + vec2(x, y);
-    painter.add(Shape::line(
-        vec![at(-5.0, 0.5), at(-1.5, 4.0), at(5.5, -4.0)],
-        s,
-    ));
+/// A tool that does one thing, greyed out when it can't: true when clicked.
+pub fn tool(ui: &mut egui::Ui, icon: Icon, tip: &str, enabled: bool, theme: &Theme) -> bool {
+    ui.add_enabled_ui(enabled, |ui| {
+        let pressed = tool_button(ui, icon, false, None, false, theme);
+        let clicked = pressed.clicked;
+        pressed.response.on_hover_text(tip);
+        clicked
+    })
+    .inner
 }
 
-/// A cog with eight teeth, `radius` to their tips (Settings).
-pub fn paint_gear(painter: &egui::Painter, c: Pos2, radius: f32, color: Color32) {
-    let s = Stroke::new(1.3, color);
-    let teeth = 8;
-    let inner = radius * 0.72;
-    let points: Vec<Pos2> = (0..teeth * 4)
-        .map(|i| {
-            // Each tooth: up, across the top, down, across the gap.
-            let a = (i as f32 + 0.5) / (teeth * 4) as f32 * std::f32::consts::TAU;
-            let r = if i % 4 < 2 { radius } else { inner };
-            c + r * vec2(a.cos(), a.sin())
-        })
-        .collect();
-    painter.add(Shape::closed_line(points, s));
-    painter.circle_stroke(c, radius * 0.32, s);
+/// A tool that stays on: true when clicked.
+pub fn toggle(ui: &mut egui::Ui, icon: Icon, on: bool, tip: &str, theme: &Theme) -> bool {
+    let pressed = tool_button(ui, icon, on, None, false, theme);
+    let clicked = pressed.clicked;
+    pressed.response.on_hover_text(tip);
+    clicked
+}
+
+/// Words in the toolbar that are also a button: a page number, a zoom.
+pub fn readout_button<'a>(text: &'a str, width: f32, theme: &Theme) -> egui::Button<'a> {
+    egui::Button::new(text)
+        .frame_when_inactive(false)
+        .min_size(vec2(width, theme.metrics.tool_size))
+}
+
+pub fn readout(ui: &mut egui::Ui, text: &str, width: f32, theme: &Theme) -> egui::Response {
+    ui.add(readout_button(text, width, theme))
+}
+
+/// A toolbar button with a word beside its icon, tinted while `on`: a state
+/// worth reading at a glance.
+pub fn labelled_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    on: bool,
+    theme: &Theme,
+) -> egui::Response {
+    let m = theme.metrics;
+    let font = egui::FontId::proportional(m.body_text_size);
+    let fg = if on { theme.accent } else { theme.text_dim };
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let size = vec2(
+        8.0 + m.icon_size + 6.0 + galley.size().x + 10.0,
+        m.tool_size,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::CLICK);
+    let fg = if !on && response.hovered() {
+        theme.text
+    } else {
+        fg
+    };
+    let painter = ui.painter();
+    if let Some(fill) = fill_of(ui, &response, on, theme) {
+        painter.rect_filled(rect, m.control_radius, fill);
+    }
+    let center = pos2(rect.left() + 8.0 + m.icon_size / 2.0, rect.center().y);
+    icons::paint(painter, center, icon, m.icon_size, fg);
+    let at = pos2(
+        rect.left() + 8.0 + m.icon_size + 6.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(at, galley, fg);
+    response
 }
 
 /// A row of colour swatches, `current` ringed. Returns the one clicked.
@@ -218,8 +212,7 @@ pub fn swatches(
             let (rect, resp) = ui.allocate_exact_size(SWATCH, Sense::CLICK);
             let painter = ui.painter();
             if resp.hovered() {
-                painter.rect_filled(rect, 5.0, theme.tab_hover_bg);
-                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                painter.rect_filled(rect, theme.metrics.control_radius, theme.control_hover);
             }
             let chip = Rect::from_center_size(rect.center(), vec2(14.0, 14.0));
             painter.rect_filled(chip, 3.0, colour);
@@ -280,7 +273,7 @@ pub fn flyout(ui: &mut egui::Ui, id: Id, button: Rect, add: impl FnOnce(&mut egu
 
 #[cfg(test)]
 mod tests {
-    use egui::{Event, PointerButton, RawInput};
+    use egui::{Event, PointerButton, Pos2, RawInput};
 
     use super::*;
 
@@ -293,7 +286,7 @@ mod tests {
     impl Harness {
         fn new() -> Self {
             let mut h = Self {
-                ctx: egui::Context::default(),
+                ctx: crate::theme::test_context(),
                 time: 0.0,
                 at: Pos2::ZERO,
             };
@@ -316,7 +309,7 @@ mod tests {
             let mut seen = (false, false);
             let mut at = self.at;
             let out = self.ctx.run_ui(raw, |ui| {
-                let p = tool_button(ui, Glyph::Highlighter, false, None, true, &Theme::dark());
+                let p = tool_button(ui, Icon::Highlighter, false, None, true, &Theme::dark());
                 seen = (p.clicked, p.menu);
                 at = p.response.rect.center();
             });

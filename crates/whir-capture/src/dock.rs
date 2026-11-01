@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use std::path::PathBuf;
 
+use whir_core::icons::Icon;
 use whir_core::theme::Theme;
 use whir_core::time::Stamp;
 use whir_core::todos;
@@ -116,12 +117,12 @@ static DOCK: AtomicIsize = AtomicIsize::new(0);
 
 const PANEL_CLASS: PCWSTR = w!("whir.dock.panel.v1");
 
-const CAMERA: char = '\u{E722}';
-const STOPWATCH: char = '\u{E916}';
-const PLAY: char = '\u{E768}';
-const PAUSE: char = '\u{E769}';
-const CHEVRON_DOWN: char = '\u{E70D}';
-const CHEVRON_UP: char = '\u{E70E}';
+const CAMERA: char = Icon::Camera.glyph();
+const STOPWATCH: char = Icon::Stopwatch.glyph();
+const PLAY: char = Icon::Play.glyph();
+const PAUSE: char = Icon::Pause.glyph();
+const CHEVRON_DOWN: char = Icon::ChevronDown.glyph();
+const CHEVRON_UP: char = Icon::ChevronUp.glyph();
 
 struct Dock {
     hwnd: HWND,

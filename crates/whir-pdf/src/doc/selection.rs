@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use egui::{CursorIcon, Key, Modifiers, PointerButton, Stroke, StrokeKind, pos2};
 use whir_core::find_bar::fmt_int;
+use whir_core::icons::Icon;
+use whir_core::kit;
 use whir_core::theme::Theme;
 
 use super::{PdfDoc, ZOOM_100, Zoom, minimap};
@@ -467,26 +469,24 @@ impl PdfDoc {
         let mut pick = None;
         resp.context_menu(|ui| {
             if has_text {
-                let c = egui::Button::new("Copy").shortcut_text("Ctrl+C");
+                let c = kit::menu_entry(Some(Icon::Copy), "Copy", "Ctrl+C");
                 if ui.add_enabled(has_sel, c).clicked() {
                     copy = true;
                     ui.close();
                 }
-                let a = egui::Button::new("Select all").shortcut_text("Ctrl+A");
+                let a = kit::menu_entry(None, "Select all", "Ctrl+A");
                 if ui.add(a).clicked() {
                     all = true;
                     ui.close();
                 }
                 ui.separator();
             }
-            for (zoom, label, key) in [
-                (Zoom::FitPage, "Fit page", "0"),
-                (Zoom::FitWidth, "Fit width", "2"),
-                (Zoom::Manual(ZOOM_100), "Actual size", "1"),
+            for (icon, zoom, label, key) in [
+                (Some(Icon::FitPage), Zoom::FitPage, "Fit page", "0"),
+                (Some(Icon::FitWidth), Zoom::FitWidth, "Fit width", "2"),
+                (None, Zoom::Manual(ZOOM_100), "Actual size", "1"),
             ] {
-                let b = egui::Button::new(label)
-                    .shortcut_text(key)
-                    .selected(current == zoom);
+                let b = kit::menu_entry(icon, label, key).selected(current == zoom);
                 if ui.add(b).clicked() {
                     pick = Some(zoom);
                     ui.close();
@@ -499,7 +499,7 @@ impl PdfDoc {
                 "Show minimap"
             };
             if ui
-                .add(egui::Button::new(label).shortcut_text("Ctrl+M"))
+                .add(kit::menu_entry(Some(Icon::Minimap), label, "Ctrl+M"))
                 .clicked()
             {
                 minimap::toggle();

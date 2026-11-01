@@ -6,14 +6,16 @@
 
 use whir_core::theme::{Color32, Theme};
 
+use whir_core::icons::Icon;
+
 use crate::geom::{Point, Rect};
 use crate::paint::{Canvas, Surface};
 use crate::text::{self, Align, Font, Text};
 
-const FLAG: char = '\u{E7C1}';
-const CHECK: char = '\u{E73E}';
-const ADD: char = '\u{E710}';
-const CLOCK: char = '\u{E917}';
+const FLAG: char = Icon::Flag.glyph();
+const CHECK: char = Icon::Check.glyph();
+const ADD: char = Icon::Plus.glyph();
+const CLOCK: char = Icon::Stopwatch.glyph();
 
 /// What a click on part of the panel does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

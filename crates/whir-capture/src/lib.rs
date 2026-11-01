@@ -75,7 +75,10 @@ impl Command {
 
 /// Start `whir.exe` with `cmd`'s flag (from the main window's capture button).
 pub fn launch(cmd: Command) -> std::io::Result<()> {
-    if cmd == Command::Start && whir_platform::ipc::find_dock_window().is_some() {
+    // A dock started from a test or a bench run would point the start-with-Windows
+    // entry at that build.
+    let unwanted = std::env::var_os("WHIR_NO_DOCK").is_some();
+    if cmd == Command::Start && (unwanted || whir_platform::ipc::find_dock_window().is_some()) {
         return Ok(());
     }
     std::process::Command::new(std::env::current_exe()?)

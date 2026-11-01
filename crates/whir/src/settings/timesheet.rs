@@ -9,12 +9,14 @@ use egui::{
     Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, RichText, Sense, Stroke,
     StrokeKind, UiBuilder, pos2, vec2,
 };
+use whir_core::icons::{self, Icon};
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::time::{Stamp, civil_from_days, format_clock, format_date, format_hm, monday_of};
 use whir_core::timesheet::{Entry, Grid, Rounding, State, Store, Week, csv_paths, timesheet_tsv};
 use whir_core::{DocCx, DocRequest};
 
-use super::{clock_text, edit_line, heading, note, parse_clock, parse_duration, primary, toast};
+use super::{clock_text, edit_line, heading, note, parse_clock, parse_duration, toast};
 
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const HEAD_H: f32 = 36.0;
@@ -108,7 +110,7 @@ fn hours(h: f64) -> String {
 
 /// A project's name, its code dimmed beside it; cut short to `width`.
 fn name_job(name: &str, code: &str, width: f32, theme: &Theme) -> LayoutJob {
-    let font = FontId::proportional(13.5);
+    let font = FontId::proportional(theme.metrics.body_text_size);
     let mut job = LayoutJob::default();
     job.append(name, 0.0, TextFormat::simple(font.clone(), theme.text));
     if !code.is_empty() {
@@ -310,14 +312,14 @@ impl View {
             .filter(|r| r.start < Stamp::midnight(self.monday + 7));
         ui.horizontal(|ui| {
             if ui
-                .button(RichText::new(" ‹ ").size(16.0))
+                .button(icons::text(Icon::ChevronLeft, 11.0))
                 .on_hover_text("The week before")
                 .clicked()
             {
                 self.go(self.monday - 7);
             }
             if ui
-                .button(RichText::new(" › ").size(16.0))
+                .button(icons::text(Icon::ChevronRight, 11.0))
                 .on_hover_text("The week after")
                 .clicked()
             {
@@ -326,7 +328,7 @@ impl View {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(week_title(self.monday))
-                    .size(18.0)
+                    .heading()
                     .color(theme.text),
             );
             ui.add_space(6.0);
@@ -342,7 +344,7 @@ impl View {
                 .corner_radius(10.0)
                 .inner_margin(egui::Margin::symmetric(8, 2))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(status).size(12.0).color(color));
+                    ui.label(RichText::new(status).small().color(color));
                 });
             if self.monday != this_week && ui.button("This week").clicked() {
                 self.go(this_week);
@@ -360,7 +362,7 @@ impl View {
                         }
                     }
                     None => {
-                        if primary(ui, "Close week…", theme) {
+                        if kit::primary(ui, "Close week…", theme).clicked() {
                             self.confirm_close = true;
                         }
                         if ui
@@ -468,7 +470,7 @@ impl View {
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(format_clock(today))
-                            .size(15.0)
+                            .size(theme.metrics.title_text_size)
                             .strong()
                             .color(theme.accent),
                     );
@@ -527,8 +529,8 @@ impl View {
             // once the table's height is known, in this place.
             let back = painter.add(egui::Shape::Noop);
             let top = ui.cursor().top();
-            let small = FontId::proportional(12.5);
-            let body = FontId::proportional(14.0);
+            let small = FontId::proportional(theme.metrics.body_text_size);
+            let body = FontId::proportional(theme.metrics.body_text_size);
 
             let (head, _) = ui.allocate_exact_size(vec2(width, HEAD_H), Sense::hover());
             let radius = CornerRadius {
@@ -596,7 +598,7 @@ impl View {
                         pos2(left + 14.0, r.center().y + 2.0),
                         Align2::LEFT_CENTER,
                         c,
-                        FontId::proportional(13.0),
+                        FontId::proportional(theme.metrics.body_text_size),
                         theme.text_dim,
                     );
                 }
@@ -627,7 +629,7 @@ impl View {
                     pos2(right - 14.0, row.center().y),
                     Align2::RIGHT_CENTER,
                     hours(grid.rounded_row(t, rounding)),
-                    FontId::proportional(14.5),
+                    FontId::proportional(theme.metrics.body_text_size),
                     theme.text,
                 );
             }
@@ -679,7 +681,7 @@ impl View {
                 pos2(right - 14.0, y),
                 Align2::RIGHT_CENTER,
                 hours(grid.rounded_total(rounding)),
-                FontId::proportional(15.0),
+                FontId::proportional(theme.metrics.title_text_size),
                 theme.accent,
             );
 
@@ -749,7 +751,7 @@ impl View {
                 inner,
                 egui::TextEdit::singleline(&mut ed.text)
                     .id(id)
-                    .font(FontId::proportional(14.0))
+                    .font(FontId::proportional(theme.metrics.body_text_size))
                     .horizontal_align(Align::Max)
                     .margin(vec2(6.0, 2.0)),
             );
@@ -805,7 +807,7 @@ impl View {
             pos2(cell.right() - CELL_PAD, cell.center().y),
             Align2::RIGHT_CENTER,
             &shown,
-            FontId::proportional(14.0),
+            FontId::proportional(theme.metrics.body_text_size),
             if live { theme.accent } else { theme.text },
         );
         let response = match (live, closed) {
@@ -865,6 +867,7 @@ impl View {
                         None => RichText::new("Customer…").color(theme.text_dim),
                     };
                     egui::ComboBox::from_id_salt("whir.timesheet.customer")
+                        .icon(kit::combo_chevron)
                         .width(170.0)
                         .selected_text(text)
                         .show_ui(ui, |ui| {
@@ -927,6 +930,7 @@ impl View {
                         .collect();
                     projects.sort_by_key(|t| t.name.to_lowercase());
                     egui::ComboBox::from_id_salt(("whir.timesheet.project", cid))
+                        .icon(kit::combo_chevron)
                         .width(190.0)
                         .selected_text(RichText::new("Project…").color(theme.text_dim))
                         .show_ui(ui, |ui| {
@@ -1018,7 +1022,7 @@ impl View {
             state.label(timer),
             format_date(&Stamp::midnight(date).local(), false)
         );
-        ui.label(RichText::new(title).size(14.5).color(theme.text));
+        ui.label(RichText::new(title).heading().color(theme.text));
         ui.add_space(4.0);
         let entries: Vec<Entry> = week
             .entries
@@ -1193,54 +1197,40 @@ impl View {
             Grid::of(week, state.running.as_ref(), now).rounded_total(state.options.rounding);
         let mut close = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(Id::new("whir.close_week"))
-            .backdrop_color(theme.modal_backdrop)
-            .frame(
-                egui::Frame::popup(&ctx.global_style())
-                    .inner_margin(20.0)
-                    .corner_radius(10.0),
-            )
-            .show(&ctx, |ui| {
-                ui.set_width(420.0);
-                ui.label(
-                    RichText::new(format!("Close out {}?", week_title(monday)))
-                        .size(16.0)
-                        .color(theme.text),
-                );
-                ui.add_space(6.0);
+        let modal = kit::dialog(&ctx, Id::new("whir.close_week"), 420.0, theme, |ui| {
+            kit::dialog_title(ui, format!("Close out {}?", week_title(monday)), theme);
+            note(
+                ui,
+                &format!(
+                    "Its timesheet ({} h) is written to the Time folder as CSV, with every \
+                         entry beside it. You can reopen it later.",
+                    hours(total)
+                ),
+                theme,
+            );
+            if running {
+                ui.add_space(4.0);
                 note(
                     ui,
                     &format!(
-                        "Its timesheet ({} h) is written to the Time folder as CSV, with every \
-                         entry beside it. You can reopen it later.",
-                        hours(total)
+                        "The running timer's time so far (since {}) goes in; it keeps running.",
+                        format_hm(
+                            &state
+                                .running
+                                .as_ref()
+                                .map(|r| r.start)
+                                .unwrap_or(now)
+                                .local()
+                        )
                     ),
                     theme,
                 );
-                if running {
-                    ui.add_space(4.0);
-                    note(
-                        ui,
-                        &format!(
-                            "The running timer's time so far (since {}) goes in; it keeps running.",
-                            format_hm(
-                                &state
-                                    .running
-                                    .as_ref()
-                                    .map(|r| r.start)
-                                    .unwrap_or(now)
-                                    .local()
-                            )
-                        ),
-                        theme,
-                    );
-                }
-                ui.add_space(16.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    cancel = ui.button("  Cancel  ").clicked();
-                    close = primary(ui, "Close week", theme);
-                });
+            }
+            kit::dialog_actions(ui, |ui| {
+                cancel = kit::action(ui, "Cancel", theme).clicked();
+                close = kit::primary(ui, "Close week", theme).clicked();
             });
+        });
         if cancel || (modal.should_close() && !close) {
             self.confirm_close = false;
         }

@@ -7,7 +7,7 @@ it saves itself, no questions asked. A small capture dock takes screenshots, kee
 and opens each one ready to highlight and label.
 
 - Rust + raw Win32 + Direct3D 11 + egui (no eframe/winit/wgpu, no web runtime)
-- One portable folder: `whir.exe` (~5.5 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
+- One portable folder: `whir.exe` (~5.8 MB, static CRT) + `pdfium.dll` (~7 MB, loaded only when a PDF is opened)
 - No installer, no admin rights, no VC++ redistributable
 
 ## Using it
@@ -38,16 +38,27 @@ Diagnostics:
 - `whir.exe --warp` renders with Windows' software rasterizer instead of the GPU driver.
 - `WHIR_NOTES_DIR=<folder>` keeps notes somewhere other than `Documents\whir` (testing).
 - `WHIR_CAPTURES_DIR=<folder>` does the same for screenshots.
+- `WHIR_NO_DOCK=1` doesn't start the capture dock with the window (a dock started from a
+  test or a bench run would point the start-with-Windows entry at that build).
+
+Design:
+- `cargo test -p whir -- --ignored gallery` draws the whole app on made-up files, offscreen,
+  every screen in both themes at 100% and 150%, to PNGs in `WHIR_PREVIEW_DIR`
+  (`WHIR_PREVIEW_ONLY=pdf,csv` and `WHIR_PREVIEW_MODES=dark-100` narrow it down).
+  `--ignored icon_sheet` does the same for every icon.
+- `scripts\bench-start.ps1 -Against <another build>` alternates launches of two builds and
+  compares the time after the GPU device is ready: the driver alone moves a launch by 15 ms
+  from one run to the next, which hides anything the UI does.
 
 ## Measured (release build, desktop with NVIDIA GPU, files in the OS cache)
 
 | | window on screen | content on screen | private memory |
 |---|---|---|---|
 | second double-click (hand-off to the running window) | — | ~14 ms in the new process | — |
-| bare launch (blank note) | ~90 ms | ~150 ms | ~61 MB |
-| 6000×4000 JPEG | ~90 ms | ~170 ms | ~104 MB |
+| bare launch (blank note) | ~90 ms | ~130 ms | ~65 MB |
+| 6000×4000 JPEG | ~90 ms | ~150 ms | ~108 MB |
 | 20 MB / 300k-row CSV | ~90 ms | ~150 ms | ~67 MB |
-| 66-page PDF | ~90 ms | ~160 ms | ~113 MB |
+| 66-page PDF | ~90 ms | ~150 ms | ~107 MB |
 | same CSV, `--warp` | — | ~72 ms | ~34 MB |
 | the capture dock (`--dock`), idle | — | — | ~4.5 MB (a frozen screen's worth more while selecting) |
 
@@ -64,7 +75,7 @@ into cells: an 870 MB file takes about 0.3 s.
 
 ```
 crates/
-  whir/           exe: startup ordering, single instance, tabs + title bar, toolbar, shortcuts,
+  whir/           exe: startup ordering, single instance, tabs + title bar, menu bar, shortcuts,
                   save/close prompts, the bottom drawer, Settings, the Find in all tabs panel, --register
   whir-capture/   the capture dock (`--dock`): its own process, plain Win32 + GDI, no renderer
                   (its text through DirectWrite, in software); the tray icon, the stopwatch,
@@ -74,8 +85,9 @@ crates/
                   input → egui, Open/Save dialogs, Recycle Bin, session end, where the window opens
   whir-gfx/       D3D11 device + flip-model swapchain + a purpose-built egui painter (shaders compiled at build time)
   whir-core/      Document trait (incl. saving), lock-free-for-others file access and atomic
-                  replace, the notes library, the screenshots store, marks, toolbar widgets,
-                  find bar, f64 scrolling, theme tokens, tracing, the timesheet and the todos
+                  replace, the notes library, the screenshots store, marks, the icons and
+                  whir's own controls, toolbar widgets, find bar, f64 scrolling, theme tokens,
+                  tracing, the timesheet and the todos
                   (shared with the dock), settings.ini, where each file was left (views.txt)
   whir-notes/     Markdown notes styled as you type; autosave on a background writer
   whir-image/     WIC decoding (built into Windows), EXIF orientation, DCT-scaled JPEG decode, mipmapped GPU textures,
@@ -106,11 +118,20 @@ Principles:
   the todos: each change is made under a named mutex from a fresh read of the files, written
   atomically, and announced to the other process with a registered window message.
 
-### Theming / re_ui
+### Theming
 
-egui is pinned to `=0.36.2`, the version rerun's `re_ui 0.37` uses. All colours, sizes and
-the font list are in `crates/whir-core/src/theme.rs`, which is the single seam for vendoring
-re_ui's design tokens later. Fonts are loaded from `%WINDIR%\Fonts` (memory-mapped).
-CJK and emoji fallbacks load on first use.
+All colours, sizes, the type scale and the font list are in
+`crates/whir-core/src/theme.rs`, and `Theme::apply` styles every stock egui widget from
+them, following the recipe of rerun's `re_ui` (egui is pinned to `=0.36.2`, the version
+`re_ui` 0.38 and 0.39 use; `re_ui` itself would bring in eframe and wgpu, so it isn't a
+dependency). Nothing is parsed at startup: the tokens are plain Rust.
+
+The text is Segoe UI Variable and the icons Segoe Fluent Icons, both loaded from
+`%WINDIR%\Fonts` (memory-mapped), so no font is in the exe; on Windows 10 they give way to
+Segoe UI and Segoe MDL2 Assets, and a test holds every icon to being in both. Text marks on
+images keep Segoe UI whatever the interface uses, because their boxes are saved measured.
+CJK and emoji fallbacks load on first use. `crates/whir-core/src/icons.rs` is the one table
+of icons, for the window and the dock; `kit.rs` has the controls egui doesn't draw the way a
+Windows tool should.
 
 What's not there yet is listed at the end of the guide.

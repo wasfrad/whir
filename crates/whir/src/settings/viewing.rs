@@ -2,6 +2,7 @@
 
 use egui::RichText;
 use whir_core::DocCx;
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::views;
 use whir_image::prefs as image;
@@ -36,12 +37,13 @@ pub fn ui(ui: &mut egui::Ui, _cx: &mut DocCx<'_>, theme: &Theme) {
     );
     ui.add_space(10.0);
     let mut remember = pdf::remember();
-    if ui
-        .checkbox(
-            &mut remember,
-            "Reopen each PDF where you left it (its page and zoom)",
-        )
-        .changed()
+    if kit::checkbox(
+        ui,
+        &mut remember,
+        "Reopen each PDF where you left it (its page and zoom)",
+        theme,
+    )
+    .changed()
     {
         pdf::set_remember(remember);
     }
@@ -59,12 +61,13 @@ pub fn ui(ui: &mut egui::Ui, _cx: &mut DocCx<'_>, theme: &Theme) {
     }
     ui.add_space(6.0);
     let mut minimap = pdf::minimap();
-    if ui
-        .checkbox(
-            &mut minimap,
-            "Show the minimap of pages beside the scrollbar (Ctrl+M)",
-        )
-        .changed()
+    if kit::checkbox(
+        ui,
+        &mut minimap,
+        "Show the minimap of pages beside the scrollbar (Ctrl+M)",
+        theme,
+    )
+    .changed()
     {
         pdf::set_minimap(minimap);
     }
@@ -109,6 +112,7 @@ fn choice<T: Copy + PartialEq>(
     ui.horizontal(|ui| {
         ui.label(RichText::new(text).color(theme.text));
         egui::ComboBox::from_id_salt(id)
+            .icon(kit::combo_chevron)
             .selected_text(label(current))
             .width(280.0)
             .show_ui(ui, |ui| {

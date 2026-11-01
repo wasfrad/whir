@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-use egui::{Align, Key, Layout, Modifiers, RichText};
+use egui::{Key, Modifiers, RichText};
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_core::{Persistence, SaveAsSpec, SaveResult, needs_attention};
 
@@ -252,85 +253,69 @@ impl CloseFlow {
             Cancel,
         }
         let mut choice = None;
-        let modal = egui::Modal::new(egui::Id::new("whir.close"))
-            .backdrop_color(theme.modal_backdrop)
-            .frame(
-                egui::Frame::popup(&ctx.global_style())
-                    .inner_margin(20.0)
-                    .corner_radius(10.0),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(380.0);
-                let heading = match (names.len(), autosave_failed) {
-                    (1, true) => format!("“{}” couldn't be saved", names[0]),
-                    (1, false) => format!("Save changes to “{}”?", names[0]),
-                    (n, _) => format!("Save changes to {n} documents?"),
-                };
-                ui.label(RichText::new(heading).size(16.0).color(theme.text));
-                ui.add_space(6.0);
-                if names.len() > 1 {
-                    for n in names.iter().take(6) {
-                        ui.label(RichText::new(format!("•  {n}")).color(theme.text_dim));
-                    }
-                    if names.len() > 6 {
-                        ui.label(
-                            RichText::new(format!("and {} more", names.len() - 6))
-                                .color(theme.text_dim),
-                        );
-                    }
-                    ui.add_space(4.0);
+        let modal = kit::dialog(ctx, egui::Id::new("whir.close"), 400.0, theme, |ui| {
+            let heading = match (names.len(), autosave_failed) {
+                (1, true) => format!("“{}” couldn't be saved", names[0]),
+                (1, false) => format!("Save changes to “{}”?", names[0]),
+                (n, _) => format!("Save changes to {n} documents?"),
+            };
+            kit::dialog_title(ui, heading, theme);
+            if names.len() > 1 {
+                for n in names.iter().take(6) {
+                    ui.label(RichText::new(format!("•  {n}")).color(theme.text_dim));
                 }
-                let detail = if autosave_failed {
-                    "Try again, save it somewhere else, or discard the changes."
-                } else {
-                    "Your changes will be lost if you don't save them."
-                };
-                ui.label(RichText::new(detail).color(theme.text_dim));
-                if let Some(e) = &self.error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(e).color(theme.danger));
-                }
-                ui.add_space(16.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("  Cancel  ").clicked() {
-                        choice = Some(Choice::Cancel);
-                    }
-                    if busy {
-                        ui.add(egui::Spinner::new().size(14.0));
-                        ui.label(RichText::new("Saving…").color(theme.text_dim));
-                        return;
-                    }
-                    let discard = if autosave_failed {
-                        "Discard"
-                    } else {
-                        "Don't save"
-                    };
-                    if ui.button(format!("  {discard}  ")).clicked() {
-                        choice = Some(Choice::Discard);
-                    }
-                    if autosave_failed && ui.button("  Save as…  ").clicked() {
-                        choice = Some(Choice::SaveAs);
-                    }
-                    let primary = match (names.len(), autosave_failed) {
-                        (_, true) => "Try again",
-                        (1, false) => "Save",
-                        _ => "Save all",
-                    };
-                    let save = ui.add(
-                        egui::Button::new(
-                            RichText::new(format!("  {primary}  ")).color(egui::Color32::WHITE),
-                        )
-                        .fill(theme.accent),
+                if names.len() > 6 {
+                    ui.label(
+                        RichText::new(format!("and {} more", names.len() - 6))
+                            .color(theme.text_dim),
                     );
-                    if save.clicked() {
-                        choice = Some(Choice::Save);
-                    }
-                });
-                // Enter saves (the dialog has no focusable default button).
-                if !busy && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                }
+                ui.add_space(4.0);
+            }
+            let detail = if autosave_failed {
+                "Try again, save it somewhere else, or discard the changes."
+            } else {
+                "Your changes will be lost if you don't save them."
+            };
+            ui.label(RichText::new(detail).color(theme.text_dim));
+            if let Some(e) = &self.error {
+                ui.add_space(6.0);
+                ui.label(RichText::new(e).color(theme.danger));
+            }
+            kit::dialog_actions(ui, |ui| {
+                if kit::action(ui, "Cancel", theme).clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+                if busy {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(RichText::new("Saving…").color(theme.text_dim));
+                    return;
+                }
+                let discard = if autosave_failed {
+                    "Discard"
+                } else {
+                    "Don't save"
+                };
+                if kit::action(ui, discard, theme).clicked() {
+                    choice = Some(Choice::Discard);
+                }
+                if autosave_failed && kit::action(ui, "Save as…", theme).clicked() {
+                    choice = Some(Choice::SaveAs);
+                }
+                let primary = match (names.len(), autosave_failed) {
+                    (_, true) => "Try again",
+                    (1, false) => "Save",
+                    _ => "Save all",
+                };
+                if kit::primary(ui, primary, theme).clicked() {
                     choice = Some(Choice::Save);
                 }
             });
+            // Enter saves (the dialog has no focusable default button).
+            if !busy && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                choice = Some(Choice::Save);
+            }
+        });
         if modal.should_close() && choice.is_none() {
             choice = Some(Choice::Cancel);
         }

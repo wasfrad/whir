@@ -12,6 +12,8 @@ use egui::emath::TSTransform;
 use egui::epaint::{TextShape, WHITE_UV};
 use egui::{Color32, FontId, Mesh, Pos2, Rect, Vec2, pos2, vec2};
 
+use crate::theme;
+
 use crate::texture::MULTIPLY;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -156,8 +158,15 @@ impl Text {
 
     /// The font, `scale` points per image pixel.
     pub fn font(&self, scale: f32) -> FontId {
-        FontId::proportional(self.size as f32 * scale)
+        font(self.size as f32 * scale)
     }
+}
+
+/// The font text marks are set in. It's their own, not the interface's: a
+/// mark is saved with its box measured, so what it's set in can't change.
+pub fn font(size: f32) -> FontId {
+    theme::request_rich_fonts();
+    FontId::new(size, theme::family(theme::MARKS))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -392,8 +401,7 @@ pub const SCREEN_TEXT_MAX: f32 = 128.0;
 pub fn paint_text(painter: &egui::Painter, rect: Rect, text: &Text, turns: u8, scale: f32) {
     let points = text.size as f32 * scale;
     let laid_out = points.min(SCREEN_TEXT_MAX);
-    let font = FontId::proportional(laid_out);
-    let galley = painter.layout_no_wrap(text.body.clone(), font, text.pen.color());
+    let galley = painter.layout_no_wrap(text.body.clone(), font(laid_out), text.pen.color());
     let angle = (turns % 4) as f32 * FRAC_PI_2;
     let inset = turn_vec(Vec2::splat(text.halo() * scale), turns);
     let at = text_origin(rect, turns) + inset;
@@ -422,10 +430,8 @@ pub fn measure(ctx: &egui::Context, text: &Text) -> [u32; 2] {
     // Laid out no bigger than text on screen is (see `paint_text`): text
     // scales evenly, and big glyphs only crowd the font atlas.
     let laid_out = (text.size as f32).min(SCREEN_TEXT_MAX);
-    let galley = ctx.fonts_mut(|f| {
-        let font = FontId::proportional(laid_out);
-        f.layout_no_wrap(text.body.clone(), font, Color32::WHITE)
-    });
+    let galley =
+        ctx.fonts_mut(|f| f.layout_no_wrap(text.body.clone(), font(laid_out), Color32::WHITE));
     let pad = 2.0 * text.halo();
     let size = galley.size() * (text.size as f32 / laid_out);
     [
@@ -437,6 +443,18 @@ pub fn measure(ctx: &egui::Context, text: &Text) -> [u32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mark's box was measured with this face: a change of interface font
+    /// must not reflow the marks saved on screenshots.
+    #[test]
+    fn text_marks_keep_a_face_of_their_own() {
+        assert_eq!(font(12.0).family, theme::family(theme::MARKS));
+        let marks = theme::LAZY_RICH_FONTS
+            .iter()
+            .find(|f| f.role == theme::FontRole::Family(theme::MARKS))
+            .expect("the marks' font is loaded on demand");
+        assert_eq!(marks.file, "segoeui.ttf");
+    }
 
     #[test]
     fn ink_and_pen_names_round_trip() {

@@ -5,13 +5,19 @@ use windows::Win32::Foundation::HWND;
 
 use crate::Device;
 use crate::painter::Painter;
-use crate::surface::{PresentResult, Surface};
+use crate::surface::{Offscreen, PresentResult, Surface};
 use crate::textures::GpuTextures;
 
-/// Device + swapchain + painter for one window.
+/// Where a frame goes.
+enum Target {
+    Window(Surface),
+    Offscreen(Offscreen),
+}
+
+/// Device + render target + painter for one window.
 pub struct Renderer {
     device: Device,
-    surface: Surface,
+    target: Target,
     painter: Painter,
     textures: Arc<GpuTextures>,
 }
@@ -26,6 +32,24 @@ impl Renderer {
     ) -> windows::core::Result<Self> {
         let [r, g, b, _] = background.to_normalized_gamma_f32();
         let surface = Surface::new(&device, hwnd, size_px[0], size_px[1], [r, g, b])?;
+        Self::with_target(device, textures, Target::Window(surface))
+    }
+
+    /// A renderer with no window, for pictures of the UI: see [`Self::read_pixels`].
+    pub fn offscreen(
+        device: Device,
+        textures: Arc<GpuTextures>,
+        size_px: [u32; 2],
+    ) -> windows::core::Result<Self> {
+        let target = Offscreen::new(&device, size_px[0], size_px[1])?;
+        Self::with_target(device, textures, Target::Offscreen(target))
+    }
+
+    fn with_target(
+        device: Device,
+        textures: Arc<GpuTextures>,
+        target: Target,
+    ) -> windows::core::Result<Self> {
         let painter = Painter::new(&device.device)?;
         textures.set_device(
             &device.device,
@@ -34,7 +58,7 @@ impl Renderer {
         );
         Ok(Self {
             device,
-            surface,
+            target,
             painter,
             textures,
         })
@@ -49,11 +73,32 @@ impl Renderer {
     }
 
     pub fn size(&self) -> [u32; 2] {
-        self.surface.size()
+        match &self.target {
+            Target::Window(surface) => surface.size(),
+            Target::Offscreen(offscreen) => offscreen.size(),
+        }
     }
 
     pub fn resize(&mut self, size_px: [u32; 2]) {
-        let _ = self.surface.resize(size_px[0], size_px[1]);
+        match &mut self.target {
+            Target::Window(surface) => {
+                let _ = surface.resize(size_px[0], size_px[1]);
+            }
+            Target::Offscreen(offscreen) => {
+                if let Ok(resized) = Offscreen::new(&self.device, size_px[0], size_px[1]) {
+                    *offscreen = resized;
+                }
+            }
+        }
+    }
+
+    /// What the last frame drew (top-down BGRA rows), if this renderer has no
+    /// window.
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        match &self.target {
+            Target::Window(_) => None,
+            Target::Offscreen(offscreen) => offscreen.read_pixels(&self.device).ok(),
+        }
     }
 
     /// Apply texture uploads without drawing (minimized / occluded frames), so
@@ -87,18 +132,24 @@ impl Renderer {
         clear: egui::Color32,
         vsync: bool,
     ) -> PresentResult {
-        self.surface.wait_for_frame();
+        if let Target::Window(surface) = &self.target {
+            surface.wait_for_frame();
+        }
         let ctx = self.device.context.clone();
         self.set_textures(delta);
 
-        let Ok(rtv) = self.surface.render_target(&self.device) else {
+        let rtv = match &mut self.target {
+            Target::Window(surface) => surface.render_target(&self.device),
+            Target::Offscreen(offscreen) => Ok(offscreen.render_target()),
+        };
+        let Ok(rtv) = rtv else {
             self.free_textures(delta);
             return PresentResult::DeviceLost;
         };
         unsafe {
             ctx.ClearRenderTargetView(&rtv, &clear.to_normalized_gamma_f32());
         }
-        let size = self.surface.size();
+        let size = self.size();
         let _ = self.painter.paint(
             &ctx,
             &rtv,
@@ -108,6 +159,9 @@ impl Renderer {
             &self.textures,
         );
         self.free_textures(delta);
-        self.surface.present(vsync)
+        match &self.target {
+            Target::Window(surface) => surface.present(vsync),
+            Target::Offscreen(_) => PresentResult::Ok,
+        }
     }
 }

@@ -336,6 +336,37 @@ pub fn wrap(text: &str, sel: Range<usize>, marker: &str) -> Edit {
     }
 }
 
+/// The list button: bullets on the selected lines, or off if they all have one.
+pub fn toggle_list(text: &str, sel: Range<usize>) -> Edit {
+    let first = line_start_char(text, sel.start);
+    let chars: Vec<char> = text.chars().collect();
+    let last = (sel.end..chars.len())
+        .find(|&i| chars[i] == '\n')
+        .unwrap_or(chars.len());
+    let block: String = chars[first..last].iter().collect();
+    let bullet = |line: &str| line.trim_start_matches([' ', '\t']).starts_with("- ");
+    let all = block.split('\n').all(bullet);
+    let lines: Vec<String> = block
+        .split('\n')
+        .map(|line| {
+            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let (lead, rest) = line.split_at(indent);
+            match rest.strip_prefix("- ") {
+                Some(item) if all => format!("{lead}{item}"),
+                Some(_) => line.to_owned(),
+                None => format!("{lead}- {rest}"),
+            }
+        })
+        .collect();
+    let insert = lines.join("\n");
+    let end = first + insert.chars().count();
+    Edit {
+        replace: first..last,
+        insert,
+        select: end..end,
+    }
+}
+
 /// Ctrl+K: `[selection](|)`, or `[|](url)` when the selection is a URL.
 pub fn link(text: &str, sel: Range<usize>) -> Edit {
     let inner = text_slice_chars(text, sel.clone());
@@ -367,6 +398,35 @@ pub fn apply(text: &mut String, e: &Edit) {
 /// Char index of the start of the line containing char `ci`.
 pub fn line_start_char(text: &str, ci: usize) -> usize {
     char_of(text, line_start(text, byte_of(text, ci)))
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    fn run(text: &str, sel: Range<usize>) -> String {
+        let mut text = text.to_owned();
+        let edit = toggle_list(&text, sel);
+        apply(&mut text, &edit);
+        text
+    }
+
+    #[test]
+    fn a_line_becomes_an_item_and_back() {
+        assert_eq!(run("milk", 2..2), "- milk");
+        assert_eq!(run("- milk", 3..3), "milk");
+    }
+
+    #[test]
+    fn every_selected_line_gets_a_bullet() {
+        assert_eq!(run("a\n- b\nc", 0..7), "- a\n- b\n- c");
+        assert_eq!(run("- a\n- b", 0..7), "a\nb");
+    }
+
+    #[test]
+    fn indents_stay_and_lines_outside_the_selection_are_left_alone() {
+        assert_eq!(run("x\n  y\nz", 3..3), "x\n  - y\nz");
+    }
 }
 
 #[cfg(test)]

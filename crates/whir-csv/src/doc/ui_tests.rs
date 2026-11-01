@@ -34,7 +34,7 @@ impl Harness {
             doc.loaded().is_some_and(|l| l.table.progress().done)
         });
         let mut h = Self {
-            ctx: egui::Context::default(),
+            ctx: whir_core::theme::test_context(),
             doc,
             requests: Vec::new(),
             commands: Vec::new(),
@@ -51,7 +51,7 @@ impl Harness {
         let dir = test_dir(name);
         let cx = open_cx(&dir);
         let mut h = Self {
-            ctx: egui::Context::default(),
+            ctx: whir_core::theme::test_context(),
             doc: new_blank(&cx),
             requests: Vec::new(),
             commands: Vec::new(),

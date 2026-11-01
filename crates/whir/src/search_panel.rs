@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align2, CursorIcon, Event, FontId, Frame, Key, Modifiers, Panel, Rect, Sense, Stroke,
-    UiBuilder, pos2, vec2,
+    Align2, Event, FontId, Frame, Key, Modifiers, Panel, Rect, Sense, Stroke, UiBuilder, pos2, vec2,
 };
 use whir_core::find_bar::{FindBar, FindStatus, fmt_int};
 use whir_core::theme::{self, Theme};
@@ -410,7 +409,7 @@ impl SearchPanel {
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
         let title = painter.layout_no_wrap(
             "Find in all tabs".into(),
-            FontId::new(13.0, theme::family(theme::SEMIBOLD)),
+            FontId::new(theme.metrics.body_text_size, theme::family(theme::SEMIBOLD)),
             theme.text,
         );
         let title_w = title.size().x;
@@ -615,9 +614,6 @@ impl SearchPanel {
                                 );
                             }
                         }
-                        if resp.hovered() && !matches!(row, Row::More) {
-                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                        }
                         if resp.clicked() {
                             clicked = Some((g, row));
                         }
@@ -684,7 +680,7 @@ fn paint_file_row(
     theme::note_text(title);
     let name = p.layout_no_wrap(
         title.to_owned(),
-        FontId::new(13.0, theme::family(theme::SEMIBOLD)),
+        FontId::new(theme.metrics.body_text_size, theme::family(theme::SEMIBOLD)),
         theme.text,
     );
     let name_x = rect.left() + 46.0;

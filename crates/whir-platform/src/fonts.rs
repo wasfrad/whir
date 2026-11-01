@@ -7,6 +7,7 @@
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
+use egui::epaint::text::{FontTweak, VariationCoords};
 use egui::{FontData, FontDefinitions, FontFamily};
 use whir_core::theme::{FontRole, FontSpec, NAMED_FAMILIES};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -50,8 +51,20 @@ fn map_static(path: &Path) -> Option<&'static [u8]> {
 }
 
 pub fn load_font(spec: &FontSpec) -> Option<FontData> {
-    let bytes = map_static(&fonts_dir().join(spec.file))?;
-    let mut data = FontData::from_static(bytes);
+    let dir = fonts_dir();
+    let mut tweak = FontTweak {
+        hinting: Some(spec.hinted),
+        y_offset_factor: spec.drop,
+        ..Default::default()
+    };
+    let bytes = match map_static(&dir.join(spec.file)) {
+        Some(bytes) => {
+            tweak.coords = VariationCoords::new(spec.axes.iter().copied());
+            bytes
+        }
+        None => map_static(&dir.join(spec.alternate?))?,
+    };
+    let mut data = FontData::from_static(bytes).tweak(tweak);
     data.index = spec.index;
     Some(data)
 }
@@ -150,4 +163,56 @@ pub fn add_family_fonts(ctx: &egui::Context, specs: &[FontSpec]) {
 
 fn fam(defs: &mut FontDefinitions, family: FontFamily) -> &mut Vec<String> {
     defs.families.entry(family).or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::epaint::text::{Fonts, TextOptions};
+    use whir_core::icons::{self, Icon};
+
+    use super::*;
+
+    /// On Windows 10 the fonts of Windows 11 aren't there.
+    #[test]
+    fn a_missing_font_gives_way_to_its_alternate() {
+        let spec = FontSpec {
+            name: "test",
+            file: "no such font.ttf",
+            alternate: Some("segoeui.ttf"),
+            index: 0,
+            role: FontRole::Proportional,
+            axes: &[(b"wght", 450.0)],
+            hinted: false,
+            drop: 0.0,
+        };
+        let Some(data) = load_font(&spec) else {
+            return; // No Segoe UI on this machine at all.
+        };
+        assert!(
+            data.tweak.coords.as_ref().is_empty(),
+            "the alternate isn't variable"
+        );
+    }
+
+    /// Glyphs that aren't there draw as nothing, with no error at all.
+    #[test]
+    fn every_icon_is_in_both_icon_fonts() {
+        for file in ["SegoeIcons.ttf", "segmdl2.ttf"] {
+            let Some(bytes) = map_static(&fonts_dir().join(file)) else {
+                continue;
+            };
+            let mut defs = FontDefinitions::empty();
+            defs.font_data
+                .insert(file.to_owned(), FontData::from_static(bytes).into());
+            let family = FontFamily::Name(whir_core::theme::ICONS.into());
+            defs.families.insert(family, vec![file.to_owned()]);
+            let mut fonts = Fonts::new(TextOptions::default(), defs);
+            let mut view = fonts.with_pixels_per_point(1.0);
+            let missing: Vec<&Icon> = Icon::ALL
+                .iter()
+                .filter(|icon| !view.has_glyph(&icons::font(16.0), icon.glyph()))
+                .collect();
+            assert!(missing.is_empty(), "{file} lacks {missing:?}");
+        }
+    }
 }

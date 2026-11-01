@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{CentralPanel, Event, Frame, Key, Modifiers, OutputCommand, Panel, ViewportId};
+use whir_core::icons::Icon;
+use whir_core::kit;
 use whir_core::theme::{self, Theme};
 use whir_core::{
-    DocCx, DocKind, DocRequest, Document, FindQuery, OpenCx, SaveAsSpec, SaveResult,
+    DocCx, DocKind, DocRequest, Document, FindQuery, OpenCx, Persistence, SaveAsSpec, SaveResult,
     TextureRegistry, needs_attention, trace,
 };
 use whir_gfx::{GpuTextures, PresentResult, Renderer};
@@ -23,6 +25,7 @@ use crate::close_flow::{self, CloseFlow, Outcome};
 use crate::dispatch;
 use crate::drawer::{self, Drawer};
 use crate::keys::consume_exact;
+use crate::menus::{self, Command, Enabled};
 use crate::search_panel::{self, SearchPanel};
 use crate::settings::{Section, SettingsDoc};
 use crate::tab_bar::{self, TabInfo};
@@ -57,6 +60,10 @@ pub struct App {
     theme: Theme,
     shown: bool,
     first_frame_at: Option<Instant>,
+    /// The first frame's own cost has been marked in the startup trace.
+    first_frame_traced: bool,
+    /// Help > About is open.
+    about: bool,
     window_title: String,
     fallback_fonts_loaded: bool,
     rich_fonts_loaded: bool,
@@ -137,6 +144,8 @@ impl App {
             theme,
             shown: false,
             first_frame_at: None,
+            first_frame_traced: false,
+            about: false,
             window_title: String::new(),
             fallback_fonts_loaded: false,
             rich_fonts_loaded: false,
@@ -161,6 +170,18 @@ impl App {
 
     pub fn set_renderer(&mut self, renderer: Renderer) {
         self.renderer = Some(renderer);
+    }
+
+    /// What the last frame drew, for the gallery (see `crate::gallery`).
+    #[cfg(test)]
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        self.renderer.as_ref()?.read_pixels()
+    }
+
+    /// Any tab still loading, for the gallery to wait on.
+    #[cfg(test)]
+    pub fn loading(&self) -> bool {
+        self.tabs.iter().any(|t| t.doc.is_loading())
     }
 
     fn push_tab(&mut self, doc: Box<dyn Document>) -> usize {
@@ -551,33 +572,20 @@ impl App {
                 }
             }
         });
-        if open {
-            self.pending.push(Self::open_dialog_command());
-        }
-        if reopen && let Some(p) = self.recently_closed.pop() {
-            self.open_paths(vec![p]);
-        }
-        if new_note {
-            self.new_note();
-        }
-        if new_table {
-            self.new_table();
-        }
-        if save {
-            self.save_active();
-        }
-        if save_as {
-            self.save_active_as();
-        }
-        if drawer {
-            self.sync_drawer();
-            self.drawer.toggle();
-        }
-        if find_in_tabs {
-            self.search.focus();
-        }
-        if settings {
-            self.open_settings("");
+        for (asked, command) in [
+            (open, Command::Open),
+            (reopen, Command::ReopenTab),
+            (new_note, Command::NewNote),
+            (new_table, Command::NewTable),
+            (save, Command::Save),
+            (save_as, Command::SaveAs),
+            (drawer, Command::ToggleDrawer),
+            (find_in_tabs, Command::FindInTabs),
+            (settings, Command::Settings),
+        ] {
+            if asked {
+                self.run(command);
+            }
         }
         if flag {
             self.flag_active();
@@ -589,8 +597,10 @@ impl App {
         }
         let n = self.tabs.len();
         if n > 0 {
-            if step != 0 {
-                self.active = (self.active as i32 + step).rem_euclid(n as i32) as usize;
+            match step {
+                1 => self.run(Command::NextTab),
+                -1 => self.run(Command::PreviousTab),
+                _ => {}
             }
             if let Some(g) = goto
                 && g < n
@@ -598,8 +608,97 @@ impl App {
                 self.active = g;
             }
             if close {
-                self.request_close_tab(self.active);
+                self.run(Command::CloseTab);
             }
+        }
+    }
+
+    /// Do what a menu or a shortcut asked for.
+    fn run(&mut self, command: Command) {
+        let n = self.tabs.len() as i32;
+        match command {
+            Command::NewNote => self.new_note(),
+            Command::NewTable => self.new_table(),
+            Command::Open => self.pending.push(Self::open_dialog_command()),
+            Command::ReopenTab => {
+                if let Some(p) = self.recently_closed.pop() {
+                    self.open_paths(vec![p]);
+                }
+            }
+            Command::Save => self.save_active(),
+            Command::SaveAs => self.save_active_as(),
+            Command::CloseTab => {
+                if n > 0 {
+                    self.request_close_tab(self.active);
+                }
+            }
+            Command::CloseWindow => self.pending.push(WindowCommand::Close),
+            Command::FindInTabs => self.search.focus(),
+            Command::ToggleDrawer => {
+                self.sync_drawer();
+                self.drawer.toggle();
+            }
+            Command::NextTab if n > 0 => {
+                self.active = (self.active as i32 + 1).rem_euclid(n) as usize;
+            }
+            Command::PreviousTab if n > 0 => {
+                self.active = (self.active as i32 - 1).rem_euclid(n) as usize;
+            }
+            Command::NextTab | Command::PreviousTab => {}
+            Command::Capture => self.capture(),
+            Command::Dock => self.open_dock(),
+            Command::Timesheet => self.open_settings("timesheet"),
+            Command::Settings => self.open_settings(""),
+            Command::Guide => self.open_guide(),
+            Command::About => self.about = true,
+        }
+    }
+
+    fn about_dialog(&mut self, theme: &Theme) {
+        if !self.about {
+            return;
+        }
+        let mut close = false;
+        let modal = kit::dialog(&self.ctx, egui::Id::new("whir.about"), 340.0, theme, |ui| {
+            kit::dialog_title(ui, concat!("whir ", env!("CARGO_PKG_VERSION")), theme);
+            ui.label(egui::RichText::new(env!("CARGO_PKG_DESCRIPTION")).color(theme.text_dim));
+            kit::dialog_actions(ui, |ui| {
+                close = kit::action(ui, "Close", theme).clicked();
+            });
+        });
+        if close || modal.should_close() {
+            self.about = false;
+        }
+    }
+
+    /// Take a screenshot (the dock does that).
+    fn capture(&mut self) {
+        if let Err(e) = whir_capture::launch(whir_capture::Command::Capture) {
+            self.show_toast(format!("The capture couldn't start: {e}"));
+        }
+    }
+
+    /// The guide travels beside whir.exe, as README.md.
+    fn open_guide(&mut self) {
+        let guide = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join("README.md")));
+        match guide {
+            Some(path) if path.is_file() => self.open_paths(vec![path]),
+            _ => self.show_toast("The guide isn't beside whir.exe."),
+        }
+    }
+
+    /// The menus' idea of what can be done now.
+    fn enabled(&self) -> Enabled {
+        let doc = self.tabs.get(self.active).map(|t| &t.doc);
+        let save = doc.is_some_and(|d| d.persistence() != Persistence::None);
+        Enabled {
+            tab: doc.is_some(),
+            reopen: !self.recently_closed.is_empty(),
+            save,
+            save_as: save || doc.is_some_and(|d| d.kind() == DocKind::Image),
+            several_tabs: self.tabs.len() > 1,
         }
     }
 
@@ -740,7 +839,7 @@ impl App {
             _ => {}
         }
         if out.capture {
-            self.open_dock();
+            self.run(Command::Capture);
         }
         if let Some(path) = out.open {
             self.open_paths(vec![path]);
@@ -922,9 +1021,12 @@ impl App {
         let active = self.active;
         let mut requests = Vec::new();
 
-        // The toolbar: one surface with the active tab, which pours into it.
-        let (mut dock, mut settings, mut flag) = (false, false, false);
+        // The menus and the document's tools: one surface with the active tab,
+        // which pours into it.
+        let mut flag = false;
         let todo = self.active_flag();
+        let enabled = self.enabled();
+        let mut commands = Vec::new();
         Panel::top("toolbar")
             .exact_size(m.toolbar_height)
             .resizable(false)
@@ -940,60 +1042,48 @@ impl App {
                 );
                 let mut tools = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(strip.shrink2(egui::vec2(8.0, 0.0)))
+                        .max_rect(strip.shrink2(egui::vec2(6.0, 0.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
-                if let Some(tab) = self.tabs.get_mut(active) {
-                    let mut cx = DocCx {
-                        textures: &open_cx.textures,
-                        waker: &open_cx.waker,
-                        just_activated,
-                        requests: &mut requests,
-                    };
-                    tab.doc.toolbar(&mut tools, &mut cx);
+                tools.spacing_mut().item_spacing.x = 2.0;
+                let mut cx = DocCx {
+                    textures: &open_cx.textures,
+                    waker: &open_cx.waker,
+                    just_activated,
+                    requests: &mut requests,
+                };
+                let tab = self.tabs.get_mut(active);
+                match tab {
+                    Some(tab) => {
+                        let active = menus::Active {
+                            doc: &mut *tab.doc,
+                            cx: &mut cx,
+                        };
+                        commands = menus::bar(&mut tools, Some(active), enabled);
+                        if !matches!(tab.doc.kind(), DocKind::Settings | DocKind::Error) {
+                            kit::bar_separator(&mut tools, &theme);
+                            tab.doc.toolbar(&mut tools, &mut cx);
+                        }
+                    }
+                    None => commands = menus::bar(&mut tools, None, enabled),
                 }
-                // whir's own, at the far end: the capture dock.
-                let mut ours = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(strip.shrink2(egui::vec2(8.0, 0.0)))
-                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                );
-                let camera = whir_core::toolbar::Glyph::Camera;
-                let capture =
-                    whir_core::toolbar::tool_button(&mut ours, camera, false, None, false, &theme);
-                dock = capture.clicked;
-                capture
-                    .response
-                    .on_hover_text("Screenshots: open the capture dock");
-                let gear = whir_core::toolbar::Glyph::Gear;
-                let on = self
-                    .tabs
-                    .get(active)
-                    .is_some_and(|t| t.doc.kind() == DocKind::Settings);
-                let open =
-                    whir_core::toolbar::tool_button(&mut ours, gear, on, None, false, &theme);
-                settings = open.clicked;
-                open.response
-                    .on_hover_text("Settings: the timesheet, timers, startup (Ctrl+,)");
-                // A note: its todo flag.
+                // A note: its todo flag, among its own tools.
                 if let Some(todo) = todo {
-                    let glyph = whir_core::toolbar::Glyph::Flag;
                     let on = todo.is_some_and(|t| t.is_open());
-                    let ink = on.then_some(theme.note_glyph);
+                    let icon = if on { Icon::FlagFilled } else { Icon::Flag };
+                    let label = if on { "Todo" } else { "Mark as todo" };
+                    kit::bar_separator(&mut tools, &theme);
                     let b =
-                        whir_core::toolbar::tool_button(&mut ours, glyph, on, ink, false, &theme);
-                    flag = b.clicked;
-                    b.response.on_hover_text(match todo {
-                        Some(t) if t.is_open() => "To do: mark it done (Ctrl+Shift+D)",
-                        _ => "Flag as a todo: first in the notes, and on the dock (Ctrl+Shift+D)",
+                        whir_core::toolbar::labelled_button(&mut tools, icon, label, on, &theme);
+                    flag = b.clicked();
+                    b.on_hover_text(match todo {
+                        Some(t) if t.is_open() => "Mark it done (Ctrl+Shift+D)",
+                        _ => "First in the notes, and on the dock (Ctrl+Shift+D)",
                     });
                 }
             });
-        if dock {
-            self.open_dock();
-        }
-        if settings {
-            self.open_settings("");
+        for command in commands {
+            self.run(command);
         }
         if flag {
             self.flag_active();
@@ -1017,12 +1107,17 @@ impl App {
             .tabs
             .get(self.active)
             .and_then(|t| t.doc.path().map(Path::to_path_buf));
+        let status = self
+            .tabs
+            .get(self.active)
+            .map_or_else(String::new, |t| t.doc.status());
         let out = self.drawer.show(
             ui,
             &self.open_cx.library.snapshot(),
             &self.open_cx.captures.snapshot(),
             &self.open_cx,
             active_path.as_deref(),
+            &status,
             &theme,
         );
         drawer_out.open = drawer_out.open.or(out.open);
@@ -1060,7 +1155,8 @@ impl App {
 
         self.handle_drawer(drawer_out);
 
-        paint_toast(ui, content.response.rect, &mut self.toast, &theme);
+        kit::toast(ui, content.response.rect, &mut self.toast, &theme);
+        self.about_dialog(&theme);
 
         // Popups over the caption (the "+" menu) must get clicks, not window drags.
         let caption_bottom = strip.response.rect.bottom();
@@ -1183,55 +1279,18 @@ fn save_dialog_command(token: u64, spec: SaveAsSpec) -> WindowCommand {
 fn empty_state(ui: &mut egui::Ui, theme: &Theme) -> bool {
     let mut clicked = false;
     ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() * 0.4 - 40.0).max(16.0));
-        ui.label(
-            egui::RichText::new("Drop a file here")
-                .size(18.0)
-                .color(theme.text),
-        );
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("Images, PDFs, CSV files and notes · Ctrl+N for a new note")
-                .color(theme.text_dim),
+        ui.add_space((ui.available_height() * 0.4 - 60.0).max(16.0));
+        kit::empty_state(
+            ui,
+            Icon::Folder,
+            "Drop a file here",
+            "Images, PDFs, CSV files and notes \u{b7} Ctrl+N for a new note",
+            theme,
         );
         ui.add_space(14.0);
-        clicked = ui.button("  Open…  ").clicked();
+        clicked = kit::primary(ui, "Open\u{2026}", theme).clicked();
     });
     clicked
-}
-
-fn paint_toast(ui: &egui::Ui, area: egui::Rect, toast: &mut Option<(String, f64)>, theme: &Theme) {
-    let Some((text, until)) = toast else { return };
-    let now = ui.input(|i| i.time);
-    if now >= *until {
-        *toast = None;
-        return;
-    }
-    let alpha = ((*until - now) / 0.3).clamp(0.0, 1.0) as f32;
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("whir.toast"),
-    ));
-    let galley = painter.layout_no_wrap(
-        text.clone(),
-        egui::FontId::proportional(12.5),
-        theme.text.gamma_multiply(alpha),
-    );
-    let pad = egui::vec2(12.0, 6.0);
-    let size = galley.size() + pad * 2.0;
-    let rect = egui::Rect::from_center_size(
-        egui::pos2(area.center().x, area.bottom() - 28.0 - size.y / 2.0),
-        size,
-    );
-    painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
-    painter.rect_stroke(
-        rect,
-        size.y / 2.0,
-        egui::Stroke::new(1.0, theme.separator.gamma_multiply(alpha)),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(rect.min + pad, galley, theme.text);
-    ui.ctx().request_repaint_after(Duration::from_millis(50));
 }
 
 impl Handler for App {
@@ -1257,6 +1316,11 @@ impl Handler for App {
         let mut hit = HitMap::default();
         let ctx = self.ctx.clone();
         let mut full = ctx.run_ui(input, |ui| self.ui(ui, info, &mut hit));
+        let first_frame = !self.first_frame_traced;
+        self.first_frame_traced = true;
+        if first_frame {
+            trace::mark("ui pass");
+        }
 
         let mut out = FrameOutput {
             cursor: full.platform_output.cursor_icon,
@@ -1316,6 +1380,9 @@ impl Handler for App {
                     self.pending.push(WindowCommand::Close);
                 }
             }
+        }
+        if first_frame {
+            trace::mark("presented");
         }
 
         // Reveal the window once the first document has content (or we stop waiting).

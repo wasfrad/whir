@@ -192,6 +192,10 @@ pub struct Loaded {
     pub sorting: Option<Sorting>,
     pub find: FindState,
     pub saving: Option<SaveState>,
+    /// What the toolbar and the menus asked for, for the next frame.
+    pub queued: Vec<crate::grid::Action>,
+    /// The table in a line, for the strip along the bottom of the window.
+    pub status_line: String,
     pub pending_save: Option<PendingSave>,
     /// A sort to start once indexing is done (it was running when a save
     /// made the file reload).
@@ -240,6 +244,8 @@ impl Loaded {
             },
             stale_editor: None,
             order: None,
+            queued: Vec::new(),
+            status_line: String::new(),
             order_gen: 0,
             sorting: None,
             find: FindState::default(),
@@ -604,6 +610,16 @@ impl Loaded {
     }
 
     /// Current (or computing) sort.
+    /// What to call the column the table is sorted by.
+    pub fn sorted_column_name(&mut self, column: usize) -> String {
+        let name = self.view().header().cell(column).text.to_owned();
+        if name.is_empty() {
+            "column".to_owned()
+        } else {
+            name
+        }
+    }
+
     pub fn sort_spec(&self) -> Option<SortSpec> {
         self.sorting
             .as_ref()

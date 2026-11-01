@@ -61,7 +61,7 @@ pub fn show_message(ui: &mut egui::Ui, heading: &str, detail: &str, path: Option
     ui.scope_builder(egui::UiBuilder::new().max_rect(ui.max_rect()), |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.38 - 40.0).max(12.0));
-            ui.label(egui::RichText::new(heading).size(17.0).color(theme.text));
+            ui.label(egui::RichText::new(heading).heading().color(theme.text));
             ui.add_space(8.0);
             if !detail.is_empty() {
                 ui.label(egui::RichText::new(detail).color(theme.text_dim));

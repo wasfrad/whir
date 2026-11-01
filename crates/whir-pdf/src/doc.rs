@@ -7,6 +7,9 @@
 mod find;
 mod minimap;
 mod selection;
+mod tools;
+
+use tools::Cmd;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -20,7 +23,7 @@ use whir_core::file::FileIdentity;
 use whir_core::find_bar::FindBar;
 use whir_core::scroll::{ScrollAxis, scrollbar};
 use whir_core::theme::Theme;
-use whir_core::{DocCx, DocKind, Document, OpenCx, TextureRegistry, UserTexture, views};
+use whir_core::{DocCx, DocKind, Document, Menu, OpenCx, TextureRegistry, UserTexture, views};
 
 use crate::engine::{DocHandle, Event, Job, TileKey};
 use crate::layout::{self, Layout};
@@ -145,6 +148,9 @@ pub struct PdfDoc {
     failed_tiles: HashSet<TileKey>,
     /// A screen tile arrived (or failed): the document has shown itself.
     got_first_tile: bool,
+    /// It's the active tab. Tiles are only drawn for that, so a tab in the
+    /// background isn't waiting for anything.
+    on_screen: bool,
     mini: Option<Arc<MiniLayout>>,
     zoom: Zoom,
     /// Which file, at which version, is open: its view is remembered by it.
@@ -153,6 +159,8 @@ pub struct PdfDoc {
     place: Option<Place>,
     /// A zoom picked from the context menu, for the next frame.
     menu_zoom: Option<Zoom>,
+    /// What the toolbar and the menus asked for, for the next frame.
+    pending: Vec<tools::Cmd>,
     sy: ScrollAxis,
     sx: ScrollAxis,
     /// Scale key tiles are currently requested at (lags zoom while it settles).
@@ -210,11 +218,13 @@ impl PdfDoc {
             thumbs: HashMap::new(),
             failed_tiles: HashSet::new(),
             got_first_tile: false,
+            on_screen: false,
             mini: None,
             zoom: Zoom::FitWidth,
             identity: None,
             place: None,
             menu_zoom: None,
+            pending: Vec::new(),
             sy: ScrollAxis::default(),
             sx: ScrollAxis::default(),
             settled_scale: None,
@@ -478,6 +488,21 @@ impl PdfDoc {
                 new_zoom = Some((zoom / 1.25, None, None));
             }
         });
+        // The tools ask for what the keys do.
+        let (mut copy_asked, mut all_asked) = (false, false);
+        for cmd in std::mem::take(&mut self.pending) {
+            match cmd {
+                Cmd::ZoomIn => new_zoom = Some((zoom * 1.25, None, None)),
+                Cmd::ZoomOut => new_zoom = Some((zoom / 1.25, None, None)),
+                Cmd::Zoom(z) => pick = Some(z),
+                Cmd::Step(forward) => step = Some(forward),
+                Cmd::GoTo => goto = true,
+                Cmd::ToggleMinimap => toggle_minimap = true,
+                Cmd::Copy => copy_asked = true,
+                Cmd::SelectAll => all_asked = true,
+                Cmd::Find => self.open_find(),
+            }
+        }
         if let Some(k) = sel_key {
             self.sel_key(k, frame);
         }
@@ -506,6 +531,12 @@ impl PdfDoc {
             if copy {
                 self.copy(&ctx, now);
             }
+        }
+        if all_asked && self.text.available {
+            self.set_sel(Some(Selection::all(l.len() as u32)));
+        }
+        if copy_asked {
+            self.copy(&ctx, now);
         }
         // Fit page shows the page most in view whole, from its top.
         let mut land = None;
@@ -600,6 +631,7 @@ impl PdfDoc {
 
         for i in visible.clone() {
             let prect = v.page_rect(l, i);
+            painter.add(theme.popup_shadow().as_shape(prect, 0.0));
             painter.rect_filled(prect.expand(1.0), 0.0, theme.separator);
             painter.rect_filled(prect, 0.0, Color32::WHITE);
 
@@ -795,7 +827,7 @@ impl PdfDoc {
             // Drawn after the pages: show them where the view went.
             ctx.request_repaint();
         }
-        paint_toast(ui, vp, &mut self.toast, now, &theme);
+        whir_core::kit::toast(ui, vp, &mut self.toast, &theme);
 
         // The find bar goes last: drawn on top, and it sees the keys the
         // document left alone.
@@ -943,42 +975,6 @@ fn tile_key(page: usize, scale: u32, r: [u32; 4]) -> TileKey {
     }
 }
 
-fn paint_toast(
-    ui: &egui::Ui,
-    vp: Rect,
-    toast: &mut Option<(String, f64)>,
-    now: f64,
-    theme: &Theme,
-) {
-    let Some((text, until)) = toast else { return };
-    if now >= *until {
-        *toast = None;
-        return;
-    }
-    let alpha = ((*until - now) / 0.25).clamp(0.0, 1.0) as f32;
-    let painter = ui.painter();
-    let galley = painter.layout_no_wrap(
-        text.clone(),
-        egui::FontId::proportional(12.5),
-        theme.text.gamma_multiply(alpha),
-    );
-    let pad = vec2(12.0, 6.0);
-    let size = galley.size() + pad * 2.0;
-    let rect = Rect::from_center_size(
-        Pos2::new(vp.center().x, vp.bottom() - 28.0 - size.y / 2.0),
-        size,
-    );
-    painter.rect_filled(rect, size.y / 2.0, theme.overlay_bg.gamma_multiply(alpha));
-    painter.rect_stroke(
-        rect,
-        size.y / 2.0,
-        Stroke::new(1.0, theme.separator.gamma_multiply(alpha)),
-        StrokeKind::Inside,
-    );
-    painter.galley(rect.min + pad, galley, theme.text);
-    ui.ctx().request_repaint_after(Duration::from_millis(30));
-}
-
 impl PdfDoc {
     /// Where the document is now, once it has been drawn.
     fn place_now(&self) -> Option<Place> {
@@ -1021,7 +1017,7 @@ impl Document for PdfDoc {
     fn is_loading(&self) -> bool {
         match &self.state {
             State::Loading => true,
-            State::Ready(l) => !self.got_first_tile && !l.is_empty(),
+            State::Ready(l) => self.on_screen && !self.got_first_tile && !l.is_empty(),
             State::Failed(_) => false,
         }
     }
@@ -1040,6 +1036,7 @@ impl Document for PdfDoc {
     }
 
     fn on_visibility(&mut self, visible: bool) {
+        self.on_screen = visible;
         if !visible {
             self.put_away();
             // Hidden tabs keep only tiles at the current scale…
@@ -1061,6 +1058,18 @@ impl Document for PdfDoc {
             self.text.drop_geom_except(self.frame);
             self.gesture = Gesture::None;
         }
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        self.tools(ui);
+    }
+
+    fn menu(&mut self, menu: Menu, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        self.entries(menu, ui);
+    }
+
+    fn status(&self) -> String {
+        self.status_line()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use egui::text::{CCursor, CCursorRange};
 use egui::{Align, EventFilter, Frame, Key, Layout, Modifiers, Rect, RichText, Sense, UiBuilder};
 
+use crate::icons::{self, Icon};
 use crate::theme::Theme;
 
 const SIZE: egui::Vec2 = egui::vec2(390.0, 36.0);
@@ -229,11 +230,7 @@ impl FindBar {
         // Swallow clicks on the bar's background so they don't reach the document.
         ui.interact(rect, self.id.with("bg"), Sense::CLICK | Sense::DRAG);
         let theme = Theme::current();
-        let frame = Frame::NONE
-            .fill(theme.overlay_bg)
-            .stroke(egui::Stroke::new(1.0, theme.separator))
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin::symmetric(8, 4));
+        let frame = crate::kit::floating(&theme).inner_margin(egui::Margin::symmetric(8, 4));
         self.show_in(ui, rect, frame, status, 190.0)
     }
 
@@ -339,15 +336,15 @@ impl FindBar {
                     };
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         close |= ui
-                            .add(egui::Button::new("×").frame(false))
+                            .add(egui::Button::new(icons::text(Icon::Close, 12.0)).frame(false))
                             .on_hover_text("Close (Esc)")
                             .clicked();
                         next |= ui
-                            .add(egui::Button::new("↓").frame(false))
+                            .add(egui::Button::new(icons::text(Icon::ArrowDown, 12.0)).frame(false))
                             .on_hover_text("Next (Enter, F3)")
                             .clicked();
                         prev |= ui
-                            .add(egui::Button::new("↑").frame(false))
+                            .add(egui::Button::new(icons::text(Icon::ArrowUp, 12.0)).frame(false))
                             .on_hover_text("Previous (Shift+Enter, Shift+F3)")
                             .clicked();
                         ui.add(
@@ -436,7 +433,7 @@ fn whole_cell_toggle(ui: &mut egui::Ui, on: bool, theme: &Theme) -> egui::Respon
         cell.center() - egui::vec2(0.0, 0.5),
         egui::Align2::CENTER_CENTER,
         "ab",
-        egui::FontId::proportional(10.0),
+        egui::FontId::proportional(theme.metrics.small_text_size),
         fg,
     );
     resp

@@ -3,6 +3,7 @@
 
 use egui::RichText;
 use whir_core::DocCx;
+use whir_core::kit;
 use whir_core::theme::Theme;
 use whir_platform::{placement, shell};
 
@@ -11,10 +12,7 @@ use super::{heading, note, toast};
 pub fn ui(ui: &mut egui::Ui, cx: &mut DocCx<'_>, theme: &Theme) {
     heading(ui, "Startup", theme);
     let mut on = shell::autostart().is_some();
-    if ui
-        .checkbox(&mut on, "Start whir when you sign in to Windows")
-        .changed()
-    {
+    if kit::checkbox(ui, &mut on, "Start whir when you sign in to Windows", theme).changed() {
         if let Err(e) = shell::set_autostart(on) {
             toast(cx, e);
         }

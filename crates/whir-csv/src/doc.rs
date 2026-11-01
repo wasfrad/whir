@@ -12,16 +12,19 @@ use std::time::Instant;
 
 use egui::{Rect, vec2};
 use whir_core::file::WriteError;
+use whir_core::icons::Icon;
 use whir_core::library::paths_equal;
 use whir_core::theme::Theme;
 use whir_core::{
-    DocCx, DocKind, Document, FileSource, FindQuery, Library, OpenCx, Persistence, SaveAsSpec,
-    SaveResult, SearchHit, SearchState, Waker,
+    DocCx, DocKind, Document, FileSource, FindQuery, Library, Menu, OpenCx, Persistence,
+    SaveAsSpec, SaveResult, SearchHit, SearchState, Waker, kit, toolbar,
 };
 
 use crate::dialect::{Encoding, Style, sniff, sniff_style};
+use crate::grid::Action;
 use crate::index::{self, IndexState, SharedIndex};
 use crate::loaded::{Loaded, Opened, PendingSave, SaveFailure, SaveKind, SaveState, ViewCarry};
+use crate::sort::Direction;
 use crate::source::{ByteSource, transcode_utf16};
 use crate::write::{self, SaveJob, SaveOutcome, SaveTarget};
 
@@ -457,6 +460,133 @@ impl Document for CsvDoc {
         if let Some(p) = ready {
             let r = self.start_save(p.target, p.kind, p.overwrite);
             self.note_failure(&r);
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        let Phase::Ready(l) = &mut self.phase else {
+            return;
+        };
+        let theme = Theme::current();
+        if toolbar::tool(ui, Icon::Search, "Find (Ctrl+F)", true, &theme) {
+            l.find.bar.open_with(None);
+        }
+        kit::bar_separator(ui, &theme);
+        let (undo, redo) = (l.edits.can_undo(), l.edits.can_redo());
+        if toolbar::tool(ui, Icon::Undo, "Undo (Ctrl+Z)", undo, &theme) {
+            l.queued.push(Action::Undo);
+        }
+        if toolbar::tool(ui, Icon::Redo, "Redo (Ctrl+Y)", redo, &theme) {
+            l.queued.push(Action::Redo);
+        }
+        let can_grow = l.editable();
+        if ui.available_width() > 170.0 && (can_grow.ghost_row || can_grow.ghost_col) {
+            kit::bar_separator(ui, &theme);
+            if can_grow.rows.allowed()
+                && toolbar::labelled_button(ui, Icon::Plus, "Row", false, &theme)
+                    .on_hover_text("Add a row below the selection")
+                    .clicked()
+            {
+                l.queued.push(Action::InsertRows { above: false });
+            }
+            if can_grow.cols.allowed()
+                && toolbar::labelled_button(ui, Icon::Plus, "Column", false, &theme)
+                    .on_hover_text("Add a column at the end")
+                    .clicked()
+            {
+                l.queued.push(Action::AppendColumn);
+            }
+        }
+        if let Some(sort) = l.sort_spec()
+            && ui.available_width() > 150.0
+        {
+            kit::bar_separator(ui, &theme);
+            let name = l.sorted_column_name(sort.column);
+            let arrow = match sort.direction {
+                Direction::Ascending => Icon::ArrowUp,
+                Direction::Descending => Icon::ArrowDown,
+            };
+            let label = format!("Sorted by {name}");
+            if toolbar::labelled_button(ui, arrow, &label, true, &theme)
+                .on_hover_text("Back to the file's order")
+                .clicked()
+            {
+                l.queued.push(Action::OriginalOrder);
+            }
+        }
+    }
+
+    fn menu(&mut self, menu: Menu, ui: &mut egui::Ui, _cx: &mut DocCx<'_>) {
+        let Phase::Ready(l) = &mut self.phase else {
+            return;
+        };
+        match menu {
+            Menu::Edit => {
+                let cells = l.editable().cells.allowed();
+                for (icon, label, key, on, action) in [
+                    (
+                        Icon::Undo,
+                        "Undo",
+                        "Ctrl+Z",
+                        l.edits.can_undo(),
+                        Action::Undo,
+                    ),
+                    (
+                        Icon::Redo,
+                        "Redo",
+                        "Ctrl+Y",
+                        l.edits.can_redo(),
+                        Action::Redo,
+                    ),
+                ] {
+                    if kit::entry(ui, Some(icon), label, key, on) {
+                        l.queued.push(action);
+                    }
+                }
+                ui.separator();
+                for (icon, label, key, on, action) in [
+                    (Icon::Cut, "Cut", "Ctrl+X", cells, Action::Cut),
+                    (Icon::Copy, "Copy", "Ctrl+C", true, Action::Copy),
+                    (Icon::Paste, "Paste", "Ctrl+V", cells, Action::RequestPaste),
+                    (
+                        Icon::Delete,
+                        "Clear contents",
+                        "Delete",
+                        cells,
+                        Action::Clear,
+                    ),
+                ] {
+                    if kit::entry(ui, Some(icon), label, key, on) {
+                        l.queued.push(action);
+                    }
+                }
+                ui.separator();
+                if kit::entry(ui, None, "Fill down", "Ctrl+D", cells) {
+                    l.queued.push(Action::FillDown);
+                }
+                if kit::entry(ui, None, "Fill right", "Ctrl+R", cells) {
+                    l.queued.push(Action::FillRight);
+                }
+                ui.separator();
+                if kit::entry(ui, Some(Icon::Search), "Find", "Ctrl+F", true) {
+                    l.find.bar.open_with(None);
+                }
+            }
+            Menu::View => {
+                if l.order.is_some() {
+                    if kit::entry(ui, None, "Original order", "", true) {
+                        l.queued.push(Action::OriginalOrder);
+                    }
+                    ui.separator();
+                }
+            }
+        }
+    }
+
+    fn status(&self) -> String {
+        match &self.phase {
+            Phase::Ready(l) => l.status_line.clone(),
+            _ => String::new(),
         }
     }
 

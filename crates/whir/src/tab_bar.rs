@@ -3,8 +3,10 @@
 
 use egui::epaint::CornerRadius;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use whir_core::DocKind;
+use whir_core::icons::{self, Icon};
+use whir_core::kit;
 use whir_core::theme::Theme;
 
 pub struct TabInfo<'a> {
@@ -63,18 +65,18 @@ pub fn show(
         Rect::from_min_max(pos2(strip.right() - bw, strip.top()), strip.right_bottom());
     let max_rect = close_rect.translate(vec2(-bw, 0.0));
     let min_rect = max_rect.translate(vec2(-bw, 0.0));
-    if caption_button(ui, min_rect, "min", theme, false, Glyph::Minimize).clicked() {
+    if caption_button(ui, min_rect, "min", theme, false, Icon::Minimize).clicked() {
         out.minimize = true;
     }
-    let glyph = if maximized {
-        Glyph::Restore
+    let icon = if maximized {
+        Icon::Restore
     } else {
-        Glyph::Maximize
+        Icon::Maximize
     };
-    if caption_button(ui, max_rect, "max", theme, false, glyph).clicked() {
+    if caption_button(ui, max_rect, "max", theme, false, icon).clicked() {
         out.toggle_maximize = true;
     }
-    if caption_button(ui, close_rect, "close", theme, true, Glyph::Close).clicked() {
+    if caption_button(ui, close_rect, "close", theme, true, Icon::WindowClose).clicked() {
         out.close_window = true;
     }
     out.interactive.push(min_rect);
@@ -87,8 +89,21 @@ pub fn show(
     let left = strip.left() + 8.0;
     let tabs_right = min_rect.left() - m.drag_area_min_width - plus_size - 6.0;
     let avail = (tabs_right - left).max(0.0);
-    let n = tabs.len().max(1) as f32;
-    let tab_w = (avail / n - m.tab_gap).clamp(36.0, m.tab_max_width);
+    // Tabs stay wide enough to read. Those that don't fit are in a menu at the
+    // end of the row, and the active one is always among those showing.
+    let room = |width: f32| (((width + m.tab_gap) / (m.tab_min_width + m.tab_gap)) as usize).max(1);
+    let overflowing = tabs.len() > room(avail);
+    let row = if overflowing {
+        avail - plus_size - m.tab_gap
+    } else {
+        avail
+    };
+    let showing = room(row).min(tabs.len());
+    let first = active
+        .saturating_sub(showing.saturating_sub(1))
+        .min(tabs.len() - showing);
+    let n = showing.max(1) as f32;
+    let tab_w = (row / n - m.tab_gap).min(m.tab_max_width);
     let tab_h = strip.height() - top_gap;
     let text_color = |active: bool| {
         if active {
@@ -101,13 +116,9 @@ pub fn show(
     let mut x = left;
     let mut hovered_index = None;
     let mut rects = Vec::with_capacity(tabs.len());
-    for (i, tab) in tabs.iter().enumerate() {
+    for (i, tab) in tabs.iter().enumerate().skip(first).take(showing) {
         let rect = Rect::from_min_size(pos2(x, strip.top() + top_gap), vec2(tab_w, tab_h));
         x += tab_w + m.tab_gap;
-        if rect.left() >= tabs_right {
-            break; // overflow: hidden (reachable via Ctrl+Tab)
-        }
-        let rect = rect.intersect(Rect::everything_left_of(tabs_right));
         rects.push(rect);
         let id = ui.id().with(("tab", tab.id));
         let resp = ui.interact(rect, id, Sense::CLICK);
@@ -226,10 +237,11 @@ pub fn show(
                 };
                 painter.circle_filled(close_rect.center(), 3.5, color);
             } else {
-                paint_glyph(
+                icons::paint(
                     &painter,
                     close_rect.center(),
-                    Glyph::CloseSmall,
+                    Icon::Close,
+                    12.0,
                     text_color(is_active),
                 );
             }
@@ -238,7 +250,7 @@ pub fn show(
 
     // Subtle separators between inactive, un-hovered neighbours.
     for (i, rect) in rects.iter().enumerate().skip(1) {
-        let quiet = |j: usize| j != active && Some(j) != hovered_index;
+        let quiet = |j: usize| first + j != active && Some(first + j) != hovered_index;
         if quiet(i - 1) && quiet(i) {
             let x = painter.round_to_pixel_center(rect.left() - m.tab_gap / 2.0);
             let y = rect.center().y;
@@ -251,7 +263,14 @@ pub fn show(
     out.interactive.extend(rects.iter().copied());
 
     // --- new note button (right-click: more) ---
-    let plus_left = rects.last().map_or(left, |r| r.right() + m.tab_gap + 2.0);
+    let mut plus_left = rects.last().map_or(left, |r| r.right() + m.tab_gap + 2.0);
+    if overflowing {
+        let y = strip.top() + top_gap + (tab_h - plus_size) / 2.0 - 1.0;
+        let rect = Rect::from_min_size(pos2(plus_left, y), vec2(plus_size, plus_size));
+        overflow_menu(ui, rect, tabs, active, showing, theme, &mut out);
+        out.interactive.push(rect);
+        plus_left = rect.right() + 2.0;
+    }
     let plus = Rect::from_min_size(
         pos2(
             plus_left,
@@ -263,10 +282,11 @@ pub fn show(
     if plus_resp.hovered() {
         painter.rect_filled(plus, 6.0, theme.tab_hover_bg);
     }
-    paint_glyph(
+    icons::paint(
         &painter,
         plus.center(),
-        Glyph::Plus,
+        Icon::Plus,
+        m.icon_size - 2.0,
         theme.tab_text_inactive,
     );
     if plus_resp.clicked() {
@@ -275,14 +295,18 @@ pub fn show(
     plus_resp.context_menu(|ui| {
         ui.set_min_width(190.0);
         if ui
-            .add(egui::Button::new("New note").shortcut_text("Ctrl+N"))
+            .add(kit::menu_entry(Some(Icon::Note), "New note", "Ctrl+N"))
             .clicked()
         {
             out.new_note = true;
             ui.close();
         }
         if ui
-            .add(egui::Button::new("New table").shortcut_text("Ctrl+Shift+N"))
+            .add(kit::menu_entry(
+                Some(Icon::Table),
+                "New table",
+                "Ctrl+Shift+N",
+            ))
             .clicked()
         {
             out.new_table = true;
@@ -290,7 +314,7 @@ pub fn show(
         }
         ui.separator();
         if ui
-            .add(egui::Button::new("Open file…").shortcut_text("Ctrl+O"))
+            .add(kit::menu_entry(Some(Icon::Folder), "Open file…", "Ctrl+O"))
             .clicked()
         {
             out.open_dialog = true;
@@ -302,58 +326,93 @@ pub fn show(
     out
 }
 
-/// Right-click on a tab. Hidden (overflowed) tabs count as "others" and
-/// "to the right" too.
-fn tab_menu(resp: &egui::Response, i: usize, tab: &TabInfo<'_>, n: usize, out: &mut TabBarOutput) {
-    resp.context_menu(|ui| {
-        ui.set_min_width(190.0);
-        if ui
-            .add(egui::Button::new("Close").shortcut_text("Ctrl+W"))
-            .clicked()
-        {
-            out.close = Some(i);
-            ui.close();
-        }
-        if ui
-            .add_enabled(n > 1, egui::Button::new("Close others"))
-            .clicked()
-        {
-            out.close_others = Some(i);
-            ui.close();
-        }
-        if ui
-            .add_enabled(i + 1 < n, egui::Button::new("Close tabs to the right"))
-            .clicked()
-        {
-            out.close_to_right = Some(i);
-            ui.close();
-        }
-        if ui.button("Close all").clicked() {
-            out.close_all = true;
-            ui.close();
-        }
-        if tab.has_path {
-            ui.separator();
-            if ui.button("Copy path").clicked() {
-                out.copy_path = Some(i);
-                ui.close();
-            }
-            if ui.button("Show in Explorer").clicked() {
-                out.reveal = Some(i);
+/// Every tab, from the end of a row too full to show them all.
+fn overflow_menu(
+    ui: &mut Ui,
+    rect: Rect,
+    tabs: &[TabInfo<'_>],
+    active: usize,
+    showing: usize,
+    theme: &Theme,
+    out: &mut TabBarOutput,
+) {
+    let resp = ui.interact(rect, ui.id().with("all_tabs"), Sense::CLICK);
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 6.0, theme.tab_hover_bg);
+    }
+    icons::paint(
+        ui.painter(),
+        rect.center(),
+        Icon::ChevronDown,
+        10.0,
+        theme.tab_text_inactive,
+    );
+    let hidden = tabs.len() - showing;
+    let resp = resp.on_hover_text(format!("{hidden} more tabs"));
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(240.0);
+        ui.set_max_width(360.0);
+        for (i, tab) in tabs.iter().enumerate() {
+            let entry = kit::menu_entry(Some(kind_icon(tab.kind, theme).0), tab.title, "");
+            if ui.add(entry.selected(i == active)).clicked() {
+                out.activate = Some(i);
                 ui.close();
             }
         }
     });
 }
 
-#[derive(Clone, Copy)]
-enum Glyph {
-    Minimize,
-    Maximize,
-    Restore,
-    Close,
-    CloseSmall,
-    Plus,
+/// Right-click on a tab. Hidden (overflowed) tabs count as "others" and
+/// "to the right" too.
+fn tab_menu(resp: &egui::Response, i: usize, tab: &TabInfo<'_>, n: usize, out: &mut TabBarOutput) {
+    resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        if ui
+            .add(kit::menu_entry(Some(Icon::Close), "Close", "Ctrl+W"))
+            .clicked()
+        {
+            out.close = Some(i);
+            ui.close();
+        }
+        if ui
+            .add_enabled(n > 1, kit::menu_entry(None, "Close others", ""))
+            .clicked()
+        {
+            out.close_others = Some(i);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                i + 1 < n,
+                kit::menu_entry(None, "Close tabs to the right", ""),
+            )
+            .clicked()
+        {
+            out.close_to_right = Some(i);
+            ui.close();
+        }
+        if ui.add(kit::menu_entry(None, "Close all", "")).clicked() {
+            out.close_all = true;
+            ui.close();
+        }
+        if tab.has_path {
+            ui.separator();
+            if ui
+                .add(kit::menu_entry(Some(Icon::Copy), "Copy path", ""))
+                .clicked()
+            {
+                out.copy_path = Some(i);
+                ui.close();
+            }
+            if ui
+                .add(kit::menu_entry(Some(Icon::Folder), "Show in Explorer", ""))
+                .clicked()
+            {
+                out.reveal = Some(i);
+                ui.close();
+            }
+        }
+    });
 }
 
 fn caption_button(
@@ -362,7 +421,7 @@ fn caption_button(
     id: &str,
     theme: &Theme,
     is_close: bool,
-    glyph: Glyph,
+    icon: Icon,
 ) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("caption", id)), Sense::CLICK);
     let (bg, fg) = if resp.is_pointer_button_down_on() {
@@ -397,201 +456,24 @@ fn caption_button(
     if let Some(bg) = bg {
         ui.painter().rect_filled(rect, 0.0, bg);
     }
-    paint_glyph(ui.painter(), rect.center(), glyph, fg);
+    icons::paint(ui.painter(), rect.center(), icon, 10.0, fg);
     resp
 }
 
-/// Thin line icons drawn on the physical pixel grid (1 device pixel strokes).
-fn paint_glyph(painter: &egui::Painter, center: Pos2, glyph: Glyph, color: Color32) {
-    let ppp = painter.pixels_per_point();
-    let px = 1.0 / ppp;
-    let stroke = Stroke::new(px.max(1.0 / ppp), color);
-    let snap = |v: f32| painter.round_to_pixel_center(v);
-    let c = pos2(snap(center.x), snap(center.y));
-    match glyph {
-        Glyph::Minimize => {
-            painter.line_segment([pos2(c.x - 5.0, c.y), pos2(c.x + 5.0, c.y)], stroke);
-        }
-        Glyph::Maximize => {
-            let r = Rect::from_center_size(c, vec2(10.0, 10.0));
-            painter.rect_stroke(r, 1.0, stroke, egui::StrokeKind::Middle);
-        }
-        Glyph::Restore => {
-            let back = Rect::from_center_size(c + vec2(2.0, -2.0), vec2(8.0, 8.0));
-            let front = Rect::from_center_size(c + vec2(-1.0, 1.0), vec2(8.0, 8.0));
-            painter.line_segment([pos2(back.left(), front.top()), back.left_top()], stroke);
-            painter.line_segment([back.left_top(), back.right_top()], stroke);
-            painter.line_segment([back.right_top(), back.right_bottom()], stroke);
-            painter.line_segment(
-                [back.right_bottom(), pos2(front.right(), back.bottom())],
-                stroke,
-            );
-            painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Middle);
-        }
-        Glyph::Close => {
-            let d = 5.0;
-            painter.line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
-            painter.line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
-        }
-        Glyph::CloseSmall => {
-            let d = 3.75;
-            let s = Stroke::new(1.25, color);
-            painter.line_segment([c + vec2(-d, -d), c + vec2(d, d)], s);
-            painter.line_segment([c + vec2(-d, d), c + vec2(d, -d)], s);
-        }
-        Glyph::Plus => {
-            let d = 6.0;
-            let s = Stroke::new(1.25, color);
-            painter.line_segment([c + vec2(-d, 0.0), c + vec2(d, 0.0)], s);
-            painter.line_segment([c + vec2(0.0, -d), c + vec2(0.0, d)], s);
-        }
+fn kind_icon(kind: DocKind, theme: &Theme) -> (Icon, Color32) {
+    match kind {
+        DocKind::Image => (Icon::Picture, theme.image_glyph),
+        DocKind::Pdf => (Icon::Pdf, theme.pdf_glyph),
+        DocKind::Csv => (Icon::Table, theme.csv_glyph),
+        DocKind::Note => (Icon::Note, theme.note_glyph),
+        DocKind::Settings => (Icon::Settings, theme.text_dim),
+        DocKind::Error => (Icon::Warning, theme.danger),
     }
 }
 
 pub(crate) fn paint_kind_glyph(painter: &egui::Painter, c: Pos2, kind: DocKind, theme: &Theme) {
-    let color = match kind {
-        DocKind::Image => Color32::from_rgb(0x4c, 0x9a, 0xff),
-        DocKind::Pdf => Color32::from_rgb(0xf0, 0x55, 0x4a),
-        DocKind::Csv => Color32::from_rgb(0x3c, 0xb3, 0x71),
-        DocKind::Note => theme.note_glyph,
-        DocKind::Error | DocKind::Settings => theme.text_dim,
-    };
-    let s = Stroke::new(1.3, color);
-    match kind {
-        DocKind::Image => {
-            let r = Rect::from_center_size(c, vec2(13.0, 11.0));
-            painter.rect_stroke(r, 2.0, s, egui::StrokeKind::Middle);
-            painter.line_segment(
-                [
-                    pos2(r.left() + 1.5, r.bottom() - 2.0),
-                    pos2(r.left() + 5.0, r.top() + 5.0),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    pos2(r.left() + 5.0, r.top() + 5.0),
-                    pos2(r.left() + 8.0, r.bottom() - 3.5),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    pos2(r.left() + 7.5, r.bottom() - 3.0),
-                    pos2(r.left() + 9.5, r.top() + 6.5),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    pos2(r.left() + 9.5, r.top() + 6.5),
-                    pos2(r.right() - 1.5, r.bottom() - 2.0),
-                ],
-                s,
-            );
-            painter.circle_filled(pos2(r.right() - 3.5, r.top() + 3.5), 1.3, color);
-        }
-        DocKind::Pdf => {
-            let r = Rect::from_center_size(c, vec2(10.0, 13.0));
-            let fold = 3.5;
-            let pts = [
-                r.left_top(),
-                pos2(r.right() - fold, r.top()),
-                pos2(r.right(), r.top() + fold),
-                r.right_bottom(),
-                r.left_bottom(),
-                r.left_top(),
-            ];
-            for w in pts.windows(2) {
-                painter.line_segment([w[0], w[1]], s);
-            }
-            for dy in [5.5, 8.0, 10.5] {
-                painter.line_segment(
-                    [
-                        pos2(r.left() + 2.5, r.top() + dy),
-                        pos2(r.right() - 2.5, r.top() + dy),
-                    ],
-                    Stroke::new(1.0, color),
-                );
-            }
-        }
-        DocKind::Csv => {
-            let r = Rect::from_center_size(c, vec2(13.0, 12.0));
-            painter.rect_stroke(r, 1.5, s, egui::StrokeKind::Middle);
-            let thin = Stroke::new(1.0, color);
-            painter.line_segment(
-                [
-                    pos2(r.left(), r.top() + 4.0),
-                    pos2(r.right(), r.top() + 4.0),
-                ],
-                thin,
-            );
-            painter.line_segment(
-                [
-                    pos2(r.left(), r.top() + 8.0),
-                    pos2(r.right(), r.top() + 8.0),
-                ],
-                thin,
-            );
-            painter.line_segment(
-                [
-                    pos2(r.left() + 5.0, r.top()),
-                    pos2(r.left() + 5.0, r.bottom()),
-                ],
-                thin,
-            );
-        }
-        DocKind::Note => {
-            // A page with its bottom-right corner folded, and three text lines.
-            let r = Rect::from_center_size(c, vec2(11.0, 13.0));
-            let fold = 3.5;
-            let pts = [
-                r.left_top(),
-                r.right_top(),
-                pos2(r.right(), r.bottom() - fold),
-                pos2(r.right() - fold, r.bottom()),
-                r.left_bottom(),
-                r.left_top(),
-            ];
-            for w in pts.windows(2) {
-                painter.line_segment([w[0], w[1]], s);
-            }
-            painter.line_segment(
-                [
-                    pos2(r.right() - fold, r.bottom()),
-                    pos2(r.right() - fold, r.bottom() - fold),
-                ],
-                Stroke::new(1.0, color),
-            );
-            painter.line_segment(
-                [
-                    pos2(r.right() - fold, r.bottom() - fold),
-                    pos2(r.right(), r.bottom() - fold),
-                ],
-                Stroke::new(1.0, color),
-            );
-            for (dy, w) in [(3.5, 6.0), (6.0, 6.0), (8.5, 3.5)] {
-                painter.line_segment(
-                    [
-                        pos2(r.left() + 2.5, r.top() + dy),
-                        pos2(r.left() + 2.5 + w, r.top() + dy),
-                    ],
-                    Stroke::new(1.0, color),
-                );
-            }
-        }
-        DocKind::Settings => whir_core::toolbar::paint_gear(painter, c, 6.5, color),
-        DocKind::Error => {
-            painter.circle_stroke(c, 6.0, s);
-            painter.text(
-                c,
-                Align2::CENTER_CENTER,
-                "!",
-                FontId::proportional(10.0),
-                color,
-            );
-        }
-    }
+    let (icon, color) = kind_icon(kind, theme);
+    icons::paint(painter, c, icon, theme.metrics.icon_size, color);
 }
 
 fn paint_spinner(painter: &egui::Painter, c: Pos2, radius: f32, color: Color32, time: f64) {

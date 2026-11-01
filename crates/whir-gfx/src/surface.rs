@@ -1,5 +1,9 @@
 use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HANDLE, HWND, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Direct3D11::{ID3D11RenderTargetView, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, ID3D11RenderTargetView,
+    ID3D11Texture2D,
+};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
@@ -183,5 +187,89 @@ impl Drop for Surface {
                 let _ = windows::Win32::Foundation::CloseHandle(h);
             }
         }
+    }
+}
+
+/// A render target with no window, read back into memory: how the UI gallery
+/// turns the real interface into pictures.
+pub struct Offscreen {
+    texture: ID3D11Texture2D,
+    staging: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    width: u32,
+    height: u32,
+}
+
+impl Offscreen {
+    pub fn new(device: &Device, width: u32, height: u32) -> windows::core::Result<Self> {
+        let (width, height) = (width.max(1), height.max(1));
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..desc
+        };
+        unsafe {
+            let (mut texture, mut staging, mut rtv) = (None, None, None);
+            device
+                .device
+                .CreateTexture2D(&desc, None, Some(&mut texture))?;
+            device
+                .device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
+            let texture = texture.expect("CreateTexture2D returned nothing");
+            device
+                .device
+                .CreateRenderTargetView(&texture, None, Some(&mut rtv))?;
+            Ok(Self {
+                texture,
+                staging: staging.expect("CreateTexture2D returned nothing"),
+                rtv: rtv.expect("CreateRenderTargetView returned nothing"),
+                width,
+                height,
+            })
+        }
+    }
+
+    pub fn size(&self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+
+    pub fn render_target(&self) -> ID3D11RenderTargetView {
+        self.rtv.clone()
+    }
+
+    /// What was drawn: top-down rows of BGRA, tightly packed.
+    pub fn read_pixels(&self, device: &Device) -> windows::core::Result<Vec<u8>> {
+        let row = self.width as usize * 4;
+        let mut pixels = Vec::with_capacity(row * self.height as usize);
+        unsafe {
+            device.context.CopyResource(&self.staging, &self.texture);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            device
+                .context
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            for y in 0..self.height as usize {
+                let start = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
+                pixels.extend_from_slice(std::slice::from_raw_parts(start, row));
+            }
+            device.context.Unmap(&self.staging, 0);
+        }
+        Ok(pixels)
     }
 }

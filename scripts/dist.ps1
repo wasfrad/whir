@@ -29,6 +29,8 @@ try {
     Copy-Item (Join-Path $root "docs\guide.md") (Join-Path $out "README.md")
     Copy-Item (Join-Path $root "vendor\pdfium\LICENSE") (Join-Path $out "licenses\pdfium-LICENSE.txt")
     Copy-Item (Join-Path $root "vendor\pdfium\licenses\*") (Join-Path $out "licenses")
+    # The theme follows rerun's re_ui.
+    Copy-Item (Join-Path $root "docs\rerun-LICENSE.txt") (Join-Path $out "licenses")
 
     Get-ChildItem $out -File | ForEach-Object { "{0,-12} {1,8:N0} KB" -f $_.Name, ($_.Length / 1KB) }
     "Portable build ready: $out"

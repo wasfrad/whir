@@ -7,9 +7,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use egui::text::{CCursor, CCursorRange};
-use egui::{
-    Align2, Color32, FontId, Key, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use whir_core::icons::{self, Icon};
 use whir_core::scroll::ScrollAxis;
 use whir_core::theme::Theme;
 
@@ -330,8 +329,11 @@ impl PdfDoc {
                 );
             }
             if hovered == Some(i) {
-                let galley =
-                    p.layout_no_wrap(format!("{}", i + 1), FontId::proportional(11.0), theme.text);
+                let galley = p.layout_no_wrap(
+                    format!("{}", i + 1),
+                    FontId::proportional(theme.metrics.small_text_size),
+                    theme.text,
+                );
                 let size = galley.size() + vec2(10.0, 4.0);
                 let pill = Rect::from_center_size(
                     pos2(
@@ -408,7 +410,7 @@ impl PdfDoc {
                 p.rect_filled(counter, 4.0, theme.tab_hover_bg);
             }
             let n = l.len();
-            let font = FontId::proportional(12.0);
+            let font = FontId::proportional(theme.metrics.small_text_size);
             let mut text = format!("{} / {n}", current + 1);
             if p.layout_no_wrap(text.clone(), font.clone(), theme.text)
                 .size()
@@ -464,7 +466,7 @@ impl PdfDoc {
             state.store(ui.ctx(), id);
         }
         let n = l.len();
-        let font = FontId::proportional(12.0);
+        let font = FontId::proportional(theme.metrics.small_text_size);
         let label = format!("/ {n}");
         let label_w = ui
             .painter()
@@ -545,15 +547,10 @@ fn paint_chevron(
     } else {
         theme.text_dim.gamma_multiply(0.5)
     };
-    let c = rect.center();
-    let (dx, dy) = (4.5, 2.25);
-    let s = if up { -1.0 } else { 1.0 };
-    p.add(Shape::line(
-        vec![
-            pos2(c.x - dx, c.y - s * dy),
-            pos2(c.x, c.y + s * dy),
-            pos2(c.x + dx, c.y - s * dy),
-        ],
-        Stroke::new(1.3, color),
-    ));
+    let icon = if up {
+        Icon::ChevronUp
+    } else {
+        Icon::ChevronDown
+    };
+    icons::paint(p, rect.center(), icon, 10.0, color);
 }

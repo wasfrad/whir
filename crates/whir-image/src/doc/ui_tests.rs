@@ -117,7 +117,7 @@ impl Harness {
             captures: Captures::at(captures, Waker::noop()),
         };
         let mut h = Self {
-            ctx: egui::Context::default(),
+            ctx: whir_core::theme::test_context(),
             doc: Self::load(&path, &cx),
             time: 0.0,
             viewport: Rect::NOTHING,
