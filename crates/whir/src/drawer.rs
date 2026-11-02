@@ -888,7 +888,7 @@ fn note_row(
     clicked
 }
 
-/// One screenshot in the grid: its picture with its highlights, and
+/// One screenshot in the grid: its picture with its marks, and
 /// when it was taken. True if clicked.
 #[allow(clippy::too_many_arguments)]
 fn shot_card(
@@ -944,6 +944,12 @@ fn shot_card(
                         let turns = (4 - t.turn % 4) % 4;
                         marks::paint_text(&on_thumb, r, t, turns, scale);
                     }
+                    Kind::Freehand(_) | Kind::Arrow(_) => marks::paint_drawing(
+                        &on_thumb,
+                        mark,
+                        |point| image.min + point.to_vec2() * per_pixel,
+                        per_pixel,
+                    ),
                 }
             }
         }

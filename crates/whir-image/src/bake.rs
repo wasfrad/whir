@@ -1,9 +1,10 @@
 //! Marks flattened into pixels, for copying and exporting: the same
 //! arithmetic the screen does (the painter's multiply blend for highlights,
-//! egui's own glyphs for text), so what leaves whir is what was on screen.
+//! shared drawing paths for strokes, egui's own glyphs for text), so what
+//! leaves whir is what was on screen.
 
 use egui::epaint::{Fonts, Galley, TextOptions};
-use egui::{Color32, ColorImage, FontDefinitions, Vec2};
+use egui::{Color32, ColorImage, FontDefinitions, Pos2, Vec2};
 use whir_core::marks::{Kind, Mark, Text};
 
 use crate::decode::Decoded;
@@ -31,6 +32,9 @@ pub fn bake(d: &mut Decoded, marks: &[Mark], fonts: Option<&FontDefinitions>) {
     for m in marks {
         match &m.kind {
             Kind::Highlight(ink) => highlight(d, m, ink.rgb()),
+            Kind::Freehand(ink) | Kind::Arrow(ink) => {
+                stroke(d, &m.drawing_paths(), ink.width, ink.pen.rgb());
+            }
             Kind::Text(t) => {
                 let Some(fonts) = fonts else { continue };
                 let fonts = typesetter.get_or_insert_with(|| typesetter_for(fonts));
@@ -67,6 +71,103 @@ fn highlight(d: &mut Decoded, m: &Mark, [r, g, b]: [u8; 3]) {
 #[inline]
 fn multiply(p: u8, ink: u8) -> u8 {
     ((p as u32 * ink as u32 + 127) / 255) as u8
+}
+
+/// Round strokes with a one-pixel antialias fringe. Union coverage before
+/// compositing: retracing a line or joining the arrowhead must not darken it.
+fn stroke(d: &mut Decoded, paths: &[Vec<Pos2>], width: u32, [r, g, b]: [u8; 3]) {
+    let reach = width.clamp(1, 256) as f64 * 0.5 + 0.5;
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in paths.iter().flatten() {
+        for (axis, value) in [p.x as f64, p.y as f64].into_iter().enumerate() {
+            lo[axis] = lo[axis].min(value);
+            hi[axis] = hi[axis].max(value);
+        }
+    }
+    let xs = pixel_span(lo[0] - reach, hi[0] + reach, 0..d.width as usize);
+    let ys = pixel_span(lo[1] - reach, hi[1] + reach, 0..d.height as usize);
+    if xs.is_empty() || ys.is_empty() {
+        return;
+    }
+    let bounds = [xs.start, ys.start, xs.end, ys.end];
+    let stride = xs.len();
+    // Only the image-clipped bounds, never a tile sized by off-image points.
+    let mut coverage = vec![0u8; stride * ys.len()];
+    for path in paths {
+        if let [p] = path.as_slice() {
+            stroke_segment(&mut coverage, bounds, *p, *p, reach);
+        }
+        for pair in path.windows(2) {
+            stroke_segment(&mut coverage, bounds, pair[0], pair[1], reach);
+        }
+    }
+    for (row, y) in ys.enumerate() {
+        for (col, x) in xs.clone().enumerate() {
+            let a = coverage[row * stride + col];
+            if a == 0 {
+                continue;
+            }
+            let at = y * d.stride + x * 4;
+            over(
+                &mut d.pixels[at..at + 4],
+                [multiply(b, a), multiply(g, a), multiply(r, a), a],
+            );
+        }
+    }
+}
+
+fn pixel_span(lo: f64, hi: f64, clip: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let start = clip.start as f64;
+    let end = clip.end as f64;
+    lo.floor().clamp(start, end) as usize..hi.ceil().clamp(start, end) as usize
+}
+
+/// A capsule, scanned in narrow row spans rather than its whole bounding box.
+/// Each row considers only the centreline within `reach` of that row, expanded
+/// horizontally by `reach`. This bounds work by visible length × stroke width,
+/// even for long diagonals and segments with endpoints far outside the image.
+fn stroke_segment(coverage: &mut [u8], bounds: [usize; 4], a: Pos2, b: Pos2, reach: f64) {
+    // A fixed endpoint order also makes reversed paths rasterize identically.
+    let (a, b) = if a.y < b.y || (a.y == b.y && a.x <= b.x) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let (ax, ay) = (a.x as f64, a.y as f64);
+    let (bx, by) = (b.x as f64, b.y as f64);
+    let (dx, dy) = (bx - ax, by - ay);
+    let length_sq = dx * dx + dy * dy;
+    let [x0, y0, x1, y1] = bounds;
+    for y in pixel_span(ay - reach, by + reach, y0..y1) {
+        let cy = y as f64 + 0.5;
+        let (left, right) = if dy == 0.0 {
+            (ax.min(bx), ax.max(bx))
+        } else {
+            let t0 = ((cy - reach - ay) / dy).clamp(0.0, 1.0);
+            let t1 = ((cy + reach - ay) / dy).clamp(0.0, 1.0);
+            let u = ax + t0 * dx;
+            let v = ax + t1 * dx;
+            (u.min(v), u.max(v))
+        };
+        let row = (y - y0) * (x1 - x0);
+        for x in pixel_span(left - reach, right + reach, x0..x1) {
+            let cell = &mut coverage[row + x - x0];
+            if *cell == 255 {
+                continue;
+            }
+            let (px, py) = (x as f64 + 0.5 - ax, cy - ay);
+            let t = if length_sq == 0.0 {
+                0.0
+            } else {
+                ((px * dx + py * dy) / length_sq).clamp(0.0, 1.0)
+            };
+            let (ox, oy) = (px - t * dx, py - t * dy);
+            let distance = (ox * ox + oy * oy).sqrt();
+            let a = ((reach - distance).clamp(0.0, 1.0) * 255.0).round() as u8;
+            *cell = (*cell).max(a);
+        }
+    }
 }
 
 /// Fonts for laying text out at one point per image pixel. Text is at most
@@ -300,6 +401,66 @@ mod tests {
         }
     }
 
+    fn drawing(points: &[[f32; 2]], pen: Pen, width: u32, arrow: bool) -> Mark {
+        let points: Vec<_> = points.iter().map(|&[x, y]| egui::pos2(x, y)).collect();
+        Mark::drawing(&points, pen, width, arrow).expect("a drawing")
+    }
+
+    fn pen_bgra(pen: Pen) -> [u8; 4] {
+        let [r, g, b] = pen.rgb();
+        [b, g, r, 255]
+    }
+
+    fn padded_image(w: u32, h: u32) -> Decoded {
+        let mut d = image(w, h);
+        let stride = d.stride + 12;
+        let mut pixels = vec![0xa5; stride * h as usize];
+        for y in 0..h as usize {
+            pixels[y * stride..y * stride + d.stride]
+                .copy_from_slice(&d.pixels[y * d.stride..(y + 1) * d.stride]);
+        }
+        d.stride = stride;
+        d.pixels = pixels;
+        d
+    }
+
+    /// Deliberately slow oracle: every pixel against every segment, independent
+    /// of the production rasterizer's bounding boxes and scanline spans.
+    fn reference_stroke(d: &mut Decoded, paths: &[Vec<Pos2>], width: u32, pen: Pen) {
+        let reach = width.clamp(1, 256) as f64 * 0.5 + 0.5;
+        let [r, g, b] = pen.rgb();
+        for y in 0..d.height as usize {
+            for x in 0..d.width as usize {
+                let mut distance = f64::INFINITY;
+                for path in paths {
+                    for (i, a) in path.iter().enumerate() {
+                        // The last point also covers a one-point path.
+                        let b = path.get(i + 1).unwrap_or(a);
+                        let vx = b.x as f64 - a.x as f64;
+                        let vy = b.y as f64 - a.y as f64;
+                        let px = x as f64 + 0.5 - a.x as f64;
+                        let py = y as f64 + 0.5 - a.y as f64;
+                        let length_sq = vx * vx + vy * vy;
+                        let t = if length_sq == 0.0 {
+                            0.0
+                        } else {
+                            ((px * vx + py * vy) / length_sq).clamp(0.0, 1.0)
+                        };
+                        let dx = px - t * vx;
+                        let dy = py - t * vy;
+                        distance = distance.min((dx * dx + dy * dy).sqrt());
+                    }
+                }
+                let a = ((reach - distance).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let i = y * d.stride + x * 4;
+                over(
+                    &mut d.pixels[i..i + 4],
+                    [multiply(b, a), multiply(g, a), multiply(r, a), a],
+                );
+            }
+        }
+    }
+
     /// Whether any pixel is in the pen's colour, and any in the halo's.
     fn inked(d: &Decoded) -> (bool, bool) {
         let [r, g, b] = Pen::Black.rgb();
@@ -349,6 +510,340 @@ mod tests {
         assert_eq!(at(&d, 3, 3)[1], g);
         // Entirely outside: nothing to do.
         bake(&mut d, &[mark(9, 9, 5, 5)], None);
+    }
+
+    #[test]
+    fn pen_is_opaque_bgra_with_antialiased_round_caps() {
+        for pen in Pen::ALL {
+            let mut d = image(40, 24);
+            let before = image(40, 24);
+            let m = drawing(&[[8.0, 12.0], [24.0, 12.0]], pen, 6, false);
+            bake(&mut d, &[m], None);
+            let ink = pen_bgra(pen);
+            assert_eq!(at(&d, 16, 12), ink, "solid ink, not multiply");
+            assert_eq!(at(&d, 6, 11), ink, "round cap before the start");
+            assert_eq!(at(&d, 25, 11), ink, "round cap after the end");
+            let fringe = at(&d, 5, 10);
+            assert_ne!(fringe, at(&before, 5, 10), "partial edge coverage");
+            assert_ne!(fringe, ink, "antialiased, not a hard edge");
+            assert_eq!(at(&d, 5, 9), at(&before, 5, 9), "not a square cap");
+            assert_eq!(at(&d, 16, 8), at(&before, 16, 8), "no halo");
+            assert!(d.pixels.chunks_exact(4).all(|p| p[3] == 255));
+            assert!(!d.has_alpha);
+        }
+    }
+
+    #[test]
+    fn one_point_and_repeated_points_make_a_round_dot() {
+        let mut dot = white(20, 20);
+        bake(
+            &mut dot,
+            &[drawing(&[[10.0, 10.0]], Pen::Black, 8, false)],
+            None,
+        );
+        assert_eq!(at(&dot, 10, 10), pen_bgra(Pen::Black));
+        assert_eq!(at(&dot, 6, 6), [255; 4], "outside the circle");
+        assert_ne!(at(&dot, 6, 8), [255; 4]);
+        assert_ne!(at(&dot, 6, 8), pen_bgra(Pen::Black));
+        for y in 0..20 {
+            for x in 0..20 {
+                assert_eq!(at(&dot, x, y), at(&dot, 19 - x, y));
+                assert_eq!(at(&dot, x, y), at(&dot, x, 19 - y));
+            }
+        }
+        let mut repeated = white(20, 20);
+        bake(
+            &mut repeated,
+            &[drawing(&[[10.0, 10.0]; 3], Pen::Black, 8, false)],
+            None,
+        );
+        assert_eq!(repeated.pixels, dot.pixels);
+    }
+
+    #[test]
+    fn pen_width_is_in_image_pixels_and_invalid_styles_are_not_drawn() {
+        for width in [0, 1, 2, 5, 12, 256, u32::MAX] {
+            let mut m = drawing(&[[8.0, 140.0], [24.0, 140.0]], Pen::Black, 1, false);
+            let Kind::Freehand(style) = &mut m.kind else {
+                unreachable!()
+            };
+            style.width = width;
+            let mut d = white(32, 280);
+            bake(&mut d, &[m], None);
+            if !(1..=256).contains(&width) {
+                assert!(
+                    d.pixels.iter().all(|&p| p == 255),
+                    "invalid drawing is ignored"
+                );
+                continue;
+            }
+            let rows = (0..280).filter(|&y| at(&d, 16, y) != [255; 4]).count();
+            // Odd widths straddle two half-covered boundary rows.
+            assert_eq!(rows, ((width + 1) & !1) as usize);
+            let ink: u32 = (0..280).map(|y| 255 - at(&d, 16, y)[0] as u32).sum();
+            let expected = width * (255 - Pen::Black.rgb()[2] as u32);
+            assert!(
+                ink.abs_diff(expected) <= 1,
+                "width {width}: {ink} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn joins_and_retracing_union_coverage_but_separate_marks_blend_again() {
+        let mut horizontal = white(32, 32);
+        let a = drawing(&[[8.0, 10.0], [20.0, 10.0]], Pen::Black, 7, false);
+        bake(&mut horizontal, std::slice::from_ref(&a), None);
+        let mut vertical = white(32, 32);
+        let b = drawing(&[[20.0, 10.0], [20.0, 24.0]], Pen::Black, 7, false);
+        bake(&mut vertical, &[b], None);
+        let mut joined = white(32, 32);
+        let m = drawing(
+            &[
+                [8.0, 10.0],
+                [20.0, 10.0],
+                [20.0, 24.0],
+                [20.0, 10.0],
+                [8.0, 10.0],
+            ],
+            Pen::Black,
+            7,
+            false,
+        );
+        bake(&mut joined, &[m], None);
+        for ((&a, &b), &c) in horizontal
+            .pixels
+            .iter()
+            .zip(&vertical.pixels)
+            .zip(&joined.pixels)
+        {
+            assert_eq!(c, a.min(b), "max coverage, not repeated source-over");
+        }
+        assert_eq!(
+            at(&joined, 23, 6),
+            [255; 4],
+            "no miter outside the round join"
+        );
+        assert_ne!(at(&joined, 22, 7), [255; 4], "round join fringe");
+        assert_ne!(at(&joined, 22, 7), pen_bgra(Pen::Black));
+        let edge = at(&horizontal, 14, 6);
+        bake(&mut horizontal, &[a], None);
+        assert!(
+            at(&horizontal, 14, 6)[0] < edge[0],
+            "a second mark blends separately"
+        );
+    }
+
+    #[test]
+    fn clipped_segment_spans_match_all_pixel_reference_and_preserve_row_padding() {
+        use egui::pos2 as p;
+        let cases = [
+            vec![],
+            vec![vec![]],
+            vec![vec![p(0.0, 0.0)]],
+            vec![vec![p(-2.0, 6.0)], vec![p(19.0, 6.0)]],
+            vec![vec![p(-1.0e9, 6.0), p(1.0e9, 6.0)]],
+            vec![vec![p(8.0, -1.0e9), p(8.0, 1.0e9)]],
+            vec![vec![p(-1.0e9, -1.0e9), p(1.0e9, 1.0e9)]],
+            vec![vec![p(1.0, -50.0), p(12.0, 50.0)]],
+            vec![vec![p(-50.0, 2.0), p(70.0, 11.0)]],
+            vec![vec![
+                p(-4.0, 14.0),
+                p(20.0, -3.0),
+                p(20.0, -3.0),
+                p(3.0, 6.0),
+            ]],
+            vec![vec![p(4.0e9, 4.0e9), p(4.1e9, 4.1e9)]],
+        ];
+        for (case, paths) in cases.iter().enumerate() {
+            for width in [1, 6, 256] {
+                let mut actual = padded_image(17, 13);
+                stroke(&mut actual, paths, width, Pen::Red.rgb());
+                let mut expected = padded_image(17, 13);
+                reference_stroke(&mut expected, paths, width, Pen::Red);
+                assert_eq!(actual.pixels, expected.pixels, "case {case}, width {width}");
+                let mut reversed = paths.clone();
+                for path in &mut reversed {
+                    path.reverse();
+                }
+                let mut backwards = padded_image(17, 13);
+                stroke(&mut backwards, &reversed, width, Pen::Red.rgb());
+                assert_eq!(
+                    actual.pixels, backwards.pixels,
+                    "reversed case {case}, width {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drawing_vertices_can_be_outside_the_image_and_empty_images_are_safe() {
+        let mut d = white(16, 12);
+        bake(
+            &mut d,
+            &[drawing(&[[1.0e9, 6.0], [0.0, 6.0]], Pen::Blue, 4, false)],
+            None,
+        );
+        for x in 0..16 {
+            assert_eq!(at(&d, x, 5), pen_bgra(Pen::Blue));
+            assert_eq!(at(&d, x, 0), [255; 4]);
+        }
+        let offscreen = drawing(&[[4.0e9, 4.0e9]], Pen::Red, 256, false);
+        let before = d.pixels.clone();
+        bake(&mut d, &[offscreen], None);
+        assert_eq!(d.pixels, before);
+        let dot = drawing(&[[18.0, 6.0]], Pen::Red, 8, false);
+        bake(&mut d, std::slice::from_ref(&dot), None);
+        assert_eq!(
+            at(&d, 15, 6),
+            pen_bgra(Pen::Red),
+            "offscreen centre, visible cap"
+        );
+        for (w, h) in [(0, 0), (0, 12), (16, 0)] {
+            let mut empty = white(w, h);
+            bake(&mut empty, std::slice::from_ref(&dot), None);
+            assert!(empty.pixels.is_empty());
+        }
+    }
+
+    #[test]
+    fn arrows_use_shared_open_heads_at_the_dragged_end_in_every_direction() {
+        let pairs = [
+            [[28.0, 64.0], [100.0, 64.0]],
+            [[100.0, 64.0], [28.0, 64.0]],
+            [[64.0, 28.0], [64.0, 100.0]],
+            [[64.0, 100.0], [64.0, 28.0]],
+            [[28.0, 28.0], [100.0, 100.0]],
+            [[100.0, 100.0], [28.0, 28.0]],
+            [[100.0, 28.0], [28.0, 100.0]],
+            [[28.0, 100.0], [100.0, 28.0]],
+        ];
+        for points in pairs {
+            let m = drawing(&points, Pen::Blue, 4, true);
+            let paths = m.drawing_paths();
+            let tail = egui::pos2(points[0][0], points[0][1]);
+            let tip = egui::pos2(points[1][0], points[1][1]);
+            assert_eq!(paths[0], [tail, tip]);
+            assert_eq!(paths.len(), 2, "shaft and open V, not a closed triangle");
+            assert_eq!(paths[1].len(), 3);
+            assert_eq!(paths[1][1], tip);
+            let mut actual = white(128, 128);
+            bake(&mut actual, &[m], None);
+            let mut expected = white(128, 128);
+            reference_stroke(&mut expected, &paths, 4, Pen::Blue);
+            assert_eq!(actual.pixels, expected.pixels, "arrow {points:?}");
+            for wing in [paths[1][0], paths[1][2]] {
+                assert!(
+                    wing.distance(tip) < wing.distance(tail),
+                    "head is by the tip"
+                );
+                assert!((tip - wing).dot(tip - tail) > 0.0, "wings trail the tip");
+                let on_head = wing.lerp(tip, 0.5);
+                assert_eq!(
+                    at(&actual, on_head.x as usize, on_head.y as usize),
+                    pen_bgra(Pen::Blue)
+                );
+                let at_tail = on_head - (tip - tail);
+                assert_eq!(
+                    at(&actual, at_tail.x as usize, at_tail.y as usize),
+                    [255; 4],
+                    "no head at the tail"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_heads_crossing_each_image_edge_are_clipped_not_moved() {
+        let pairs = [
+            [[28.0, 0.0], [2.0, 0.0]],
+            [[0.0, 28.0], [0.0, 2.0]],
+            [[32.0, 2.0], [32.0, 28.0]],
+            [[2.0, 32.0], [28.0, 32.0]],
+        ];
+        for points in pairs {
+            let m = drawing(&points, Pen::Red, 6, true);
+            let paths = m.drawing_paths();
+            assert!(
+                paths
+                    .iter()
+                    .flatten()
+                    .any(|p| p.x < 0.0 || p.y < 0.0 || p.x > 32.0 || p.y > 32.0)
+            );
+            let mut actual = padded_image(32, 32);
+            bake(&mut actual, &[m], None);
+            let mut expected = padded_image(32, 32);
+            reference_stroke(&mut expected, &paths, 6, Pen::Red);
+            assert_eq!(actual.pixels, expected.pixels, "edge arrow {points:?}");
+        }
+    }
+
+    #[test]
+    fn drawings_stack_with_highlights_and_each_other() {
+        let line = drawing(&[[4.0, 8.0], [28.0, 8.0]], Pen::Blue, 6, false);
+        let highlight = mark(0, 0, 32, 32);
+        let mut d = grey(32, 32);
+        bake(&mut d, &[highlight.clone(), line.clone()], None);
+        assert_eq!(at(&d, 16, 8), pen_bgra(Pen::Blue));
+        let mut d = grey(32, 32);
+        bake(&mut d, &[line.clone(), highlight], None);
+        let [r, g, b] = Ink::Yellow.rgb();
+        let [pb, pg, pr, _] = pen_bgra(Pen::Blue);
+        assert_eq!(
+            at(&d, 16, 8),
+            [multiply(pb, b), multiply(pg, g), multiply(pr, r), 255]
+        );
+        let arrow = drawing(&[[16.0, 2.0], [16.0, 28.0]], Pen::Red, 6, true);
+        let mut d = grey(32, 32);
+        bake(&mut d, &[line.clone(), arrow.clone()], None);
+        assert_eq!(at(&d, 16, 8), pen_bgra(Pen::Red));
+        let mut d = grey(32, 32);
+        bake(&mut d, &[arrow, line], None);
+        assert_eq!(at(&d, 16, 8), pen_bgra(Pen::Blue));
+    }
+
+    #[test]
+    fn baking_then_turning_matches_turning_drawing_geometry() {
+        let drawings = [
+            (
+                vec![[8.0, 9.0], [42.0, 17.0], [64.0, 38.0]],
+                Pen::Blue,
+                5,
+                false,
+            ),
+            (vec![[12.0, 45.0], [60.0, 45.0]], Pen::Red, 4, true),
+            (vec![[68.0, 12.0]], Pen::Green, 7, false),
+        ];
+        for quarters in 1..=3 {
+            let marks: Vec<_> = drawings
+                .iter()
+                .map(|(points, pen, width, arrow)| drawing(points, *pen, *width, *arrow))
+                .collect();
+            let mut upright = white(80, 60);
+            bake(&mut upright, &marks, None);
+            let expected = turn(upright, quarters);
+            let rotated: Vec<_> = drawings
+                .iter()
+                .map(|(points, pen, width, arrow)| {
+                    let points: Vec<_> = points
+                        .iter()
+                        .map(|&[x, y]| match quarters {
+                            1 => [60.0 - y, x],
+                            2 => [80.0 - x, 60.0 - y],
+                            _ => [y, 80.0 - x],
+                        })
+                        .collect();
+                    drawing(&points, *pen, *width, *arrow)
+                })
+                .collect();
+            let mut actual = white(expected.width, expected.height);
+            bake(&mut actual, &rotated, None);
+            for (i, (&a, &b)) in actual.pixels.iter().zip(&expected.pixels).enumerate() {
+                // Shared arrowhead coordinates are f32; rotation can change
+                // the last bit of antialias coverage, not the geometry.
+                assert!(a.abs_diff(b) <= 1, "turn {quarters}, byte {i}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]

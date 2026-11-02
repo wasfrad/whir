@@ -117,7 +117,7 @@ notes and images.
 
 ## Images
 
-- **The toolbar**: previous and next in the folder, zoom, rotate, highlighter, text, undo, redo and copy
+- **The toolbar**: previous and next in the folder, zoom, rotate, highlighter, text, pen, arrow, undo, redo and copy
 - **Wheel, Ctrl+wheel, pinch**: zoom at the cursor
 - **Drag**: pan
 - **Double-click**: toggle fit / 100%
@@ -126,10 +126,13 @@ notes and images.
 - **R · Shift+R · right-click**: rotate right · left (on screen only, for as long as the tab is open; the file isn't changed)
 - **H · the highlighter in the toolbar** (hold or right-click it for colours): highlighter on / off
 - **T · the text tool in the toolbar** (hold or right-click it for colours): text on / off
+- **P · the pen in the toolbar**: freehand drawing on / off; drag to draw, click bare image for a dot
+- **A · the arrow in the toolbar**: arrows on / off; drag from the tail to the tip (the arrowhead follows the direction you draw)
+- **Hold or right-click the pen or arrow**: colours on the left, widths on the right (2, 4, 8 or 12 image pixels). Pick both, then click outside or press Esc. Each tool remembers its choices; a selected mark of that kind takes the new colour or width too.
 - **Highlighter on: drag**: draw a highlight
 - **Text on: click**: type there (Enter: new line · Esc, Ctrl+Enter or a click elsewhere: done)
-- **Either on: click · drag a selected mark · drag its handles · Delete · Esc**: select a highlight or text · move it · resize it · remove it · let go (selection, then the tool)
-- **Either on: double-click text**: change what it says
+- **Any marking tool on: click a mark · drag a selected mark · drag its handles · Delete · Esc**: select · move · resize · remove · let go (current drag, selection, then the tool). Arrows have a handle at each endpoint; freehand marks resize from their corners.
+- **Any marking tool on: double-click text**: change what it says
 - **Ctrl+Z · Ctrl+Y / Ctrl+Shift+Z**: undo · redo marks
 - **Ctrl+C · right-click → Copy image**: copy the image as it is on screen, marks and rotation included
 - **Ctrl+Shift+S · right-click → Save a copy…**: save that as a new PNG (Ctrl+S offers the same once there are marks)
@@ -142,10 +145,12 @@ window (0) and Actual size (1).
 Highlights tint what is under them the way a marker does: white paper takes the colour,
 black text stays black. Text is drawn with a thin halo (white around dark colours, dark
 around white) so it reads on a busy screenshot; resizing it from a corner scales it.
-Neither is ever drawn into the file. On a screenshot (in the screenshots folder) they
-are saved as you make them and can be moved, resized, changed or removed any time; on
-any other image they last as long as the tab. What leaves whir with the marks in it is a
-copy: the clipboard, or Save a copy.
+Pen strokes have round ends and joins; arrows have an open arrowhead at the tip. Their
+widths stay fixed in image pixels as you zoom, and selecting follows the stroke rather
+than its empty bounding box. No mark is ever drawn into the original file. On a screenshot
+(in the screenshots folder) marks are saved as you make them and can be moved, resized,
+changed or removed any time; on any other image they last as long as the tab. What leaves
+whir with the marks in it is a copy: the clipboard, or Save a copy.
 
 ## Screenshots
 
@@ -167,8 +172,9 @@ area. Quitting whir is done from that icon.
 
 Each capture is saved as a PNG in `Documents\whir\Screenshots`, immediately added to the
 drawer's **Images** tab, and opens in whir with the highlighter in hand. You don't need
-to switch documents to refresh the thumbnail grid. Their highlights and text are kept
-beside them (in `Screenshots\.whir`), so the PNG is always the capture itself.
+to switch documents to refresh the thumbnail grid. Their highlights, text, pen strokes
+and arrows are kept beside them (in `Screenshots\.whir`), so the PNG is always the
+capture itself.
 
 Starting with Windows is off until you turn it on, in the tray menu or **Settings ›
 Startup & window** (it's a per-user entry under
@@ -334,8 +340,8 @@ without losing anything.
 
 ## Not yet
 
-Animated GIFs, ICC colour management, image editing beyond highlights and text, freehand
-marks, arrows and boxes, text fonts and sizes from a menu, tab
+Animated GIFs, ICC colour management, image editing beyond marks, outline boxes,
+text fonts and sizes from a menu, tab
 reordering, spreadsheet formulas, cell formatting and multiple sheets, WebP/HEIC without
 the Microsoft Store codecs, IME composition at the caret, spell check, subfolders in the
 notes library.

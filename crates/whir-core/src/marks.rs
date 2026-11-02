@@ -1,7 +1,7 @@
 //! Marks on an image: highlights (rectangles of ink that tint what is under
-//! them the way a marker does, so dark text stays dark) and text. They are
-//! kept as objects, never baked into the image, so they can be moved,
-//! resized or removed later.
+//! them the way a marker does, so dark text stays dark), text, freehand strokes
+//! and directional arrows. They are kept as objects, never baked into the
+//! image, so they can be moved, resized or removed later.
 //!
 //! Every mark has a box in image pixels: selecting, moving, resizing and
 //! removing work the same for every kind.
@@ -15,6 +15,9 @@ use egui::{Color32, FontId, Mesh, Pos2, Rect, Vec2, pos2, vec2};
 use crate::theme;
 
 use crate::texture::MULTIPLY;
+
+mod drawing;
+pub use drawing::{Drawing, paint_drawing};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Ink {
@@ -61,7 +64,7 @@ impl Ink {
     }
 }
 
-/// The colour of a text mark.
+/// The colour of a text or drawing mark.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pen {
     #[default]
@@ -173,6 +176,8 @@ pub fn font(size: f32) -> FontId {
 pub enum Kind {
     Highlight(Ink),
     Text(Text),
+    Freehand(Drawing),
+    Arrow(Drawing),
 }
 
 /// One mark, its box in pixels of the full-resolution image (before any
@@ -197,7 +202,11 @@ impl Mark {
         }
     }
 
+    /// Rectangular containment for highlights/text; the rendered stroke for drawings.
     pub fn contains(&self, x: f32, y: f32) -> bool {
+        if self.drawing_style().is_some() {
+            return self.hit(x, y, 0.0);
+        }
         x >= self.x as f32
             && y >= self.y as f32
             && x < (self.x + self.w) as f32
@@ -207,7 +216,7 @@ impl Mark {
     pub fn text(&self) -> Option<&Text> {
         match &self.kind {
             Kind::Text(t) => Some(t),
-            Kind::Highlight(_) => None,
+            Kind::Highlight(_) | Kind::Freehand(_) | Kind::Arrow(_) => None,
         }
     }
 }
@@ -253,6 +262,12 @@ pub fn parse(text: &str) -> Option<MarkSet> {
             }
             Some("text") => {
                 if let Some(mark) = parse_text(line) {
+                    set.marks.push(mark);
+                    continue;
+                }
+            }
+            Some("freehand" | "arrow") => {
+                if let Some(mark) = drawing::parse(&words) {
                     set.marks.push(mark);
                     continue;
                 }
@@ -349,6 +364,7 @@ pub fn serialize(set: &MarkSet) -> String {
                 t.pen.name(),
                 quote(&t.body)
             ),
+            Kind::Freehand(d) | Kind::Arrow(d) => drawing::serialize(m, d),
         };
         out.push_str(&line);
     }

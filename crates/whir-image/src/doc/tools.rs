@@ -1,10 +1,10 @@
-//! The geometry of marking: drawing a box, moving one, and resizing one by
-//! its handles. Positions are in image pixels (before any on-screen turn).
+//! The geometry of marking: drawing, moving and resizing by handles.
+//! Positions are in image pixels (before any on-screen turn).
 
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
-use whir_core::marks::{Ink, Kind, Mark, Text};
+use whir_core::marks::{Ink, Kind, Mark, Pen, Text};
 
-/// A drawn mark is at least this many points a side (smaller is a slip).
+/// The minimum drawn box side or arrow length, in screen points.
 pub const MIN_DRAW: f32 = 4.0;
 
 /// The mark a drag between `a` and `b` draws: whole pixels, inside the
@@ -19,6 +19,32 @@ pub fn drawn(a: Pos2, b: Pos2, image: Vec2, min: f32, ink: Ink) -> Option<Mark> 
     let x1 = r.max.x.ceil().clamp(0.0, image.x) as u32;
     let y1 = r.max.y.ceil().clamp(0.0, image.y) as u32;
     (x1 > x0 && y1 > y0).then(|| Mark::highlight(x0, y0, x1 - x0, y1 - y0, ink))
+}
+
+/// A stroke inside the image, including a single-point dot.
+pub fn freehand(points: &[Pos2], image: Vec2, pen: Pen, width: u32) -> Option<Mark> {
+    let points: Option<Vec<_>> = points.iter().map(|&p| clamped(p, image)).collect();
+    Mark::drawing(&points?, pen, width, false)
+}
+
+/// An arrow from tail to tip, kept inside the image. Length, not either side
+/// of its box, must reach `min`, so horizontal and vertical arrows are valid.
+pub fn arrow(from: Pos2, to: Pos2, image: Vec2, min: f32, pen: Pen, width: u32) -> Option<Mark> {
+    let (from, to) = (clamped(from, image)?, clamped(to, image)?);
+    if !min.is_finite() || from.distance(to) < min {
+        return None;
+    }
+    Mark::drawing(&[from, to], pen, width, true)
+}
+
+fn clamped(point: Pos2, image: Vec2) -> Option<Pos2> {
+    if !point.is_finite() || !image.is_finite() || image.x <= 0.0 || image.y <= 0.0 {
+        return None;
+    }
+    Some(pos2(
+        point.x.clamp(0.0, image.x),
+        point.y.clamp(0.0, image.y),
+    ))
 }
 
 /// Where a box of `w` × `h` with its top left at `min` goes: there, moved
@@ -40,7 +66,7 @@ pub fn moved(mark: &Mark, delta: Vec2, image: Vec2) -> Mark {
     }
 }
 
-/// A grip on a selected mark's box: a corner, or the middle of a side.
+/// A grip on a selected mark's box, or an arrow's tail or tip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
     NW,
@@ -51,6 +77,8 @@ pub enum Handle {
     S,
     SW,
     W,
+    Start,
+    End,
 }
 
 impl Handle {
@@ -65,6 +93,7 @@ impl Handle {
         Handle::W,
     ];
     pub const CORNERS: [Handle; 4] = [Handle::NW, Handle::NE, Handle::SE, Handle::SW];
+    pub const ENDPOINTS: [Handle; 2] = [Handle::Start, Handle::End];
 
     /// Which sides it moves: -1 the left (top), 1 the right (bottom), 0 neither.
     pub fn pull(self) -> Vec2 {
@@ -77,21 +106,31 @@ impl Handle {
             Handle::S => vec2(0.0, 1.0),
             Handle::SW => vec2(-1.0, 1.0),
             Handle::W => vec2(-1.0, 0.0),
+            Handle::Start | Handle::End => Vec2::ZERO,
         }
     }
 
-    /// Where it is on `mark`'s box.
+    /// Where it is on `mark`'s box, or its actual ordered arrow endpoint.
     pub fn on(self, mark: &Mark) -> Pos2 {
         let half = vec2(mark.w as f32, mark.h as f32) / 2.0;
-        pos2(mark.x as f32, mark.y as f32) + half + self.pull() * half
+        let center = pos2(mark.x as f32, mark.y as f32) + half;
+        match self {
+            Handle::Start => mark.drawing_points().first().copied().unwrap_or(center),
+            Handle::End => mark.drawing_points().last().copied().unwrap_or(center),
+            _ => center + self.pull() * half,
+        }
     }
 }
 
-/// The handles `mark` is resized by: the corners of text (which scales), all
-/// eight around a box, or only its corners when `edges` is false (it is too
-/// small on screen to tell them apart).
+/// Arrows have endpoints; text and freehand scale by their corners. Boxes
+/// have eight handles, or only corners when `edges` is false (too small on
+/// screen to tell the handles apart).
 pub fn handles(mark: &Mark, edges: bool) -> &'static [Handle] {
-    match mark.kind {
+    match &mark.kind {
+        Kind::Arrow(_) => &Handle::ENDPOINTS,
+        // A dot's size is its pen width, not its one-pixel storage box. Grips
+        // there would cover its entire hit region and prevent moving it.
+        Kind::Freehand(d) if d.points.len() == 1 => &[],
         Kind::Highlight(_) if edges => &Handle::ALL,
         _ => &Handle::CORNERS,
     }
@@ -99,12 +138,81 @@ pub fn handles(mark: &Mark, edges: bool) -> &'static [Handle] {
 
 /// `mark` with `handle` dragged by `delta` pixels. A box's sides follow
 /// (past the opposite side it turns over), at least `min` pixels and inside
-/// the image. Text scales evenly from the opposite corner; its box here is
-/// only an estimate, for the caller to measure (see [`anchored`]). `None` if
-/// nothing of it would be left in the image.
+/// the image. Freehand scales evenly from the opposite corner without
+/// changing its pen width. Arrows move one endpoint, keeping tail and tip order.
+/// Text also scales evenly; its box here is only an estimate, for the caller
+/// to measure (see [`anchored`]). `None` if the requested geometry is invalid.
 pub fn resized(mark: &Mark, handle: Handle, delta: Vec2, image: Vec2, min: f32) -> Option<Mark> {
     let pull = handle.pull();
     match &mark.kind {
+        Kind::Arrow(drawing) => {
+            let mut points = mark.drawing_points();
+            let index = match handle {
+                Handle::Start => 0,
+                Handle::End => 1,
+                _ => return None,
+            };
+            let point = points.get_mut(index)?;
+            *point = clamped(*point + delta, image)?;
+            if !min.is_finite() || points[0].distance(points[1]) < min {
+                return None;
+            }
+            Mark::drawing(&points, drawing.pen, drawing.width, true)
+        }
+        Kind::Freehand(drawing) => {
+            if !Handle::CORNERS.contains(&handle)
+                || mark.w == 0
+                || mark.h == 0
+                || !delta.is_finite()
+                || !image.is_finite()
+            {
+                return None;
+            }
+            let size = vec2(mark.w as f32, mark.h as f32);
+            let fixed = handle.on(mark) - pull * size;
+            let room = vec2(
+                if pull.x < 0.0 {
+                    fixed.x
+                } else {
+                    image.x - fixed.x
+                },
+                if pull.y < 0.0 {
+                    fixed.y
+                } else {
+                    image.y - fixed.y
+                },
+            );
+            if fixed.x < 0.0 || fixed.y < 0.0 || fixed.x > image.x || fixed.y > image.y {
+                return None;
+            }
+            // A flat path's padded box axis must not prevent the path shortening.
+            let first = drawing.points.first()?;
+            let varies = [0, 1].map(|axis| drawing.points.iter().any(|p| p[axis] != first[axis]));
+            let grown = (size + pull * delta) / size;
+            let (lower, scale) = match varies {
+                [true, false] => (1.0 / size.x, grown.x),
+                [false, true] => (1.0 / size.y, grown.y),
+                _ => ((1.0 / size.x).max(1.0 / size.y), grown.x.max(grown.y)),
+            };
+            // Both box axes, including padding, must still fit inside the image.
+            let upper = (room.x.floor() / size.x).min(room.y.floor() / size.y);
+            if upper < lower {
+                return None;
+            }
+            let scale = scale.clamp(lower, upper);
+            let (w, h) = (
+                (size.x * scale).round().max(1.0) as u32,
+                (size.y * scale).round().max(1.0) as u32,
+            );
+            let (x, y) = anchored(mark, handle, w, h);
+            Some(Mark {
+                x,
+                y,
+                w,
+                h,
+                ..mark.clone()
+            })
+        }
         Kind::Highlight(ink) => {
             let (mut x0, mut y0) = (mark.x as f32, mark.y as f32);
             let (mut x1, mut y1) = (x0 + mark.w as f32, y0 + mark.h as f32);
@@ -173,8 +281,6 @@ pub fn anchored(mark: &Mark, handle: Handle, w: u32, h: u32) -> (u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use whir_core::marks::Pen;
-
     use super::*;
 
     const IMAGE: Vec2 = vec2(400.0, 200.0);
@@ -203,6 +309,410 @@ mod tests {
                 pen: Pen::Red,
                 turn: 0,
             }),
+        }
+    }
+
+    fn points_near(mark: &Mark, expected: &[Pos2]) {
+        let points = mark.drawing_points();
+        assert_eq!(points.len(), expected.len());
+        for (point, expected) in points.iter().zip(expected) {
+            assert!(
+                point.distance(*expected) < 0.01,
+                "{point:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn freehand_clamps_every_point_and_accepts_dots() {
+        let m = freehand(
+            &[pos2(-10.0, 30.0), pos2(30.0, -20.0), pos2(500.0, 250.0)],
+            IMAGE,
+            Pen::Black,
+            8,
+        )
+        .unwrap();
+        points_near(&m, &[pos2(0.0, 30.0), pos2(30.0, 0.0), pos2(400.0, 200.0)]);
+        assert!(matches!(m.kind, Kind::Freehand(_)));
+        assert_eq!(m.drawing_style().unwrap().pen, Pen::Black);
+        assert_eq!(m.drawing_style().unwrap().width, 8);
+
+        let dot = freehand(&[pos2(-10.0, 230.0)], IMAGE, Pen::Red, 4).unwrap();
+        points_near(&dot, &[pos2(0.0, 200.0)]);
+        assert_eq!((dot.w, dot.h), (1, 1));
+        assert!(freehand(&[], IMAGE, Pen::Red, 4).is_none());
+    }
+
+    #[test]
+    fn arrows_keep_endpoint_order_and_use_length_not_box_sides() {
+        for (from, to) in [
+            (pos2(20.0, 30.0), pos2(120.0, 30.0)),
+            (pos2(120.0, 30.0), pos2(20.0, 30.0)),
+            (pos2(20.0, 30.0), pos2(20.0, 130.0)),
+            (pos2(20.0, 130.0), pos2(20.0, 30.0)),
+            (pos2(20.0, 30.0), pos2(23.0, 33.0)),
+            (pos2(24.0, 30.0), pos2(20.0, 30.0)),
+        ] {
+            let m = arrow(from, to, IMAGE, 4.0, Pen::Blue, 4).unwrap();
+            assert!(matches!(m.kind, Kind::Arrow(_)));
+            points_near(&m, &[from, to]);
+            assert_eq!(Handle::Start.on(&m), m.drawing_points()[0]);
+            assert_eq!(Handle::End.on(&m), m.drawing_points()[1]);
+            assert!(m.w > 0 && m.h > 0);
+        }
+        assert!(arrow(pos2(20.0, 30.0), pos2(23.9, 30.0), IMAGE, 4.0, Pen::Red, 4).is_none());
+        assert!(arrow(pos2(20.0, 30.0), pos2(23.0, 33.0), IMAGE, 5.0, Pen::Red, 4).is_none());
+        assert!(arrow(pos2(20.0, 30.0), pos2(20.0, 30.0), IMAGE, 0.0, Pen::Red, 4).is_none());
+    }
+
+    #[test]
+    fn arrows_check_minimum_length_after_clamping() {
+        let m = arrow(
+            pos2(-10.0, 300.0),
+            pos2(500.0, -20.0),
+            IMAGE,
+            4.0,
+            Pen::Red,
+            4,
+        )
+        .unwrap();
+        points_near(&m, &[pos2(0.0, 200.0), pos2(400.0, 0.0)]);
+        assert!(
+            arrow(
+                pos2(399.0, 20.0),
+                pos2(500.0, 20.0),
+                IMAGE,
+                4.0,
+                Pen::Red,
+                4
+            )
+            .is_none()
+        );
+        assert!(arrow(pos2(-10.0, 20.0), pos2(-5.0, 20.0), IMAGE, 4.0, Pen::Red, 4).is_none());
+    }
+
+    #[test]
+    fn drawing_inputs_must_be_finite_and_have_valid_styles() {
+        for point in [pos2(f32::NAN, 10.0), pos2(10.0, f32::INFINITY)] {
+            assert!(freehand(&[point], IMAGE, Pen::Red, 4).is_none());
+            assert!(arrow(point, pos2(20.0, 20.0), IMAGE, 4.0, Pen::Red, 4).is_none());
+        }
+        for image in [Vec2::ZERO, vec2(-1.0, 20.0), vec2(f32::NAN, 20.0)] {
+            assert!(freehand(&[pos2(10.0, 10.0)], image, Pen::Red, 4).is_none());
+        }
+        for width in [0, 257] {
+            assert!(freehand(&[pos2(10.0, 10.0)], IMAGE, Pen::Red, width).is_none());
+            assert!(
+                arrow(
+                    pos2(10.0, 10.0),
+                    pos2(20.0, 20.0),
+                    IMAGE,
+                    4.0,
+                    Pen::Red,
+                    width
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_handles_are_actual_endpoints_not_box_corners() {
+        let m = arrow(
+            pos2(100.3, 50.25),
+            pos2(20.25, 90.75),
+            IMAGE,
+            4.0,
+            Pen::Red,
+            4,
+        )
+        .unwrap();
+        assert!(Handle::Start.on(&m).distance(pos2(100.3, 50.25)) < 0.01);
+        assert!(Handle::End.on(&m).distance(pos2(20.25, 90.75)) < 0.01);
+        assert_eq!(Handle::Start.pull(), Vec2::ZERO);
+        assert_eq!(Handle::End.pull(), Vec2::ZERO);
+        for edges in [false, true] {
+            assert_eq!(handles(&m, edges), Handle::ENDPOINTS);
+        }
+    }
+
+    #[test]
+    fn either_arrow_endpoint_can_rotate_around_the_other() {
+        let m = arrow(
+            pos2(100.0, 80.0),
+            pos2(200.0, 100.0),
+            IMAGE,
+            4.0,
+            Pen::Green,
+            256,
+        )
+        .unwrap();
+        for (handle, index) in [(Handle::Start, 0), (Handle::End, 1)] {
+            let before = m.drawing_points();
+            let fixed = before[1 - index];
+            for offset in [
+                vec2(-40.0, -20.0),
+                vec2(40.0, -20.0),
+                vec2(-40.0, 20.0),
+                vec2(40.0, 20.0),
+                vec2(-40.0, 0.0),
+                vec2(40.0, 0.0),
+                vec2(0.0, -20.0),
+                vec2(0.0, 20.0),
+            ] {
+                let target = fixed + offset;
+                let r = resized(&m, handle, target - before[index], IMAGE, 4.0).unwrap();
+                let mut expected = before.clone();
+                expected[index] = target;
+                points_near(&r, &expected);
+                assert_eq!(r.drawing_style().unwrap().pen, Pen::Green);
+                assert_eq!(r.drawing_style().unwrap().width, 256);
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_endpoint_drags_clamp_and_reject_short_arrows() {
+        let m = arrow(
+            pos2(100.0, 100.0),
+            pos2(200.0, 100.0),
+            IMAGE,
+            4.0,
+            Pen::Red,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            resized(&m, Handle::End, Vec2::ZERO, IMAGE, 4.0),
+            Some(m.clone())
+        );
+        assert!(resized(&m, Handle::End, vec2(-97.0, 0.0), IMAGE, 4.0).is_none());
+        assert!(resized(&m, Handle::End, vec2(-100.0, 0.0), IMAGE, 0.0).is_none());
+        let r = resized(&m, Handle::End, vec2(-96.0, 0.0), IMAGE, 4.0).unwrap();
+        points_near(&r, &[pos2(100.0, 100.0), pos2(104.0, 100.0)]);
+        let r = resized(&m, Handle::End, vec2(500.0, 500.0), IMAGE, 4.0).unwrap();
+        points_near(&r, &[pos2(100.0, 100.0), pos2(400.0, 200.0)]);
+        let r = resized(&m, Handle::Start, vec2(-500.0, -500.0), IMAGE, 4.0).unwrap();
+        points_near(&r, &[pos2(0.0, 0.0), pos2(200.0, 100.0)]);
+        assert!(resized(&m, Handle::SE, Vec2::ZERO, IMAGE, 4.0).is_none());
+    }
+
+    #[test]
+    fn endpoint_drags_stay_in_image_coordinates_under_every_view_turn() {
+        let m = arrow(
+            pos2(200.0, 50.0),
+            pos2(100.0, 120.0),
+            IMAGE,
+            4.0,
+            Pen::Red,
+            4,
+        )
+        .unwrap();
+        for turns in 0..4 {
+            let size = if turns % 2 == 0 {
+                IMAGE
+            } else {
+                vec2(IMAGE.y, IMAGE.x)
+            };
+            let at = super::super::Placement {
+                rect: Rect::from_min_size(pos2(30.0, 60.0), size * 2.0),
+                size: IMAGE,
+                turns,
+            };
+            let from = at.screen(Handle::End.on(&m));
+            let to = from + whir_core::marks::turn_vec(vec2(20.0, -30.0), turns) * at.zoom();
+            let r = resized(&m, Handle::End, at.pixel(to) - at.pixel(from), IMAGE, 4.0).unwrap();
+            points_near(&r, &[pos2(200.0, 50.0), pos2(120.0, 90.0)]);
+            for (handle, screen) in at.handles(&r) {
+                assert!(at.pixel(screen).distance(handle.on(&r)) < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn moving_drawings_keeps_normalized_points_and_style() {
+        for is_arrow in [false, true] {
+            let m = Mark::drawing(
+                &[pos2(50.0, 40.0), pos2(90.0, 60.0)],
+                Pen::White,
+                12,
+                is_arrow,
+            )
+            .unwrap();
+            let r = moved(&m, vec2(10.0, -10.0), IMAGE);
+            assert_eq!(r.kind, m.kind);
+            points_near(&r, &[pos2(60.0, 30.0), pos2(100.0, 50.0)]);
+            let r = moved(&m, vec2(-500.0, 500.0), IMAGE);
+            assert_eq!(r.kind, m.kind);
+            points_near(&r, &[pos2(0.0, 180.0), pos2(40.0, 200.0)]);
+        }
+    }
+
+    #[test]
+    fn freehand_corners_scale_uniformly_without_scaling_the_pen() {
+        let m = freehand(
+            &[pos2(100.0, 50.0), pos2(140.0, 50.0), pos2(120.0, 70.0)],
+            IMAGE,
+            Pen::Black,
+            8,
+        )
+        .unwrap();
+        assert_eq!(handles(&m, true), Handle::CORNERS);
+        assert_eq!(handles(&m, false), Handle::CORNERS);
+        for (handle, opposite) in [
+            (Handle::NW, Handle::SE),
+            (Handle::NE, Handle::SW),
+            (Handle::SE, Handle::NW),
+            (Handle::SW, Handle::NE),
+        ] {
+            assert_eq!(resized(&m, handle, Vec2::ZERO, IMAGE, 4.0), Some(m.clone()));
+            for scale in [0.5, 2.0] {
+                let delta = handle.pull() * vec2(40.0, 20.0) * (scale - 1.0);
+                let r = resized(&m, handle, delta, IMAGE, 4.0).unwrap();
+                let fixed = opposite.on(&m);
+                assert_eq!(opposite.on(&r), fixed);
+                assert_eq!(r.kind, m.kind);
+                let expected: Vec<_> = m
+                    .drawing_points()
+                    .iter()
+                    .map(|p| fixed + (*p - fixed) * scale)
+                    .collect();
+                points_near(&r, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn flat_freehand_strokes_shorten_from_each_corner() {
+        for horizontal in [true, false] {
+            let (points, along, across, expected_size) = if horizontal {
+                (
+                    [pos2(20.0, 30.5), pos2(100.0, 30.5), pos2(20.0, 30.5)],
+                    vec2(80.0, 0.0),
+                    vec2(0.0, 1.0),
+                    (40, 1),
+                )
+            } else {
+                (
+                    [pos2(20.5, 30.0), pos2(20.5, 110.0), pos2(20.5, 30.0)],
+                    vec2(0.0, 80.0),
+                    vec2(1.0, 0.0),
+                    (1, 40),
+                )
+            };
+            let m = freehand(&points, IMAGE, Pen::Black, 8).unwrap();
+            for (handle, opposite) in [
+                (Handle::NW, Handle::SE),
+                (Handle::NE, Handle::SW),
+                (Handle::SE, Handle::NW),
+                (Handle::SW, Handle::NE),
+            ] {
+                let fixed = opposite.on(&m);
+                for perpendicular in [0.0, 30.0] {
+                    let delta = handle.pull() * (along * -0.5 + across * perpendicular);
+                    let r = resized(&m, handle, delta, IMAGE, 4.0).unwrap();
+                    assert_eq!((r.w, r.h), expected_size);
+                    assert_eq!(opposite.on(&r), fixed);
+                    assert_eq!(r.kind, m.kind);
+                    assert!(r.x + r.w <= IMAGE.x as u32 && r.y + r.h <= IMAGE.y as u32);
+                    let expected: Vec<_> = m
+                        .drawing_points()
+                        .iter()
+                        .map(|p| {
+                            if horizontal {
+                                pos2(fixed.x + (p.x - fixed.x) * 0.5, p.y)
+                            } else {
+                                pos2(p.x, fixed.y + (p.y - fixed.y) * 0.5)
+                            }
+                        })
+                        .collect();
+                    points_near(&r, &expected);
+                }
+            }
+            // An earlier enlargement can make the padded axis wider than one pixel.
+            let grown = resized(&m, Handle::SE, along, IMAGE, 4.0).unwrap();
+            let r = resized(&grown, Handle::SE, along * -1.5, IMAGE, 4.0).unwrap();
+            assert_eq!((r.w, r.h), expected_size);
+            assert_eq!(Handle::NW.on(&r), Handle::NW.on(&m));
+            assert_eq!(r.kind, m.kind);
+        }
+    }
+
+    #[test]
+    fn freehand_with_two_varying_axes_shortens_uniformly() {
+        let m = freehand(
+            &[pos2(100.0, 50.0), pos2(140.0, 50.0), pos2(120.0, 70.0)],
+            IMAGE,
+            Pen::Blue,
+            12,
+        )
+        .unwrap();
+        for (handle, opposite) in [
+            (Handle::NW, Handle::SE),
+            (Handle::NE, Handle::SW),
+            (Handle::SE, Handle::NW),
+            (Handle::SW, Handle::NE),
+        ] {
+            let delta = handle.pull() * vec2(-30.0, -10.0);
+            let r = resized(&m, handle, delta, IMAGE, 4.0).unwrap();
+            let fixed = opposite.on(&m);
+            assert_eq!((r.w, r.h), (20, 10));
+            assert_eq!(opposite.on(&r), fixed);
+            assert_eq!(r.kind, m.kind);
+            let expected: Vec<_> = m
+                .drawing_points()
+                .iter()
+                .map(|p| fixed + (*p - fixed) * 0.5)
+                .collect();
+            points_near(&r, &expected);
+        }
+        // A one-pixel axis with actual variation still constrains uniform scaling.
+        let thin = freehand(
+            &[pos2(100.0, 50.0), pos2(140.0, 51.0)],
+            IMAGE,
+            Pen::Blue,
+            12,
+        )
+        .unwrap();
+        assert_eq!(
+            resized(&thin, Handle::SE, vec2(-20.0, -0.5), IMAGE, 4.0),
+            Some(thin)
+        );
+    }
+
+    #[test]
+    fn freehand_scaling_stops_at_image_edges_and_never_flips() {
+        let m = freehand(&[pos2(100.0, 50.0), pos2(140.0, 70.0)], IMAGE, Pen::Red, 4).unwrap();
+        for (handle, expected) in [
+            (Handle::NW, (0, 0, 140, 70)),
+            (Handle::NE, (100, 0, 140, 70)),
+            (Handle::SE, (100, 50, 300, 150)),
+            (Handle::SW, (0, 50, 140, 70)),
+        ] {
+            let r = resized(&m, handle, handle.pull() * 900.0, IMAGE, 4.0).unwrap();
+            assert_eq!(sides(&r), expected);
+            assert_eq!(r.kind, m.kind);
+            let r = resized(&m, handle, handle.pull() * -900.0, IMAGE, 4.0).unwrap();
+            assert_eq!((r.w, r.h), (2, 1));
+            assert_eq!(r.kind, m.kind);
+        }
+    }
+
+    #[test]
+    fn freehand_dots_and_flat_strokes_keep_nondegenerate_boxes() {
+        for points in [
+            vec![pos2(20.0, 20.0)],
+            vec![pos2(20.0, 20.0), pos2(60.0, 20.0)],
+            vec![pos2(20.0, 20.0), pos2(20.0, 60.0)],
+        ] {
+            let m = freehand(&points, IMAGE, Pen::Red, 4).unwrap();
+            for handle in Handle::CORNERS {
+                let r = resized(&m, handle, handle.pull() * -900.0, IMAGE, 4.0).unwrap();
+                assert_eq!((r.w, r.h), (1, 1));
+                assert_eq!(r.kind, m.kind);
+                assert_eq!(r.drawing_points().len(), points.len());
+            }
+            assert!(resized(&m, Handle::E, Vec2::ZERO, IMAGE, 4.0).is_none());
         }
     }
 

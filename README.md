@@ -12,7 +12,7 @@ It does five things well:
 - **Fast PDF viewer:** a 66-page PDF is on screen in about 150 ms, with text selection,
   search and a page minimap.
 - **Fast screenshot tool:** press Ctrl+PrtSc anywhere, drag a region or click a window, and
-  it opens ready to highlight and label.
+  it opens ready to highlight, label, draw freehand and add arrows.
 - **Fast CSV tool:** open, sort, edit and save huge files. A 300k-row CSV opens in about
   150 ms, and Find gets through an 870 MB file in about 0.3 s.
 - **Simple, minimal notes and todos:** start typing and the note saves itself as plain

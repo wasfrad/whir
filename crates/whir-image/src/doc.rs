@@ -40,6 +40,7 @@ use crate::{bake, decode, folder};
 use commands::Cmd;
 
 mod commands;
+mod drawing;
 mod tools;
 
 use tools::{Handle, MIN_DRAW, drawn, moved};
@@ -113,22 +114,34 @@ impl Shown {
     }
 }
 
-/// The tools that mark an image. Either one selects, moves, resizes and
-/// removes any mark; they differ in what a drag or a click on bare image does.
+/// Every tool selects, moves, resizes and removes marks; they differ in
+/// what a drag or a click on bare image does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
     /// A drag draws a highlight.
     Highlight,
     /// A click starts typing there.
     Text,
+    Freehand,
+    Arrow,
 }
 
 /// What a primary-button drag is doing while a tool is armed (positions in
 /// image pixels).
-#[derive(Clone, Copy)]
 enum Drag {
     /// Drawing a new mark between two corners.
     Draw { from: Pos2, to: Pos2 },
+    Freehand {
+        points: Vec<Pos2>,
+        pen: Pen,
+        width: u32,
+    },
+    Arrow {
+        from: Pos2,
+        to: Pos2,
+        pen: Pen,
+        width: u32,
+    },
     /// Moving mark `index` by `to - from`.
     Move { index: usize, from: Pos2, to: Pos2 },
     /// Resizing mark `index` by one of its handles, dragged `to - from`.
@@ -213,6 +226,9 @@ impl Placement {
 
 /// The resize cursor for `handle`, the way it points on screen.
 fn resize_cursor(handle: Handle, turns: u8) -> CursorIcon {
+    if matches!(handle, Handle::Start | Handle::End) {
+        return CursorIcon::Move;
+    }
     let d = marks::turn_vec(handle.pull(), turns);
     if d.x == 0.0 {
         CursorIcon::ResizeVertical
@@ -234,6 +250,10 @@ fn on_image([w, h]: [u32; 2], turn: u8) -> [u32; 2] {
 fn paint_mark(painter: &egui::Painter, r: Rect, m: &Mark, at: &Placement) {
     match &m.kind {
         Kind::Highlight(ink) => marks::paint(painter, r, *ink),
+        Kind::Freehand(_) | Kind::Arrow(_) => {
+            let clipped = painter.with_clip_rect(painter.clip_rect().intersect(at.rect));
+            marks::paint_drawing(&clipped, m, |p| at.screen(p), at.zoom());
+        }
         Kind::Text(t) => {
             let turns = (at.turns + 4 - t.turn % 4) % 4;
             marks::paint_text(painter, r, t, turns, at.zoom());
@@ -838,13 +858,14 @@ impl ImageDoc {
         let index = e.selected?;
         let m = e.marks().get(index)?;
         at.handles(m)
-            .find(|(_, c)| (*c - p).abs().max_elem() <= HANDLE_REACH)
+            .filter(|(_, c)| (*c - p).abs().max_elem() <= HANDLE_REACH)
+            .min_by(|(_, a), (_, b)| a.distance_sq(p).total_cmp(&b.distance_sq(p)))
             .map(|(h, _)| (index, h))
     }
 
     /// Mark `index` (`m`) as `drag` has it, if `drag` is moving or resizing it.
-    fn dragged(&self, drag: Drag, index: usize, m: &Mark, at: &Placement) -> Option<Mark> {
-        match drag {
+    fn dragged(&self, drag: &Drag, index: usize, m: &Mark, at: &Placement) -> Option<Mark> {
+        match *drag {
             Drag::Move { index: i, from, to } if i == index => Some(moved(m, to - from, at.size)),
             Drag::Resize {
                 index: i,
@@ -873,7 +894,7 @@ impl ImageDoc {
         let after = self
             .editor()
             .and_then(|e| e.marks().get(index))
-            .and_then(|m| self.dragged(drag, index, m, at));
+            .and_then(|m| self.dragged(&drag, index, m, at));
         let Some(after) = after else { return };
         if let (Drag::Resize { .. }, Some(t)) = (drag, after.text()) {
             self.text_size = Some(t.size);
@@ -970,35 +991,65 @@ impl ImageDoc {
         }
     }
 
-    /// Pointer input while a tool is armed: a drag resizes the selected mark
-    /// by a handle, moves it, or (the highlighter) draws a new one; a click
-    /// selects, or (the text tool, on bare image) starts typing; a double
-    /// click on text retypes it.
+    /// A gesture edits the selection or draws a new mark; clicking an existing
+    /// mark selects it. Freehand samples start on press, before the drag threshold.
     fn handle_tool(&mut self, ui: &egui::Ui, resp: &egui::Response, at: &Placement) {
         let Some(tool) = self.tool else { return };
         let size = at.size;
         let inside = |p: Pos2| pos2(p.x.clamp(0.0, size.x), p.y.clamp(0.0, size.y));
+        let tolerance = 4.0 / at.zoom();
         let over_selected = |doc: &Self, p: Pos2| {
             doc.editor()
                 .and_then(|e| e.marks().get(e.selected?))
-                .is_some_and(|m| m.contains(p.x, p.y))
+                .is_some_and(|m| m.hit(p.x, p.y, tolerance))
         };
+        let hit = |doc: &Self, p: Pos2| {
+            doc.editor()
+                .and_then(|e| e.hit_with_tolerance(p.x, p.y, tolerance))
+        };
+        let (pressed, released) =
+            ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released()));
         let swallowed = self.swallow;
-
+        let press = ui.input(|i| {
+            i.events.iter().find_map(|event| match *event {
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => Some(pos),
+                _ => None,
+            })
+        });
+        // A complete quick stroke can arrive between frames, after egui has
+        // already let go of its drag owner. Recover it only from our canvas.
+        let quick = pressed
+            && released
+            && matches!(tool, Tool::Freehand | Tool::Arrow)
+            && press.is_some_and(|p| {
+                resp.rect.contains(p) && ui.ctx().layer_id_at(p) == Some(resp.layer_id)
+            });
+        let dragging = resp.drag_started_by(PointerButton::Primary);
+        let start = quick
+            || dragging
+            || (tool == Tool::Freehand && pressed && resp.is_pointer_button_down_on());
         if !swallowed
-            && resp.drag_started_by(PointerButton::Primary)
-            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            && self.drag.is_none()
+            && start
+            && let Some(origin) = press.or_else(|| ui.input(|i| i.pointer.press_origin()))
         {
             let p = at.pixel(origin);
             let selected = self.editor().and_then(|e| e.selected);
             self.drag = match (self.handle_at(at, origin), selected) {
-                (Some((index, handle)), _) => Some(Drag::Resize {
+                // Only new ink starts on press. Editing a selected object still
+                // waits for the drag threshold, so a slightly shaky click is safe.
+                (Some((index, handle)), _) => dragging.then_some(Drag::Resize {
                     index,
                     handle,
                     from: p,
                     to: p,
                 }),
-                (None, Some(index)) if over_selected(self, p) => Some(Drag::Move {
+                (None, Some(index)) if over_selected(self, p) => dragging.then_some(Drag::Move {
                     index,
                     from: p,
                     to: p,
@@ -1007,39 +1058,102 @@ impl ImageDoc {
                     from: inside(p),
                     to: inside(p),
                 }),
+                _ if tool == Tool::Freehand && at.rect.contains(origin) => Some(Drag::Freehand {
+                    points: vec![inside(p)],
+                    pen: edit::current_drawing_pen(false),
+                    width: edit::current_width(false),
+                }),
+                _ if tool == Tool::Arrow && at.rect.contains(origin) => Some(Drag::Arrow {
+                    from: inside(p),
+                    to: inside(p),
+                    pen: edit::current_drawing_pen(true),
+                    width: edit::current_width(true),
+                }),
                 _ => None,
             };
         }
-        if resp.dragged_by(PointerButton::Primary)
-            && let Some(p) = resp.interact_pointer_pos()
-        {
-            match &mut self.drag {
-                Some(Drag::Draw { to, .. }) => *to = inside(at.pixel(p)),
-                Some(Drag::Move { to, .. } | Drag::Resize { to, .. }) => *to = at.pixel(p),
-                None => {}
-            }
-        }
-        if resp.drag_stopped_by(PointerButton::Primary) {
-            match self.drag.take() {
-                Some(Drag::Draw { from, to }) => {
-                    let min = MIN_DRAW / at.zoom();
-                    if let Some(m) = drawn(from, to, size, min, edit::current_ink()) {
-                        self.add_mark(m);
+        if let Some(Drag::Freehand { points, .. }) = &mut self.drag {
+            // Keep every motion sample in a frame, not just the pointer's final
+            // position. Ignore motion before the press and after the release.
+            ui.input(|i| {
+                let mut down = !pressed;
+                for event in &i.events {
+                    match *event {
+                        Event::PointerButton {
+                            pos,
+                            button: PointerButton::Primary,
+                            pressed,
+                            ..
+                        } => {
+                            if down || pressed {
+                                drawing::sample(points, inside(at.pixel(pos)), 0.0);
+                            }
+                            down = pressed;
+                        }
+                        Event::PointerMoved(p) if down => {
+                            drawing::sample(points, inside(at.pixel(p)), 0.5 / at.zoom());
+                        }
+                        _ => {}
                     }
                 }
-                Some(drag) => self.drop_drag(drag, at),
-                None => {}
+            });
+        } else if (resp.dragged_by(PointerButton::Primary) || released)
+            && let Some(p) = ui
+                .input(|i| {
+                    i.events.iter().find_map(|event| match *event {
+                        Event::PointerButton {
+                            pos,
+                            button: PointerButton::Primary,
+                            pressed: false,
+                            ..
+                        } => Some(pos),
+                        _ => None,
+                    })
+                })
+                .or_else(|| resp.interact_pointer_pos())
+        {
+            match &mut self.drag {
+                Some(Drag::Draw { to, .. } | Drag::Arrow { to, .. }) => *to = inside(at.pixel(p)),
+                Some(Drag::Move { to, .. } | Drag::Resize { to, .. }) => *to = at.pixel(p),
+                _ => {}
+            }
+        }
+        let mut drew = false;
+        if (released || resp.drag_stopped_by(PointerButton::Primary))
+            && let Some(drag) = self.drag.take()
+        {
+            let selecting = resp.clicked_by(PointerButton::Primary)
+                && resp
+                    .interact_pointer_pos()
+                    .is_some_and(|p| hit(self, at.pixel(p)).is_some());
+            if selecting && matches!(drag, Drag::Freehand { .. }) {
+                // A click on an existing mark selects it instead of adding a dot.
+            } else if let Some(mark) = drawing::preview(&drag, at, MIN_DRAW / at.zoom()) {
+                self.add_mark(mark);
+                drew = true;
+            } else {
+                self.drop_drag(drag, at);
             }
         }
         if !swallowed
+            && !drew
             && resp.clicked_by(PointerButton::Primary)
             && let Some(p) = resp.interact_pointer_pos()
         {
             let px = at.pixel(p);
-            let hit = self.editor().and_then(|e| e.hit(px.x, px.y));
+            let hit = hit(self, px);
             let on_image = (0.0..size.x).contains(&px.x) && (0.0..size.y).contains(&px.y);
             if hit.is_none() && tool == Tool::Text && on_image {
                 self.start_typing(None, px, at.zoom());
+            } else if hit.is_none() && tool == Tool::Freehand && on_image {
+                if let Some(mark) = tools::freehand(
+                    &[px],
+                    size,
+                    edit::current_drawing_pen(false),
+                    edit::current_width(false),
+                ) {
+                    self.add_mark(mark);
+                }
             } else if let Some(e) = self.editor_mut() {
                 e.selected = hit;
             }
@@ -1060,10 +1174,10 @@ impl ImageDoc {
         }
 
         if resp.hovered() || resp.dragged() {
-            let icon = match self.drag {
+            let icon = match &self.drag {
                 Some(Drag::Move { .. }) => CursorIcon::Move,
-                Some(Drag::Resize { handle, .. }) => resize_cursor(handle, at.turns),
-                Some(Drag::Draw { .. }) => CursorIcon::Crosshair,
+                Some(Drag::Resize { handle, .. }) => resize_cursor(*handle, at.turns),
+                Some(_) => CursorIcon::Crosshair,
                 None => match resp.hover_pos() {
                     Some(p) => match self.handle_at(at, p) {
                         Some((_, handle)) => resize_cursor(handle, at.turns),
@@ -1087,17 +1201,19 @@ impl ImageDoc {
                 if self.typing.as_ref().is_some_and(|t| t.index == Some(i)) {
                     continue;
                 }
-                let dragged = self.drag.and_then(|d| self.dragged(d, i, m, at));
+                let dragged = self.drag.as_ref().and_then(|d| self.dragged(d, i, m, at));
                 let m = dragged.as_ref().unwrap_or(m);
                 let r = at.mark_rect(m);
                 paint_mark(painter, r, m, at);
                 if e.selected == Some(i) {
-                    painter.rect_stroke(
-                        r,
-                        0.0,
-                        Stroke::new(1.5, theme.accent),
-                        egui::StrokeKind::Outside,
-                    );
+                    if !matches!(m.kind, Kind::Arrow(_)) {
+                        painter.rect_stroke(
+                            r,
+                            0.0,
+                            Stroke::new(1.5, theme.accent),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                     for (_, c) in at.handles(m) {
                         let grip = Rect::from_center_size(c, Vec2::splat(HANDLE));
                         painter.rect_filled(grip, 1.0, Color32::WHITE);
@@ -1111,8 +1227,10 @@ impl ImageDoc {
                 }
             }
         }
-        if let Some(Drag::Draw { from, to }) = self.drag
-            && let Some(m) = drawn(from, to, at.size, 0.0, edit::current_ink())
+        if let Some(m) = self
+            .drag
+            .as_ref()
+            .and_then(|d| drawing::preview(d, at, 0.0))
         {
             paint_mark(painter, at.mark_rect(&m), &m, at);
         }
@@ -1283,7 +1401,7 @@ impl ImageDoc {
         let typing = self.typing.is_some();
 
         // Wheel zooms around the cursor (smoothed by egui); Ctrl+wheel / pinch too.
-        if resp.hovered() {
+        if resp.hovered() && self.drag.is_none() {
             let (scroll, zoom_delta, pointer) =
                 ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
             let mut factor = zoom_delta;
@@ -1302,8 +1420,9 @@ impl ImageDoc {
             self.swallow = false;
         }
         // A tool takes the primary button; the middle one still pans.
-        if (self.tool.is_none() && resp.dragged_by(PointerButton::Primary))
-            || resp.dragged_by(PointerButton::Middle)
+        if self.drag.is_none()
+            && ((self.tool.is_none() && resp.dragged_by(PointerButton::Primary))
+                || resp.dragged_by(PointerButton::Middle))
         {
             self.view.pan(resp.drag_delta(), image, vp, ppp);
         }
@@ -1348,6 +1467,12 @@ impl ImageDoc {
             }
             if i.consume_key(none, Key::T) {
                 tool = Some(Tool::Text);
+            }
+            if i.consume_key(none, Key::P) {
+                tool = Some(Tool::Freehand);
+            }
+            if i.consume_key(none, Key::A) {
+                tool = Some(Tool::Arrow);
             }
             // The Shift form first (see R below).
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)
@@ -1473,22 +1598,26 @@ impl ImageDoc {
         if let Some(tool) = tool {
             self.toggle_tool(tool);
         }
-        if let Some(undo) = history
-            && let Some(e) = self.editor_mut()
-        {
-            let _ = if undo { e.undo() } else { e.redo() };
+        if let Some(undo) = history {
+            self.drag = None;
+            self.swallow |= ui.input(|i| i.pointer.primary_down());
+            if let Some(e) = self.editor_mut() {
+                let _ = if undo { e.undo() } else { e.redo() };
+            }
         }
         if delete
             && let Some(e) = self.editor_mut()
             && let Some(i) = e.selected
         {
             e.remove(i);
+            self.drag = None;
+            self.swallow |= ui.input(|i| i.pointer.primary_down());
         }
         if escape {
             // One thing at a time: the drag, then the selection, then the tool.
             let selected = self.editor().and_then(|e| e.selected).is_some();
             if self.drag.take().is_some() {
-                // Cancelled.
+                self.swallow |= ui.input(|i| i.pointer.primary_down());
             } else if selected {
                 if let Some(e) = self.editor_mut() {
                     e.selected = None;
@@ -1833,6 +1962,8 @@ impl Document for ImageDoc {
             });
             true
         });
+        self.drawing_tool(ui, Tool::Freehand, &theme);
+        self.drawing_tool(ui, Tool::Arrow, &theme);
         self.history_tools(ui, &theme);
     }
 

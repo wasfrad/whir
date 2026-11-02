@@ -1,5 +1,5 @@
 //! Headless egui tests: real frames through `Document::ui`, real key and
-//! pointer events, checking the highlighter and the text tool.
+//! pointer events, checking the annotation tools and their drawing flyouts.
 
 use egui::{Event, RawInput};
 use whir_core::{Captures, TextureDesc, UserTexture};
@@ -34,6 +34,9 @@ struct Harness {
     doc: ImageDoc,
     time: f64,
     viewport: Rect,
+    drawing_toolbar: bool,
+    drawing_buttons: [Rect; 2],
+    shapes: Vec<Shape>,
     /// Everything the document has asked of the shell.
     requests: Vec<DocRequest>,
     cx: OpenCx,
@@ -121,6 +124,9 @@ impl Harness {
             doc: Self::load(&path, &cx),
             time: 0.0,
             viewport: Rect::NOTHING,
+            drawing_toolbar: false,
+            drawing_buttons: [Rect::NOTHING; 2],
+            shapes: Vec::new(),
             requests: Vec::new(),
             cx,
             dir,
@@ -178,7 +184,7 @@ impl Harness {
         self.frame(vec![]);
     }
 
-    /// Wait for the highlights to be written.
+    /// Wait for the marks to be written.
     fn saved(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(10);
         self.doc.flush_blocking(deadline).unwrap();
@@ -200,13 +206,29 @@ impl Harness {
             ctx,
             doc,
             viewport,
+            drawing_toolbar,
+            drawing_buttons,
+            shapes,
             requests,
             ..
         } = self;
         let textures: Arc<dyn TextureRegistry> = Arc::new(NoTextures);
         let waker = Waker::noop();
-        let out = ctx.run_ui(raw, |ui| {
-            *viewport = ui.max_rect();
+        let mut out = ctx.run_ui(raw, |ui| {
+            if *drawing_toolbar {
+                let theme = Theme::current();
+                ui.horizontal(|ui| {
+                    for (i, tool) in [Tool::Freehand, Tool::Arrow].into_iter().enumerate() {
+                        drawing_buttons[i] = ui
+                            .scope(|ui| doc.drawing_tool(ui, tool, &theme))
+                            .response
+                            .rect;
+                    }
+                });
+                *viewport = ui.available_rect_before_wrap();
+            } else {
+                *viewport = ui.max_rect();
+            }
             let mut cx = DocCx {
                 textures: &textures,
                 waker: &waker,
@@ -215,7 +237,90 @@ impl Harness {
             };
             doc.ui(ui, &mut cx);
         });
+        if *drawing_toolbar {
+            *shapes = std::mem::take(&mut out.shapes)
+                .into_iter()
+                .map(|s| s.shape)
+                .collect();
+        }
         out.drop_without_applying_deltas();
+    }
+
+    /// Opt in to just the two real drawing buttons, leaving old canvas layouts alone.
+    fn show_drawing_toolbar(&mut self) {
+        self.drawing_toolbar = true;
+        self.frame(vec![]);
+        self.frame(vec![]);
+    }
+
+    fn panel_open(&self, arrow: bool) -> bool {
+        egui::Popup::is_id_open(&self.ctx, egui::Id::new("whir.image.drawing").with(arrow))
+    }
+
+    fn open_drawing_panel(&mut self, arrow: bool) {
+        let at = self.drawing_buttons[arrow as usize].center();
+        self.frame(vec![Event::PointerMoved(at)]);
+        self.button(at, PointerButton::Secondary, true);
+        self.button(at, PointerButton::Secondary, false);
+        assert!(self.panel_open(arrow));
+        // Let the popup finish sizing and fading in before locating its painted controls.
+        self.time += 0.3;
+        self.frame(vec![]);
+        self.frame(vec![]);
+    }
+
+    fn colour_choice(&self, pen: Pen) -> Pos2 {
+        self.shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Rect(r) if r.rect.size() == vec2(14.0, 14.0) && r.fill == pen.color() => {
+                    Some(r.rect.center())
+                }
+                _ => None,
+            })
+            .expect("the panel's colour swatch")
+    }
+
+    fn width_choice(&self, width: u32) -> Pos2 {
+        let heading = self
+            .shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::Text(t) if t.galley.text() == "Width" => Some(t.pos),
+                _ => None,
+            })
+            .expect("the panel's Width group");
+        self.shapes
+            .iter()
+            .find_map(|shape| match shape {
+                Shape::LineSegment { points, stroke }
+                    if stroke.width == width as f32
+                        && (points[0].distance(points[1]) - 14.0).abs() < 0.01
+                        && points[0].x >= heading.x
+                        && (heading.y..heading.y + 60.0).contains(&points[0].y) =>
+                {
+                    Some(points[0].lerp(points[1], 0.5))
+                }
+                _ => None,
+            })
+            .expect("the panel's width sample")
+    }
+
+    fn choose_drawing_style(&mut self, arrow: bool, pen: Pen, width: u32) {
+        self.open_drawing_panel(arrow);
+        let colour = self.colour_choice(pen);
+        let widths = [2, 4, 8, 12].map(|width| self.width_choice(width));
+        assert!(colour.x < widths[0].x, "colour left, widths right");
+        for pair in widths.windows(2) {
+            assert!(pair[0].x < pair[1].x && (pair[0].y - pair[1].y).abs() < 0.01);
+        }
+        self.click(colour);
+        assert!(
+            self.panel_open(arrow),
+            "keep the panel open to choose width too"
+        );
+        self.click(self.width_choice(width));
+        assert!(self.panel_open(arrow));
     }
 
     /// Where image pixel (`x`, `y`) is on screen (however it is turned).
@@ -225,12 +330,23 @@ impl Harness {
     }
 
     fn button(&mut self, pos: Pos2, button: PointerButton, pressed: bool) {
-        self.frame(vec![Event::PointerButton {
-            pos,
-            button,
-            pressed,
-            modifiers: Modifiers::NONE,
-        }]);
+        self.frame(vec![pointer_button(pos, button, pressed)]);
+    }
+
+    /// Follow an image-space path, one motion frame per point, with the current tool.
+    fn stroke(&mut self, points: &[Pos2]) {
+        let from = self.at(points[0].x, points[0].y);
+        self.frame(vec![Event::PointerMoved(from)]);
+        self.button(from, PointerButton::Primary, true);
+        for point in &points[1..] {
+            self.frame(vec![Event::PointerMoved(self.at(point.x, point.y))]);
+        }
+        let last = points.last().unwrap();
+        self.button(self.at(last.x, last.y), PointerButton::Primary, false);
+    }
+
+    fn mark(&self, index: usize) -> Mark {
+        self.doc.editor().unwrap().marks()[index].clone()
     }
 
     /// Press at `from`, move to `to` in two steps, release.
@@ -940,4 +1056,874 @@ fn a_captures_text_saves_itself_even_mid_word() {
     h.doc.on_visibility(false);
     assert!(h.doc.typing.is_none());
     assert_eq!(h.marks().len(), 2);
+}
+
+fn pointer_button(pos: Pos2, button: PointerButton, pressed: bool) -> Event {
+    Event::PointerButton {
+        pos,
+        button,
+        pressed,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+fn points_near(mark: &Mark, expected: &[Pos2]) {
+    let actual = mark.drawing_points();
+    assert_eq!(actual.len(), expected.len(), "{actual:?} != {expected:?}");
+    for (actual, expected) in actual.iter().zip(expected) {
+        // Paths are stored as normalized integers, not the original floats.
+        assert!(
+            actual.distance(*expected) < 0.01,
+            "{actual:?} != {expected:?}"
+        );
+    }
+}
+
+fn style(mark: &Mark) -> (Pen, u32) {
+    let d = mark.drawing_style().expect("a drawing mark");
+    (d.pen, d.width)
+}
+
+#[test]
+fn drawing_pen_keeps_bends_and_batched_press_motion_and_release_as_one_edit() {
+    let mut h = Harness::open("drawing-samples");
+    edit::set_drawing_pen(false, Pen::Green);
+    edit::set_width(false, 8);
+    h.key(Key::P, Modifiers::NONE);
+    assert_eq!(h.doc.tool, Some(Tool::Freehand));
+    let points = [
+        pos2(30.0, 30.0),
+        pos2(90.0, 30.0),
+        pos2(90.0, 80.0),
+        pos2(45.0, 80.0),
+        pos2(45.0, 130.0),
+        pos2(160.0, 130.0),
+        pos2(160.25, 130.0),
+    ];
+    let screen = points.map(|p| h.at(p.x, p.y));
+    h.frame(vec![
+        Event::PointerMoved(h.at(10.0, 10.0)), // Before the press: not ink.
+        pointer_button(screen[0], PointerButton::Primary, true),
+        Event::PointerMoved(screen[1]),
+        Event::PointerMoved(screen[2]),
+    ]);
+    let Some(Drag::Freehand {
+        points: sampled,
+        pen,
+        width,
+    }) = &h.doc.drag
+    else {
+        panic!("the pen must start collecting on the press frame");
+    };
+    assert_eq!(sampled.len(), 3);
+    for (sample, expected) in sampled.iter().zip(&points) {
+        assert!(
+            sample.distance(*expected) < 0.001,
+            "{sample:?} != {expected:?}"
+        );
+    }
+    assert_eq!((*pen, *width), (Pen::Green, 8));
+    assert!(h.marks().is_empty());
+    h.frame(vec![
+        Event::PointerMoved(screen[3]),
+        Event::PointerMoved(screen[4]),
+    ]);
+    assert!(h.marks().is_empty());
+    h.frame(vec![
+        Event::PointerMoved(screen[5]),
+        // The final location is kept even below the normal sampling distance.
+        pointer_button(screen[6], PointerButton::Primary, false),
+        Event::PointerMoved(h.at(300.0, 180.0)), // After the release: not ink.
+    ]);
+    assert!(h.doc.drag.is_none());
+    assert_eq!(h.marks().len(), 1);
+    let mark = h.mark(0);
+    assert!(matches!(mark.kind, Kind::Freehand(_)));
+    points_near(&mark, &points);
+    assert_eq!(style(&mark), (Pen::Green, 8));
+    assert_eq!(h.selected(), None);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(h.marks().is_empty());
+    assert!(
+        !h.doc.editor().unwrap().can_undo(),
+        "one undo for the whole path"
+    );
+    h.key(Key::Y, Modifiers::CTRL);
+    assert_eq!(h.mark(0), mark);
+
+    // A quick stroke can also arrive entirely between two rendered frames.
+    let quick = [
+        pos2(240.0, 30.0),
+        pos2(300.0, 30.0),
+        pos2(300.0, 80.0),
+        pos2(340.0, 80.0),
+    ];
+    let screen = quick.map(|p| h.at(p.x, p.y));
+    h.frame(vec![
+        Event::PointerMoved(screen[0]),
+        pointer_button(screen[0], PointerButton::Primary, true),
+        Event::PointerMoved(screen[1]),
+        Event::PointerMoved(screen[2]),
+        pointer_button(screen[3], PointerButton::Primary, false),
+    ]);
+    assert_eq!(h.marks().len(), 2, "a whole gesture batched into one frame");
+    points_near(&h.mark(1), &quick);
+    h.key(Key::Z, Modifiers::CTRL);
+    assert_eq!(h.doc.editor().unwrap().marks(), &[mark]);
+    h.key(Key::P, Modifiers::NONE);
+    assert_eq!(h.doc.tool, None);
+}
+
+#[test]
+fn drawing_previews_are_not_committed_or_saved_before_release() {
+    for (name, key) in [("pen", Key::P), ("arrow", Key::A)] {
+        let mut h = Harness::open_stored(&format!("drawing-preview-{name}"), None);
+        h.key(key, Modifiers::NONE);
+        let (a, b, tip) = (h.at(50.0, 40.0), h.at(150.0, 90.0), h.at(180.0, 120.0));
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.button(a, PointerButton::Primary, true);
+        h.frame(vec![Event::PointerMoved(b)]);
+        assert!(h.doc.drag.is_some());
+        assert!(h.marks().is_empty());
+        assert!(!h.doc.editor().unwrap().can_undo());
+        h.saved();
+        assert!(!h.marks_file().exists(), "{name}: no preview on disk");
+        assert!(!h.doc.is_dirty() && !h.doc.is_saving());
+        assert!(h.doc.drag.is_some(), "flushing must not finish a gesture");
+        h.button(tip, PointerButton::Primary, false);
+        assert_eq!(h.marks().len(), 1);
+        h.saved();
+        let saved = marks::parse(&std::fs::read_to_string(h.marks_file()).unwrap()).unwrap();
+        assert_eq!(saved.marks, [h.mark(0)]);
+        let expected = if key == Key::P {
+            vec![pos2(50.0, 40.0), pos2(150.0, 90.0), pos2(180.0, 120.0)]
+        } else {
+            vec![pos2(50.0, 40.0), pos2(180.0, 120.0)]
+        };
+        points_near(&h.mark(0), &expected);
+    }
+}
+
+#[test]
+fn drawing_pen_clicks_make_dots_or_select_but_drags_over_unselected_marks_draw() {
+    let mut h = Harness::open("drawing-dot-select");
+    h.draw_one();
+    let highlight = h.mark(0);
+    h.key(Key::P, Modifiers::NONE);
+    h.click(h.at(100.0, 60.0));
+    assert_eq!(h.selected(), Some(0));
+    assert_eq!(
+        h.marks().len(),
+        1,
+        "selecting a highlight must not leave a dot"
+    );
+    h.key(Key::Escape, Modifiers::NONE);
+    let path = [pos2(60.0, 50.0), pos2(100.0, 110.0), pos2(200.0, 110.0)];
+    h.stroke(&path);
+    assert_eq!(h.marks().len(), 2);
+    assert_eq!(h.mark(0), highlight, "the unselected mark was not moved");
+    points_near(&h.mark(1), &path);
+    assert_eq!(h.selected(), None);
+    h.click(h.at(150.0, 110.0));
+    assert_eq!(h.selected(), Some(1));
+    assert_eq!(
+        h.marks().len(),
+        2,
+        "selecting a stroke must not leave a dot"
+    );
+    h.key(Key::Escape, Modifiers::NONE);
+    h.click(h.at(320.0, 160.0));
+    assert_eq!(h.marks().len(), 3);
+    points_near(&h.mark(2), &[pos2(320.0, 160.0)]);
+    h.click(h.at(320.0, 160.0));
+    assert_eq!(h.selected(), Some(2));
+    assert_eq!(h.marks().len(), 3, "a second click selects the dot");
+    h.drag(
+        h.at(320.0, 160.0),
+        h.at(340.0, 170.0),
+        PointerButton::Primary,
+    );
+    assert_eq!(h.marks().len(), 3);
+    points_near(&h.mark(2), &[pos2(340.0, 170.0)]);
+    h.key(Key::Z, Modifiers::CTRL);
+    points_near(&h.mark(2), &[pos2(320.0, 160.0)]);
+}
+
+#[test]
+fn drawing_escape_and_undo_cancel_and_swallow_the_rest_of_the_gesture() {
+    for (name, key, tool) in [
+        ("pen", Key::P, Tool::Freehand),
+        ("arrow", Key::A, Tool::Arrow),
+    ] {
+        let mut h = Harness::open(&format!("drawing-cancel-{name}"));
+        h.key(key, Modifiers::NONE);
+        h.stroke(&[pos2(50.0, 40.0), pos2(150.0, 80.0)]);
+        let kept = h.mark(0);
+        for (moved, move_after_cancel) in [(false, false), (false, true), (true, true)] {
+            if !moved && tool == Tool::Arrow {
+                continue; // Unlike the pen, an arrow starts once the pointer drags.
+            }
+            let a = h.at(220.0, 80.0);
+            h.frame(vec![Event::PointerMoved(a)]);
+            h.button(a, PointerButton::Primary, true);
+            if moved {
+                h.frame(vec![Event::PointerMoved(h.at(260.0, 110.0))]);
+            }
+            assert!(h.doc.drag.is_some());
+            h.key(Key::Escape, Modifiers::NONE);
+            assert!(h.doc.drag.is_none());
+            assert!(h.doc.swallow);
+            let release = if move_after_cancel {
+                h.frame(vec![Event::PointerMoved(h.at(300.0, 140.0))]);
+                assert!(
+                    h.doc.drag.is_none(),
+                    "a cancelled press cannot restart a drag"
+                );
+                h.at(320.0, 150.0)
+            } else {
+                a // Still an egui click: its release must not leave a dot either.
+            };
+            h.button(release, PointerButton::Primary, false);
+            assert!(!h.doc.swallow);
+            assert_eq!(h.doc.tool, Some(tool));
+            assert_eq!(h.doc.editor().unwrap().marks(), std::slice::from_ref(&kept));
+        }
+        let a = h.at(220.0, 80.0);
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.button(a, PointerButton::Primary, true);
+        h.frame(vec![Event::PointerMoved(h.at(260.0, 110.0))]);
+        h.key(Key::Z, Modifiers::CTRL);
+        assert!(h.doc.drag.is_none());
+        assert!(
+            h.marks().is_empty(),
+            "undo acts on the previous completed stroke"
+        );
+        h.frame(vec![Event::PointerMoved(h.at(300.0, 140.0))]);
+        h.button(h.at(320.0, 150.0), PointerButton::Primary, false);
+        assert!(
+            h.marks().is_empty(),
+            "undo must also swallow the pending release"
+        );
+        h.key(Key::Y, Modifiers::CTRL);
+        assert_eq!(h.doc.editor().unwrap().marks(), &[kept]);
+    }
+}
+
+#[test]
+fn drawing_starts_only_inside_the_image_and_clamps_an_inside_drag_at_its_edge() {
+    for (name, key) in [("pen", Key::P), ("arrow", Key::A)] {
+        let mut h = Harness::open(&format!("drawing-outside-{name}"));
+        h.key(key, Modifiers::NONE);
+        for from in [
+            pos2(-30.0, 100.0),
+            pos2(430.0, 100.0),
+            pos2(200.0, -30.0),
+            pos2(200.0, 230.0),
+        ] {
+            h.click(h.at(from.x, from.y));
+            h.drag(
+                h.at(from.x, from.y),
+                h.at(200.0, 100.0),
+                PointerButton::Primary,
+            );
+            assert!(
+                h.marks().is_empty(),
+                "{name}: a press at {from:?} is outside"
+            );
+            assert!(h.doc.drag.is_none());
+        }
+        h.stroke(&[pos2(350.0, 150.0), pos2(450.0, 250.0)]);
+        assert_eq!(h.marks().len(), 1);
+        points_near(&h.mark(0), &[pos2(350.0, 150.0), pos2(400.0, 200.0)]);
+    }
+}
+
+#[test]
+fn drawing_arrows_keep_tail_to_release_tip_in_all_quadrants_and_on_both_axes() {
+    let mut h = Harness::open("drawing-arrow-directions");
+    h.key(Key::A, Modifiers::NONE);
+    assert_eq!(h.doc.tool, Some(Tool::Arrow));
+    let tail = pos2(200.0, 100.0);
+    for delta in [
+        vec2(90.0, 60.0),
+        vec2(-90.0, 60.0),
+        vec2(90.0, -60.0),
+        vec2(-90.0, -60.0),
+        vec2(90.0, 0.0),
+        vec2(-90.0, 0.0),
+        vec2(0.0, 60.0),
+        vec2(0.0, -60.0),
+    ] {
+        let tip = tail + delta;
+        let a = h.at(tail.x, tail.y);
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.button(a, PointerButton::Primary, true);
+        h.frame(vec![Event::PointerMoved(
+            h.at(tail.x + delta.x * 0.5, tail.y + delta.y * 0.5),
+        )]);
+        // No PointerMoved at the tip: the button-up event is authoritative.
+        h.button(h.at(tip.x, tip.y), PointerButton::Primary, false);
+        assert_eq!(h.marks().len(), 1, "direction {delta:?}");
+        assert!(matches!(h.mark(0).kind, Kind::Arrow(_)));
+        points_near(&h.mark(0), &[tail, tip]);
+        assert_eq!(h.selected(), None);
+        h.key(Key::Z, Modifiers::CTRL);
+        assert!(h.marks().is_empty());
+    }
+    h.key(Key::A, Modifiers::NONE);
+    assert_eq!(h.doc.tool, None);
+}
+
+#[test]
+fn a_batched_arrow_stops_at_release_not_subsequent_pointer_motion() {
+    let mut h = Harness::open("drawing-quick-arrow");
+    h.key(Key::A, Modifiers::NONE);
+    let (a, b) = (h.at(60.0, 40.0), h.at(250.0, 140.0));
+    h.frame(vec![
+        Event::PointerMoved(a),
+        pointer_button(a, PointerButton::Primary, true),
+        Event::PointerMoved(h.at(150.0, 80.0)),
+        pointer_button(b, PointerButton::Primary, false),
+        Event::PointerMoved(h.at(320.0, 180.0)),
+    ]);
+    assert_eq!(h.marks().len(), 1);
+    points_near(&h.mark(0), &[pos2(60.0, 40.0), pos2(250.0, 140.0)]);
+}
+
+#[test]
+fn a_pen_click_with_small_motion_does_not_move_or_resize_the_selection() {
+    let mut h = Harness::open("drawing-click-jitter");
+    h.draw_one();
+    h.click(h.at(100.0, 60.0));
+    let original = h.mark(0);
+    h.key(Key::P, Modifiers::NONE);
+    for p in [pos2(100.0, 60.0), pos2(150.0, 80.0)] {
+        let a = h.at(p.x, p.y);
+        h.frame(vec![Event::PointerMoved(a)]);
+        h.button(a, PointerButton::Primary, true);
+        assert!(h.doc.drag.is_none());
+        h.button(a + vec2(-1.0, -1.0), PointerButton::Primary, false);
+        assert_eq!(h.marks().len(), 1);
+        assert_eq!(h.mark(0), original);
+    }
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(h.marks().is_empty(), "the clicks added no history");
+}
+
+#[test]
+fn short_arrow_handles_choose_the_nearest_endpoint() {
+    let mut h = Harness::open("drawing-short-handles");
+    h.key(Key::A, Modifiers::NONE);
+    h.stroke(&[pos2(100.0, 60.0), pos2(160.0, 60.0)]);
+    // Both handles fall within the same hit radius after shortening.
+    let arrow = tools::arrow(
+        pos2(100.0, 60.0),
+        pos2(104.0, 60.0),
+        IMAGE,
+        4.0,
+        Pen::Red,
+        2,
+    )
+    .unwrap();
+    h.doc.editor_mut().unwrap().change(0, arrow);
+    h.click(h.at(102.0, 60.0));
+    assert_eq!(h.selected(), Some(0));
+    let at = h.doc.placement(h.viewport, 1.0).unwrap();
+    assert_eq!(
+        h.doc.handle_at(&at, h.at(100.0, 60.0)),
+        Some((0, Handle::Start))
+    );
+    assert_eq!(
+        h.doc.handle_at(&at, h.at(104.0, 60.0)),
+        Some((0, Handle::End))
+    );
+    h.drag(h.at(104.0, 60.0), h.at(180.0, 90.0), PointerButton::Primary);
+    points_near(&h.mark(0), &[pos2(100.0, 60.0), pos2(180.0, 90.0)]);
+}
+
+#[test]
+fn drawing_arrow_minimum_length_is_four_screen_points_at_any_zoom() {
+    let mut h = Harness::open("drawing-arrow-minimum");
+    h.key(Key::A, Modifiers::NONE);
+    for zoom in [1.0, 1.25, 2.0] {
+        h.doc
+            .view
+            .set_zoom(zoom, Vec2::ZERO, IMAGE, h.viewport.size(), 1.0);
+        h.frame(vec![]);
+        for length in [3.5, 4.0] {
+            let a = h.at(200.0, 100.0);
+            h.frame(vec![Event::PointerMoved(a)]);
+            h.button(a, PointerButton::Primary, true);
+            // Establish an egui drag, then come back to the exact length under test.
+            h.frame(vec![Event::PointerMoved(a + vec2(30.0, 0.0))]);
+            h.button(a + vec2(length, 0.0), PointerButton::Primary, false);
+            if length < 4.0 {
+                assert!(h.marks().is_empty(), "{length} screen points at {zoom}x");
+            } else {
+                assert_eq!(h.marks().len(), 1, "{length} screen points at {zoom}x");
+                points_near(
+                    &h.mark(0),
+                    &[pos2(200.0, 100.0), pos2(200.0 + length / zoom, 100.0)],
+                );
+                h.key(Key::Z, Modifiers::CTRL);
+            }
+        }
+    }
+}
+
+#[test]
+fn drawing_arrow_endpoint_handles_work_after_rotation_and_zoom() {
+    for (turns, zoom) in [(0, 1.0), (1, 1.25), (2, 2.0), (3, 1.25)] {
+        let mut h = Harness::open(&format!("drawing-endpoints-{turns}"));
+        edit::set_drawing_pen(true, Pen::Blue);
+        edit::set_width(true, 4);
+        h.key(Key::A, Modifiers::NONE);
+        h.stroke(&[pos2(300.0, 60.0), pos2(100.0, 140.0)]);
+        let original = h.mark(0);
+        h.click(h.at(200.0, 100.0));
+        assert_eq!(h.selected(), Some(0));
+        for _ in 0..turns {
+            h.key(Key::R, Modifiers::NONE);
+        }
+        h.doc.view.set_zoom(
+            zoom,
+            Vec2::ZERO,
+            view::turned(IMAGE, turns),
+            h.viewport.size(),
+            1.0,
+        );
+        h.frame(vec![]);
+        let at = h.doc.placement(h.viewport, 1.0).unwrap();
+        assert!((at.zoom() - zoom).abs() < 0.001);
+        let handles: Vec<_> = at.handles(&original).collect();
+        assert_eq!(handles.len(), 2);
+        for (handle, point) in [
+            (Handle::Start, pos2(300.0, 60.0)),
+            (Handle::End, pos2(100.0, 140.0)),
+        ] {
+            let screen = h.at(point.x, point.y);
+            assert!(
+                handles
+                    .iter()
+                    .any(|(which, p)| *which == handle && p.distance(screen) < 0.01)
+            );
+            assert_eq!(h.doc.handle_at(&at, screen), Some((0, handle)));
+        }
+        h.drag(
+            h.at(300.0, 60.0),
+            h.at(330.0, 160.0),
+            PointerButton::Primary,
+        );
+        points_near(&h.mark(0), &[pos2(330.0, 160.0), pos2(100.0, 140.0)]);
+        let tail_changed = h.mark(0);
+        h.drag(
+            h.at(100.0, 140.0),
+            h.at(130.0, 30.0),
+            PointerButton::Primary,
+        );
+        points_near(&h.mark(0), &[pos2(330.0, 160.0), pos2(130.0, 30.0)]);
+        assert_eq!(style(&h.mark(0)), (Pen::Blue, 4));
+        assert_eq!(h.selected(), Some(0));
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(h.mark(0), tail_changed);
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(h.mark(0), original);
+        h.key(Key::Y, Modifiers::CTRL);
+        assert_eq!(h.mark(0), tail_changed);
+    }
+}
+
+#[test]
+fn drawing_selected_strokes_move_resize_delete_and_walk_history() {
+    let mut h = Harness::open("drawing-stroke-edits");
+    edit::set_drawing_pen(false, Pen::Black);
+    edit::set_width(false, 4);
+    h.key(Key::P, Modifiers::NONE);
+    h.stroke(&[
+        pos2(50.0, 20.0),
+        pos2(100.0, 20.0),
+        pos2(100.0, 60.0),
+        pos2(150.0, 60.0),
+    ]);
+    let original = h.mark(0);
+    h.key(Key::Delete, Modifiers::NONE);
+    assert_eq!(h.marks().len(), 1, "drawing does not select the new stroke");
+    h.click(h.at(75.0, 20.0));
+    assert_eq!(h.selected(), Some(0));
+    h.drag(h.at(75.0, 20.0), h.at(95.0, 50.0), PointerButton::Primary);
+    let moved = h.mark(0);
+    points_near(
+        &moved,
+        &[
+            pos2(70.0, 50.0),
+            pos2(120.0, 50.0),
+            pos2(120.0, 90.0),
+            pos2(170.0, 90.0),
+        ],
+    );
+    assert_eq!(moved.kind, original.kind);
+    h.drag(h.at(170.0, 90.0), h.at(270.0, 90.0), PointerButton::Primary);
+    let resized = h.mark(0);
+    points_near(
+        &resized,
+        &[
+            pos2(70.0, 50.0),
+            pos2(170.0, 50.0),
+            pos2(170.0, 130.0),
+            pos2(270.0, 130.0),
+        ],
+    );
+    assert_eq!(
+        resized.kind, original.kind,
+        "resize keeps the path and pen width"
+    );
+    assert_eq!(h.selected(), Some(0));
+    h.key(Key::Delete, Modifiers::NONE);
+    assert!(h.marks().is_empty());
+    for expected in [&resized, &moved, &original] {
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(&h.mark(0), expected);
+    }
+    h.key(Key::Z, Modifiers::CTRL);
+    assert!(h.marks().is_empty());
+    for expected in [&original, &moved, &resized] {
+        h.key(Key::Y, Modifiers::CTRL);
+        assert_eq!(&h.mark(0), expected);
+    }
+    h.key(Key::Y, Modifiers::CTRL);
+    assert!(h.marks().is_empty());
+}
+
+#[test]
+fn drawing_hits_follow_ink_including_arrowheads_not_the_bounding_box() {
+    for (name, key) in [("pen", Key::P), ("arrow", Key::A)] {
+        let mut h = Harness::open(&format!("drawing-hit-{name}"));
+        edit::set_width(key == Key::A, 4);
+        h.key(Key::H, Modifiers::NONE);
+        h.stroke(&[pos2(30.0, 40.0), pos2(330.0, 170.0)]);
+        let highlight = h.mark(0);
+        h.key(key, Modifiers::NONE);
+        let (path, on_ink, empty) = if key == Key::P {
+            (
+                vec![pos2(60.0, 60.0), pos2(300.0, 60.0), pos2(300.0, 150.0)],
+                pos2(180.0, 60.0),
+                pos2(80.0, 130.0),
+            )
+        } else {
+            (
+                vec![pos2(60.0, 60.0), pos2(300.0, 150.0)],
+                pos2(180.0, 105.0),
+                pos2(80.0, 130.0),
+            )
+        };
+        h.stroke(&path);
+        let drawing = h.mark(1);
+        h.click(h.at(empty.x, empty.y));
+        assert_eq!(
+            h.selected(),
+            Some(0),
+            "empty space in the drawing's box hits the highlight below"
+        );
+        h.click(h.at(on_ink.x, on_ink.y));
+        assert_eq!(h.selected(), Some(1), "the stroke is above the highlight");
+        if key == Key::A {
+            h.key(Key::Escape, Modifiers::NONE);
+            let wing = drawing.drawing_paths()[1][0];
+            h.click(h.at(wing.x, wing.y));
+            assert_eq!(
+                h.selected(),
+                Some(1),
+                "the open arrowhead is selectable too"
+            );
+        }
+        h.stroke(&[empty, pos2(120.0, 145.0)]);
+        assert_eq!(
+            h.marks().len(),
+            3,
+            "dragging empty box space draws, rather than moving the selected stroke"
+        );
+        assert_eq!(h.mark(0), highlight);
+        assert_eq!(h.mark(1), drawing);
+    }
+}
+
+#[test]
+fn drawing_flyouts_open_on_hold_or_right_click_without_toggling_and_dismiss_cleanly() {
+    let mut h = Harness::open("drawing-flyout-open");
+    h.show_drawing_toolbar();
+    for (arrow, key, tool) in [(false, Key::P, Tool::Freehand), (true, Key::A, Tool::Arrow)] {
+        h.key(key, Modifiers::NONE);
+        let button = h.drawing_buttons[arrow as usize].center();
+        h.frame(vec![Event::PointerMoved(button)]);
+        h.button(button, PointerButton::Primary, true);
+        h.time += 0.15;
+        h.frame(vec![]);
+        assert!(!h.panel_open(arrow), "a short hold is not a menu yet");
+        h.time += 0.2;
+        h.frame(vec![]);
+        assert!(h.panel_open(arrow));
+        h.time += 0.5;
+        h.frame(vec![]);
+        h.button(button, PointerButton::Primary, false);
+        assert!(
+            h.panel_open(arrow),
+            "the long-press release does not close the panel"
+        );
+        assert_eq!(
+            h.doc.tool,
+            Some(tool),
+            "the release does not toggle the active tool"
+        );
+        h.key(Key::Escape, Modifiers::NONE);
+        assert!(!h.panel_open(arrow));
+        assert_eq!(h.doc.tool, Some(tool), "Esc closes only the panel");
+
+        h.open_drawing_panel(arrow);
+        assert_eq!(h.doc.tool, Some(tool), "right-click does not toggle either");
+        let outside = h.at(200.0, 100.0);
+        h.frame(vec![Event::PointerMoved(outside)]);
+        h.button(outside, PointerButton::Primary, true);
+        assert!(
+            !h.panel_open(arrow),
+            "outside press closes without waiting for release"
+        );
+        h.button(outside, PointerButton::Primary, false);
+        assert!(h.marks().is_empty());
+        assert_eq!(h.doc.tool, Some(tool));
+
+        h.click(button);
+        assert_eq!(h.doc.tool, None, "ordinary clicks still toggle");
+        h.button(button, PointerButton::Primary, true);
+        h.time += 0.4;
+        h.frame(vec![]);
+        h.button(button, PointerButton::Primary, false);
+        assert!(h.panel_open(arrow));
+        assert_eq!(h.doc.tool, None, "holding an inactive tool does not arm it");
+        h.key(Key::Escape, Modifiers::NONE);
+        assert!(!h.panel_open(arrow));
+    }
+}
+
+#[test]
+fn drawing_flyout_colour_and_width_edit_only_the_matching_selected_kind_with_undo() {
+    let mut h = Harness::open("drawing-flyout-selection");
+    edit::set_drawing_pen(false, Pen::Red);
+    edit::set_width(false, 4);
+    edit::set_drawing_pen(true, Pen::Blue);
+    edit::set_width(true, 2);
+    h.draw_one();
+    h.write(270.0, 10.0, "Hi");
+    h.key(Key::Escape, Modifiers::NONE);
+    h.key(Key::P, Modifiers::NONE);
+    h.stroke(&[pos2(30.0, 110.0), pos2(100.0, 110.0), pos2(100.0, 160.0)]);
+    h.key(Key::A, Modifiers::NONE);
+    h.stroke(&[pos2(210.0, 110.0), pos2(340.0, 160.0)]);
+    assert_eq!(h.marks().len(), 4);
+    h.show_drawing_toolbar();
+    let hits = [
+        pos2(100.0, 60.0),
+        pos2(275.0, 15.0),
+        pos2(65.0, 110.0),
+        pos2(275.0, 135.0),
+    ];
+    for (arrow, target, pen, width) in [(false, 2, Pen::Green, 8), (true, 3, Pen::White, 12)] {
+        let before = h.doc.editor().unwrap().marks().to_vec();
+        h.key(Key::Z, Modifiers::CTRL);
+        let previous = h.doc.editor().unwrap().marks().to_vec();
+        h.key(Key::Y, Modifiers::CTRL);
+        for wrong_kind in [0, 1, if arrow { 2 } else { 3 }] {
+            let hit = hits[wrong_kind];
+            h.click(h.at(hit.x, hit.y));
+            assert_eq!(h.selected(), Some(wrong_kind));
+            h.choose_drawing_style(arrow, pen, width);
+            assert_eq!(
+                h.doc.editor().unwrap().marks(),
+                before,
+                "a different selected kind is untouched"
+            );
+            h.key(Key::Escape, Modifiers::NONE);
+            assert_eq!(
+                h.selected(),
+                Some(wrong_kind),
+                "Esc dismissed only the panel"
+            );
+        }
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(
+            h.doc.editor().unwrap().marks(),
+            previous,
+            "wrong-kind choices add no undo entries"
+        );
+        h.key(Key::Y, Modifiers::CTRL);
+        assert_eq!(h.doc.editor().unwrap().marks(), before);
+
+        let hit = hits[target];
+        h.click(h.at(hit.x, hit.y));
+        assert_eq!(h.selected(), Some(target));
+        h.open_drawing_panel(arrow);
+        h.click(h.colour_choice(pen));
+        assert!(h.panel_open(arrow));
+        let recoloured = h.mark(target);
+        assert_eq!(style(&recoloured), (pen, style(&before[target]).1));
+        points_near(&recoloured, &before[target].drawing_points());
+        h.click(h.width_choice(width));
+        assert!(h.panel_open(arrow));
+        let restyled = h.mark(target);
+        assert_eq!(style(&restyled), (pen, width));
+        points_near(&restyled, &before[target].drawing_points());
+        for (i, mark) in before.iter().enumerate() {
+            if i != target {
+                assert_eq!(h.mark(i), *mark);
+            }
+        }
+        assert_eq!(
+            h.doc.tool,
+            Some(if arrow { Tool::Arrow } else { Tool::Freehand })
+        );
+        assert_eq!(h.selected(), Some(target));
+        h.key(Key::Escape, Modifiers::NONE);
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(h.mark(target), recoloured, "undo width");
+        h.key(Key::Z, Modifiers::CTRL);
+        assert_eq!(h.doc.editor().unwrap().marks(), before, "undo colour");
+        h.key(Key::Y, Modifiers::CTRL);
+        h.key(Key::Y, Modifiers::CTRL);
+        assert_eq!(h.mark(target), restyled);
+        assert_eq!(edit::current_drawing_pen(arrow), pen);
+        assert_eq!(edit::current_width(arrow), width);
+    }
+}
+
+#[test]
+fn drawing_tools_remember_independent_colours_and_widths_for_new_marks() {
+    let mut h = Harness::open("drawing-preferences");
+    edit::set_drawing_pen(false, Pen::Red);
+    edit::set_width(false, 4);
+    edit::set_drawing_pen(true, Pen::Blue);
+    edit::set_width(true, 2);
+    let (ink, text_pen) = (edit::current_ink(), edit::current_pen());
+    h.show_drawing_toolbar();
+    h.choose_drawing_style(false, Pen::Green, 8);
+    assert_eq!(h.doc.tool, Some(Tool::Freehand));
+    assert_eq!(
+        (edit::current_drawing_pen(true), edit::current_width(true)),
+        (Pen::Blue, 2)
+    );
+    h.key(Key::Escape, Modifiers::NONE);
+    h.choose_drawing_style(true, Pen::Black, 12);
+    assert_eq!(h.doc.tool, Some(Tool::Arrow));
+    h.key(Key::Escape, Modifiers::NONE);
+    assert_eq!(
+        (edit::current_drawing_pen(false), edit::current_width(false)),
+        (Pen::Green, 8)
+    );
+    assert_eq!((edit::current_ink(), edit::current_pen()), (ink, text_pen));
+    for (key, value) in [
+        ("image.freehand.pen", "green"),
+        ("image.freehand.width", "8"),
+        ("image.arrow.pen", "black"),
+        ("image.arrow.width", "12"),
+    ] {
+        assert_eq!(
+            whir_core::settings::get_str(key).as_deref(),
+            Some(value),
+            "{key}"
+        );
+    }
+    h.reopen();
+    h.key(Key::P, Modifiers::NONE);
+    h.stroke(&[pos2(40.0, 40.0), pos2(140.0, 80.0)]);
+    h.key(Key::A, Modifiers::NONE);
+    h.stroke(&[pos2(220.0, 140.0), pos2(340.0, 100.0)]);
+    h.key(Key::P, Modifiers::NONE);
+    h.click(h.at(60.0, 160.0));
+    assert_eq!(h.marks().len(), 3);
+    assert!(matches!(h.mark(0).kind, Kind::Freehand(_)));
+    assert!(matches!(h.mark(1).kind, Kind::Arrow(_)));
+    assert_eq!(style(&h.mark(0)), (Pen::Green, 8));
+    assert_eq!(style(&h.mark(1)), (Pen::Black, 12));
+    assert_eq!(style(&h.mark(2)), (Pen::Green, 8));
+}
+
+#[test]
+fn drawing_mixed_capture_marks_reopen_and_put_ink_in_copies_and_exports() {
+    let mut h = Harness::open_stored("drawing-mixed-stored", None);
+    let original = std::fs::read(h.path()).unwrap();
+    h.stroke(&[pos2(20.0, 20.0), pos2(120.0, 50.0)]);
+    h.write(20.0, 120.0, "Mixed marks");
+    h.key(Key::Escape, Modifiers::NONE);
+    edit::set_drawing_pen(false, Pen::Green);
+    edit::set_width(false, 8);
+    h.key(Key::P, Modifiers::NONE);
+    h.stroke(&[pos2(160.0, 30.0), pos2(160.0, 90.0), pos2(240.0, 90.0)]);
+    edit::set_drawing_pen(true, Pen::Blue);
+    edit::set_width(true, 8);
+    h.key(Key::A, Modifiers::NONE);
+    h.stroke(&[pos2(240.0, 150.0), pos2(360.0, 150.0)]);
+    let expected = h.doc.editor().unwrap().marks().to_vec();
+    assert_eq!(expected.len(), 4);
+    assert!(matches!(expected[0].kind, Kind::Highlight(_)));
+    assert!(matches!(expected[1].kind, Kind::Text(_)));
+    assert!(matches!(expected[2].kind, Kind::Freehand(_)));
+    assert!(matches!(expected[3].kind, Kind::Arrow(_)));
+    h.saved();
+    let saved = marks::parse(&std::fs::read_to_string(h.marks_file()).unwrap()).unwrap();
+    assert_eq!(saved.size, [400, 200]);
+    assert_eq!(saved.marks, expected);
+    assert!(saved.other.is_empty());
+    h.reopen();
+    assert_eq!(h.doc.editor().unwrap().marks(), expected);
+    assert!(!h.doc.is_dirty() && !h.doc.is_saving());
+    assert_eq!(h.doc.save_error(), None);
+    h.key(Key::P, Modifiers::NONE);
+    h.click(h.at(160.0, 60.0));
+    assert_eq!(h.selected(), Some(2), "the saved stroke is still editable");
+    h.key(Key::R, Modifiers::NONE);
+    h.frame(vec![Event::Copy]);
+    let dib = h.copied();
+    // A bent pen segment, the arrow shaft, and a wing away from the shaft.
+    let ink = [
+        (160, 60, Pen::Green),
+        (300, 150, Pen::Blue),
+        (343, 140, Pen::Blue),
+    ];
+    for (x, y, pen) in ink {
+        let [r, g, b] = pen.rgb();
+        assert_eq!(
+            dib_pixel(&dib, 199 - y, x),
+            ((200, 400), [b, g, r, 255]),
+            "copied ({x}, {y})"
+        );
+    }
+    assert_eq!(dib_pixel(&dib, 0, 0).1, [255; 4]);
+    let dest = h.dir.join("drawing copy.png");
+    assert!(matches!(h.doc.save_as(dest.clone()), SaveResult::Started));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.doc.is_saving() {
+        assert!(Instant::now() < deadline, "export timed out");
+        std::thread::sleep(Duration::from_millis(2));
+        h.doc.poll();
+    }
+    let exported = decode::decode(&dest, None).unwrap();
+    assert_eq!((exported.width, exported.height), (200, 400));
+    for (x, y, pen) in ink {
+        let [r, g, b] = pen.rgb();
+        let i = x * exported.stride + (199 - y) * 4;
+        assert_eq!(
+            &exported.pixels[i..i + 4],
+            [b, g, r, 255],
+            "exported ({x}, {y})"
+        );
+    }
+    assert_eq!(&exported.pixels[..4], [255; 4]);
+    assert_eq!(
+        std::fs::read(h.path()).unwrap(),
+        original,
+        "the screenshot is never rewritten"
+    );
+    assert_eq!(
+        h.doc.editor().unwrap().marks(),
+        expected,
+        "copy/export do not alter marks"
+    );
 }

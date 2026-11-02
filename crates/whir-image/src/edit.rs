@@ -1,9 +1,9 @@
 //! Editing the marks on one image (add, move, resize, remove, with undo), and
-//! the tools' current ink and pen.
+//! the tools' current inks, pens and stroke widths.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use whir_core::marks::{Ink, Mark, MarkSet, Pen};
+use whir_core::marks::{Drawing, Ink, Mark, MarkSet, Pen};
 use whir_core::settings;
 
 #[derive(Clone, Debug)]
@@ -194,18 +194,34 @@ impl Editor {
 
     /// The topmost mark over image pixel (`x`, `y`).
     pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
-        self.marks.iter().rposition(|m| m.contains(x, y))
+        self.hit_with_tolerance(x, y, 0.0)
+    }
+
+    /// Hit drawing strokes (including arrowheads) with extra reach in image
+    /// pixels. Highlights and text retain their rectangular hit regions.
+    pub fn hit_with_tolerance(&self, x: f32, y: f32, tolerance: f32) -> Option<usize> {
+        self.marks.iter().rposition(|m| m.hit(x, y, tolerance))
     }
 }
 
-// --- the ink and the pen ------------------------------------------------------
+// --- the ink, pens and widths ------------------------------------------------
 
 const INK_KEY: &str = "image.highlight.ink";
 const PEN_KEY: &str = "image.text.pen";
+const DRAWING_PEN_KEYS: [&str; 2] = ["image.freehand.pen", "image.arrow.pen"];
+const WIDTH_KEYS: [&str; 2] = ["image.freehand.width", "image.arrow.width"];
 const UNSET: u8 = u8::MAX;
+const UNSET_WIDTH: u32 = 0;
+const DEFAULT_WIDTH: u32 = 4;
+
+/// The toolbar's stroke widths, in image pixels.
+pub const WIDTHS: [u32; 4] = [2, 4, 8, 12];
 /// Shared by every image tab, and remembered across runs.
 static INK: AtomicU8 = AtomicU8::new(UNSET);
 static PEN: AtomicU8 = AtomicU8::new(UNSET);
+// Indexed by `arrow as usize`: freehand and arrows remember independent styles.
+static DRAWING_PENS: [AtomicU8; 2] = [const { AtomicU8::new(UNSET) }; 2];
+static DRAWING_WIDTHS: [AtomicU32; 2] = [const { AtomicU32::new(UNSET_WIDTH) }; 2];
 
 pub fn current_ink() -> Ink {
     Ink::ALL
@@ -231,11 +247,42 @@ pub fn set_pen(pen: Pen) {
     settings::set_str(PEN_KEY, pen.name());
 }
 
-/// Read the remembered ink and pen. Reads the settings file the first time,
-/// so this is called from a decode worker, never from the UI's first frame.
+pub fn current_drawing_pen(arrow: bool) -> Pen {
+    Pen::ALL
+        .get(DRAWING_PENS[arrow as usize].load(Ordering::Relaxed) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+pub fn set_drawing_pen(arrow: bool, pen: Pen) {
+    DRAWING_PENS[arrow as usize].store(pen as u8, Ordering::Relaxed);
+    settings::set_str(DRAWING_PEN_KEYS[arrow as usize], pen.name());
+}
+
+pub fn current_width(arrow: bool) -> u32 {
+    match DRAWING_WIDTHS[arrow as usize].load(Ordering::Relaxed) {
+        UNSET_WIDTH => DEFAULT_WIDTH,
+        width => width,
+    }
+}
+
+pub fn set_width(arrow: bool, width: u32) {
+    let width = width.clamp(Drawing::MIN_WIDTH, Drawing::MAX_WIDTH);
+    DRAWING_WIDTHS[arrow as usize].store(width, Ordering::Relaxed);
+    settings::set_str(WIDTH_KEYS[arrow as usize], &width.to_string());
+}
+
+/// Read the remembered inks, pens and widths. Reads the settings file the
+/// first time, so this is called from a decode worker, never the UI's first frame.
 pub fn load_choices() {
     load(&INK, INK_KEY, |name| Ink::from_name(name).map(|i| i as u8));
     load(&PEN, PEN_KEY, |name| Pen::from_name(name).map(|p| p as u8));
+    for i in 0..DRAWING_PENS.len() {
+        load(&DRAWING_PENS[i], DRAWING_PEN_KEYS[i], |name| {
+            Pen::from_name(name).map(|p| p as u8)
+        });
+        load_width(&DRAWING_WIDTHS[i], WIDTH_KEYS[i]);
+    }
 }
 
 fn load(slot: &AtomicU8, key: &str, index: impl FnOnce(&str) -> Option<u8>) {
@@ -247,9 +294,31 @@ fn load(slot: &AtomicU8, key: &str, index: impl FnOnce(&str) -> Option<u8>) {
     let _ = slot.compare_exchange(UNSET, remembered, Ordering::Relaxed, Ordering::Relaxed);
 }
 
+fn remembered_width(value: Option<&str>) -> u32 {
+    value
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|width| width.clamp(Drawing::MIN_WIDTH, Drawing::MAX_WIDTH))
+        .unwrap_or(DEFAULT_WIDTH)
+}
+
+fn load_width(slot: &AtomicU32, key: &str) {
+    if slot.load(Ordering::Relaxed) != UNSET_WIDTH {
+        return;
+    }
+    let remembered = remembered_width(settings::get_str(key).as_deref());
+    // Unless the user picked one meanwhile.
+    let _ = slot.compare_exchange(
+        UNSET_WIDTH,
+        remembered,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use whir_core::marks::{Kind, Text};
+    use egui::pos2;
+    use whir_core::marks::{self, Kind, Text};
 
     use super::*;
 
@@ -308,6 +377,80 @@ mod tests {
         e.redo();
         e.redo();
         assert_eq!(e.marks(), [mark(0), text("Hello")]);
+    }
+
+    #[test]
+    fn drawings_undo_redo_and_round_trip_through_the_saver() {
+        let stroke = Mark::drawing(
+            &[pos2(10.0, 20.0), pos2(30.0, 40.0), pos2(20.0, 60.0)],
+            Pen::Black,
+            256,
+            false,
+        )
+        .unwrap();
+        let arrow =
+            Mark::drawing(&[pos2(90.0, 80.0), pos2(40.0, 30.0)], Pen::Blue, 12, true).unwrap();
+        let mut e = Editor::stored(Some(MarkSet {
+            size: [400, 200],
+            other: vec!["future-mark untouched".to_owned()],
+            ..MarkSet::default()
+        }));
+        e.add(stroke.clone());
+        e.add(arrow.clone());
+        let moved = Mark {
+            x: 20,
+            y: 30,
+            ..stroke.clone()
+        };
+        let turned =
+            Mark::drawing(&[pos2(90.0, 80.0), pos2(90.0, 150.0)], Pen::Green, 8, true).unwrap();
+        e.selected = Some(1);
+        e.change(0, moved.clone());
+        e.change(1, turned.clone());
+        assert_eq!(e.selected, Some(1));
+        e.remove(0);
+        assert_eq!(e.marks(), std::slice::from_ref(&turned));
+        assert!(e.undo());
+        assert_eq!(e.marks(), [moved.clone(), turned.clone()]);
+        assert!(e.undo());
+        assert!(e.undo());
+        assert_eq!(e.marks(), [stroke, arrow]);
+        assert!(e.redo());
+        assert!(e.redo());
+        assert_eq!(e.marks(), [moved, turned]);
+
+        let saved = e.take_unsaved().unwrap();
+        let parsed = marks::parse(&marks::serialize(&saved)).unwrap();
+        assert_eq!(parsed, saved);
+        let loaded = Editor::stored(Some(parsed));
+        assert_eq!(loaded.marks(), e.marks());
+        assert_eq!(loaded.size, [400, 200]);
+        assert_eq!(loaded.other, ["future-mark untouched"]);
+        assert!(!loaded.can_undo());
+        assert!(!loaded.unsaved());
+        assert!(e.take_unsaved().is_none());
+    }
+
+    #[test]
+    fn remembered_widths_default_reject_or_clamp_without_truncating() {
+        assert_eq!(WIDTHS, [2, 4, 8, 12]);
+        assert_eq!(remembered_width(None), 4);
+        for value in ["", "invalid", "-1", "4.5", "4294967296"] {
+            assert_eq!(remembered_width(Some(value)), 4);
+        }
+        for (value, width) in [
+            ("0", 1),
+            ("1", 1),
+            ("200", 200),
+            ("256", 256),
+            ("257", 256),
+            ("4294967295", 256),
+        ] {
+            assert_eq!(remembered_width(Some(value)), width);
+        }
+        for width in WIDTHS {
+            assert_eq!(remembered_width(Some(&width.to_string())), width);
+        }
     }
 
     #[test]
@@ -389,6 +532,29 @@ mod tests {
     }
 
     #[test]
+    fn drawing_hits_use_strokes_tolerance_and_arrowheads_in_stack_order() {
+        let mut e = Editor::default();
+        e.add(Mark::highlight(0, 0, 120, 120, Ink::Yellow));
+        e.add(Mark::drawing(&[pos2(20.0, 20.0), pos2(100.0, 100.0)], Pen::Red, 4, false).unwrap());
+        assert_eq!(e.hit(50.0, 50.0), Some(1));
+        assert_eq!(e.hit(50.0, 70.0), Some(0));
+        assert_eq!(e.hit(50.0, 55.0), Some(0));
+        assert_eq!(e.hit_with_tolerance(50.0, 55.0, 2.0), Some(1));
+
+        let arrow =
+            Mark::drawing(&[pos2(20.0, 40.0), pos2(100.0, 40.0)], Pen::Blue, 4, true).unwrap();
+        let wing = arrow.drawing_paths()[1][0];
+        e.add(arrow);
+        assert_eq!(e.hit(40.0, 40.0), Some(2));
+        assert_eq!(e.hit(wing.x, wing.y), Some(2));
+
+        e.add(Mark::drawing(&[pos2(200.0, 200.0)], Pen::Black, 8, false).unwrap());
+        assert_eq!(e.hit(203.0, 200.0), Some(3));
+        assert_eq!(e.hit(207.0, 200.0), None);
+        assert_eq!(e.hit_with_tolerance(207.0, 200.0, 3.0), Some(3));
+    }
+
+    #[test]
     fn hit_finds_the_topmost_mark() {
         let mut e = Editor::default();
         e.add(mark(0));
@@ -397,5 +563,6 @@ mod tests {
         assert_eq!(e.hit(7.0, 2.0), Some(1));
         assert_eq!(e.hit(14.0, 2.0), Some(1));
         assert_eq!(e.hit(15.0, 2.0), None);
+        assert_eq!(e.hit_with_tolerance(15.0, 2.0, 20.0), None);
     }
 }
