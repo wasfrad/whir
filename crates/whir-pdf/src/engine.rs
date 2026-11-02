@@ -111,7 +111,7 @@ enum Cmd {
 
 struct Engine {
     tx: Sender<Cmd>,
-    /// Set whenever a command is sent: asks the current render to pause.
+    /// Set after an interrupting command is queued: asks the current render to pause.
     interrupt: Arc<AtomicBool>,
 }
 
@@ -131,8 +131,8 @@ fn engine() -> &'static Engine {
 
 fn send(cmd: Cmd) {
     let e = engine();
-    e.interrupt.store(true, Ordering::Release);
     let _ = e.tx.send(cmd);
+    e.interrupt.store(true, Ordering::Release);
 }
 
 /// Send without pausing the current render: text requests never preempt tiles.
@@ -326,6 +326,22 @@ unsafe extern "C" fn need_to_pause(this: *mut ffi::Pause) -> i32 {
     flag.load(Ordering::Acquire) as i32
 }
 
+fn drain_commands(
+    rx: &Receiver<Cmd>,
+    interrupt: &AtomicBool,
+    mut apply: impl FnMut(Cmd),
+) -> TryRecvError {
+    // Clear before draining; acquire the enqueue behind any signal consumed.
+    // A racing command is either handled here or leaves a new pause signal.
+    interrupt.swap(false, Ordering::AcqRel);
+    loop {
+        match rx.try_recv() {
+            Ok(cmd) => apply(cmd),
+            Err(e) => return e,
+        }
+    }
+}
+
 fn run(rx: Receiver<Cmd>, interrupt: Arc<AtomicBool>) {
     let loaded = Api::load().inspect(|api| unsafe { (api.init_library)() });
     let api: Result<&Api, &str> = loaded.as_ref().map_err(String::as_str);
@@ -346,14 +362,11 @@ fn run(rx: Receiver<Cmd>, interrupt: Arc<AtomicBool>) {
                 Err(_) => return,
             }
         }
-        loop {
-            match rx.try_recv() {
-                Ok(cmd) => handle(cmd, api, &mut docs),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
-            }
+        if drain_commands(&rx, &interrupt, |cmd| handle(cmd, api, &mut docs))
+            == TryRecvError::Disconnected
+        {
+            return;
         }
-        interrupt.store(false, Ordering::Release);
 
         let Ok(api) = api else { continue };
         let render_next = |docs: &mut HashMap<u64, OpenDoc>, doc_id: u64| {
@@ -661,16 +674,13 @@ fn render(
         // this tile is still wanted.
         let mut closing = false;
         let mut rewanted = false;
-        while let Ok(cmd) = rx.try_recv() {
-            match cmd {
-                Cmd::Close { doc } if doc == doc_id => closing = true,
-                other => {
-                    rewanted |= matches!(&other, Cmd::Want { doc, .. } if *doc == doc_id);
-                    handle(other, Ok(api), docs);
-                }
+        drain_commands(rx, interrupt, |cmd| match cmd {
+            Cmd::Close { doc } if doc == doc_id => closing = true,
+            other => {
+                rewanted |= matches!(&other, Cmd::Want { doc, .. } if *doc == doc_id);
+                handle(other, Ok(api), docs);
             }
-        }
-        interrupt.store(false, Ordering::Release);
+        });
         if closing {
             unsafe {
                 (api.render_close)(page);
@@ -1000,6 +1010,61 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{LOCKED_PDF, NoTextures, pdfium_lock, test_pdf};
     use super::*;
+
+    #[test]
+    fn interrupt_drain_clears_before_handling() {
+        let (tx, rx) = channel();
+        let interrupt = AtomicBool::new(true);
+        assert!(tx.send(Cmd::Close { doc: 1 }).is_ok());
+        let mut received = 0;
+        let end = drain_commands(&rx, &interrupt, |cmd| {
+            assert!(!interrupt.load(Ordering::Acquire));
+            assert!(matches!(cmd, Cmd::Close { doc: 1 }));
+            received += 1;
+        });
+        assert_eq!(end, TryRecvError::Empty);
+        assert_eq!(received, 1);
+        assert!(!interrupt.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn interrupt_drain_preserves_a_new_signal() {
+        let (tx, rx) = channel();
+        let interrupt = AtomicBool::new(true);
+        assert!(tx.send(Cmd::Close { doc: 1 }).is_ok());
+        let mut received = Vec::new();
+        let end = drain_commands(&rx, &interrupt, |cmd| {
+            let Cmd::Close { doc } = cmd else {
+                panic!("unexpected command");
+            };
+            received.push(doc);
+            if doc == 1 {
+                // Deterministically interleave a sender with the drain.
+                assert!(tx.send(Cmd::Close { doc: 2 }).is_ok());
+                interrupt.store(true, Ordering::Release);
+            }
+        });
+        assert_eq!(end, TryRecvError::Empty);
+        assert_eq!(received, vec![1, 2]);
+        // An extra pause is harmless; clearing here could erase a later send.
+        assert!(interrupt.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn interrupt_drain_reports_disconnect_after_pending_commands() {
+        let (tx, rx) = channel();
+        let interrupt = AtomicBool::new(true);
+        assert!(tx.send(Cmd::Close { doc: 1 }).is_ok());
+        drop(tx);
+        let mut received = 0;
+        let end = drain_commands(&rx, &interrupt, |cmd| {
+            assert!(matches!(cmd, Cmd::Close { doc: 1 }));
+            received += 1;
+        });
+        assert_eq!(end, TryRecvError::Disconnected);
+        assert_eq!(received, 1);
+        assert!(!interrupt.load(Ordering::Acquire));
+    }
 
     #[test]
     fn text_queue_order() {
