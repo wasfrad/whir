@@ -157,6 +157,7 @@ fn run(
             waker.wake();
         }
     }
+    scanner.finish()?;
     publish(rows, offset.max(total), &mut new_checkpoints, true, None);
     Ok(())
 }
@@ -221,6 +222,61 @@ mod tests {
         assert_eq!(index(b"a\nb\n".to_vec()).rows, 2);
         assert_eq!(index(b"a\nb".to_vec()).rows, 2);
         assert_eq!(index(Vec::new()).rows, 0);
+    }
+
+    #[test]
+    fn unbalanced_quote_at_eof_falls_back_to_plain_lines() {
+        for tail_rows in [2, 300_000] {
+            for final_newline in [false, true] {
+                // The fallback must also split earlier, valid multiline fields.
+                let mut data = b"id,note\n0,\"multi\nline\"\n".to_vec();
+                // Publish several checkpoints before the malformed field.
+                for _ in 0..128 {
+                    data.extend_from_slice(b"0,ok\n");
+                }
+                data.extend_from_slice(b"1,\"oops\n");
+                for _ in 0..tail_rows {
+                    data.extend_from_slice(b"2,value\n");
+                }
+                if !final_newline {
+                    data.pop();
+                }
+                let total = data.len() as u64;
+                assert!(total < crate::scan::MAX_QUOTED_FIELD);
+                let checkpoints: Vec<u64> = std::iter::once(0)
+                    .chain(
+                        memchr::memchr_iter(b'\n', &data)
+                            .map(|i| i as u64 + 1)
+                            .filter(|&offset| offset < total),
+                    )
+                    .step_by(BLOCK_ROWS as usize)
+                    .collect();
+                let s = index(data);
+                assert!(
+                    s.quoting_disabled,
+                    "{tail_rows} rows, final newline: {final_newline}"
+                );
+                assert_eq!(s.rows, tail_rows + 132);
+                assert_eq!(s.checkpoints, checkpoints);
+                assert_eq!(s.scanned, total);
+                assert_eq!(s.total, total);
+                assert!(s.done && s.error.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_field_closed_at_eof_keeps_quoting() {
+        for data in [
+            b"id,note\n1,\"multi\nline\"".as_slice(),
+            b"id,note\n1,\"\"",
+            b"id,note\n1,\"say \"\"hi\"\"\"",
+        ] {
+            let s = index(data.to_vec());
+            assert!(!s.quoting_disabled);
+            assert_eq!(s.rows, 2);
+            assert!(s.done && s.error.is_none());
+        }
     }
 
     #[test]

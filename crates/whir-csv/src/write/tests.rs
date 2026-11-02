@@ -158,7 +158,7 @@ fn end_of_file_cases() {
     check_index(&out, &w, &fmt);
     assert_eq!(parse_all(&out, Dialect::default(), 0).len(), 3);
 
-    // An unclosed quote at the end is closed before rows follow it.
+    // An unclosed quote switches to raw lines: preserve it when rows follow.
     let data = b"a\n\"open".to_vec();
     let mut e = Edits::default();
     e.set_base_rows(1);
@@ -167,8 +167,9 @@ fn end_of_file_cases() {
     tx.set_cells([(k[0], ColKey::orig(0), Some("z".into()))]);
     let _ = tx.commit(None, None);
     let fmt = fmt_for(&data, &e.snapshot());
+    assert!(!fmt.quoting);
     let (out, w) = write(&data, e.snapshot(), &fmt);
-    assert_eq!(out, b"a\n\"open\"\nz");
+    assert_eq!(out, b"a\n\"open\nz");
     check_index(&out, &w, &fmt);
 }
 

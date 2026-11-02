@@ -13,8 +13,8 @@ use crate::dialect::Dialect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanError {
-    /// A quoted field grew beyond [`MAX_QUOTED_FIELD`]: the file almost certainly
-    /// has an unbalanced quote. The caller should rescan with quoting off.
+    /// A quoted field reached EOF without closing, or grew beyond
+    /// [`MAX_QUOTED_FIELD`]. The caller should rescan with quoting off.
     Unbalanced,
 }
 
@@ -143,6 +143,16 @@ impl RowScanner {
         }
         Ok(())
     }
+
+    /// Check for an unclosed quoted field after the final chunk.
+    pub fn finish(self) -> Result<(), ScanError> {
+        // At EOF a pending quote closes the field; it cannot start an escape.
+        if self.in_quotes && !self.pending_quote {
+            Err(ScanError::Unbalanced)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +168,7 @@ mod tests {
         for (i, c) in data.chunks(chunk.max(1)).enumerate() {
             s.feed(c, (i * chunk) as u64, |o| out.push(o)).unwrap();
         }
+        s.finish().unwrap();
         out
     }
 
@@ -187,6 +198,38 @@ mod tests {
     #[test]
     fn quoting_off_treats_quotes_as_text() {
         assert_eq!(rows(b"a,\"b\nc\"\nd\n", 1024, false), [5, 8, 10]);
+        assert_eq!(rows(b"a,\"b\nc\n", 1024, false), [5, 7]);
+    }
+
+    #[test]
+    fn eof_quote_state_at_every_chunk_size() {
+        let cases: &[(&[u8], bool)] = &[
+            (b"", true),
+            (b"a,b", true),
+            (b"a,5\"x", true),
+            (b"a,\"\"", true),
+            (b"a,\"last\"", true),
+            (b"a,\"multi\nline\"", true),
+            (b"a,\"say \"\"hi\"\"\"", true),
+            (b"\"", false),
+            (b"a,\"", false),
+            (b"a,\"oops\nnext,row\n", false),
+            (b"a,\"escaped \"\"", false),
+        ];
+        for &(data, balanced) in cases {
+            for chunk in 1..=data.len().max(1) {
+                let mut s = RowScanner::new(Dialect::default());
+                for (i, c) in data.chunks(chunk).enumerate() {
+                    s.feed(c, (i * chunk) as u64, |_| {}).unwrap();
+                }
+                let expected = if balanced {
+                    Ok(())
+                } else {
+                    Err(ScanError::Unbalanced)
+                };
+                assert_eq!(s.finish(), expected, "{data:?}, chunk size {chunk}");
+            }
+        }
     }
 
     #[test]
